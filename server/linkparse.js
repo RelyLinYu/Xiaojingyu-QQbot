@@ -83,10 +83,17 @@ function deepStrings(obj, out = [], depth = 0) {
   return out;
 }
 
-// ---------- 主入口：从一条消息里找出第一个"我们认得的"链接 ----------
-function findLink(msg) {
+// ---------- 主入口：从一条消息里找出**我们认得的**链接 ----------
+//
+// 🆕 返回**数组**（最多 max 个）。
+// 🔴 为什么必须支持多个（2026-09-22 用户实测踩到）：
+//    用户一条消息里贴了**两个**链接（`v.douyin.com/xxx v.kuaishou.com/yyy`），
+//    旧版只解析第一个 → **快手那条被静默丢掉**，用户看到的是
+//    "抖音有卡片没视频、快手干脆没反应"，完全不知道发生了什么。
+//    一条消息贴多个链接是很常见的用法，静默丢弃是最糟的失败方式。
+function findLinks(msg, max = 2) {
   const lp = cfg.policy.linkParse;
-  if (!lp?.enabled || !msg) return null;
+  if (!lp?.enabled || !msg) return [];
 
   const sources = [];
 
@@ -108,15 +115,25 @@ function findLink(msg) {
 
   const blob = sources.join('\n').slice(0, lp.maxTextLen || 2000);
 
+  const out = [];
+  const seen = new Set();
   for (const url of extractUrls(blob)) {
+    if (seen.has(url)) continue;                    // 同一个 URL 只算一次
+    seen.add(url);
     const host = hostOf(url);
     if (!hostAllowed(host)) continue;               // 🔒 SSRF 第一道闸
     const platform = platformOf(host);
     if (!platform) continue;
     if (lp.platforms && lp.platforms[platform] === false) continue;   // 平台开关
-    return { url, host, platform };
+    out.push({ url, host, platform });
+    if (out.length >= max) break;
   }
-  return null;
+  return out;
+}
+
+// 只取第一个（老接口，保持兼容）
+function findLink(msg) {
+  return findLinks(msg, 1)[0] || null;
 }
 
 // ---------- 限流 / 开关（在 index.js 里调用）----------
@@ -264,6 +281,73 @@ function parseIsoDuration(s) {
   if (!m) return 0;
   const [, d, h, mi, se] = m;
   return (Number(d || 0) * 86400) + (Number(h || 0) * 3600) + (Number(mi || 0) * 60) + Math.round(Number(se || 0));
+}
+
+// ---------- 封面尺寸 ----------
+//
+// 🔴🔴 为什么需要这个（用户 2026-09-22 反馈「竖屏都被压缩了」）：
+//    QQ 的图片语法是 `![alt #宽px #高px](url)` —— **两个数都得给**，
+//    而且 QQ **不会按比例缩放**，是**硬拉到指定尺寸**。
+//    旧版一律写 `#480px #270px`（16:9），于是：
+//      · 快手封面 320×640（1:2 竖屏）→ 被拉成 480×270 → **压扁成一张饼**
+//      · 抖音封面 440×330（4:3）      → 被拉成 480×270 → 横向拉长
+//    实测就是用户截图里那种"人变宽变矮"的变形。
+//
+// 解法：先读出封面的**真实**宽高比，再按比例算框。
+//     竖屏给窄框（宽 240），横屏给宽框（宽 480），高度按比例算并夹在 150~480。
+function coverSize(w, h) {
+  if (!w || !h) return '#480px #270px';      // 读不出来就退回 16:9（跟以前一样）
+  const ratio = w / h;
+  const W = ratio < 1 ? 240 : 480;           // 竖屏窄一点，不然卡片会很高
+  const H = Math.min(480, Math.max(150, Math.round(W / ratio)));
+  return `#${W}px #${H}px`;
+}
+
+// 只取图片**前 16KB** 就能读出尺寸 —— JPEG 的 SOF / PNG 的 IHDR / WebP 的 VP8X 都在文件头。
+// 用 Range 请求，不把整张图下下来（实测抖音封面 13KB、快手 27KB，只取 8KB 就够）。
+//
+// ⚠️ 读不出来时**返回 null 让调用方降级**，绝不抛异常 ——
+//    这只是"让卡片更好看"的加分项，不能因为它挂掉整个解析。
+async function imageSize(url) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': UA, Range: 'bytes=0-16383' },
+      signal: AbortSignal.timeout(timeout()),
+    });
+    // 206 = 支持 Range（正常）；200 = 服务器不理 Range，也照样能用
+    if (!r.ok && r.status !== 206) return null;
+    const b = Buffer.from(await r.arrayBuffer());
+    if (b.length < 20) return null;
+
+    // JPEG：扫 SOF0~SOF15（跳过 C4=DHT / C8=JPG / CC=DAC，那些不是 SOF）
+    if (b[0] === 0xFF && b[1] === 0xD8) {
+      for (let i = 2; i < b.length - 9; i++) {
+        if (b[i] !== 0xFF) continue;
+        const mk = b[i + 1];
+        if (mk >= 0xC0 && mk <= 0xCF && mk !== 0xC4 && mk !== 0xC8 && mk !== 0xCC) {
+          // SOF 段里：**高在 +5，宽在 +7**（大端 16 位）—— 顺序反了会得到转置的卡片
+          return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+        }
+      }
+      return null;
+    }
+    // PNG：IHDR 固定在 16/20
+    if (b[0] === 0x89 && b.slice(1, 4).toString() === 'PNG') {
+      return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+    }
+    // WebP：三种子格式，尺寸位置都不一样
+    if (b.slice(0, 4).toString() === 'RIFF' && b.slice(8, 12).toString() === 'WEBP') {
+      const fmt = b.slice(12, 16).toString();
+      if (fmt === 'VP8X') return { w: 1 + b.readUIntLE(24, 3), h: 1 + b.readUIntLE(27, 3) };
+      if (fmt === 'VP8 ') return { w: b.readUInt16LE(26) & 0x3FFF, h: b.readUInt16LE(28) & 0x3FFF };
+      if (fmt === 'VP8L') {
+        const n = b.readUInt32LE(21);
+        return { w: 1 + (n & 0x3FFF), h: 1 + ((n >> 14) & 0x3FFF) };
+      }
+    }
+    if (b.slice(0, 3).toString() === 'GIF') return { w: b.readUInt16LE(6), h: b.readUInt16LE(8) };
+    return null;
+  } catch { return null; }
 }
 
 // ---------- GitHub ----------
@@ -446,10 +530,23 @@ function cut(s, n) {
 // ---------- 抖音（2026-09-22 新增）----------
 //
 // 链路：v.douyin.com/IbTyOLmZyDY/ → www.iesdouyin.com/share/video/{id}/ → www.douyin.com/video/{id}
-// 🔴 取数据必须停在 **share 页**、并且用 **爬虫 UA**（原因见上面 BOT_UA 的注释）。
-// ⚠️ 抖音**拿不到视频直链** —— SEO 页面里没有 contentUrl、没有 .mp4、没有 douyinvod。
-//    所以抖音只发卡片、发不了视频（用户已知晓）。想发视频得逆向签名参数，那条路
-//    又脆又容易触发风控，**不做**。
+//
+// 🔴 关键：**必须伪装爬虫 UA（BOT_UA），且要落到 www.douyin.com/video/{id}**。
+//    数据（`ld+json` 的 VideoObject）在这个页面上，不在 share 页 ——
+//    share 页只是个 302 跳板。普通 UA 拿到的是空壳，原因见上面 BOT_UA 的注释。
+//
+// ⚠️⚠️ 抖音**拿不到视频直链**。这不是没试够，是**试遍了**（2026-09-22 实测）：
+//    | 入口 / 接口                              | 结果 |
+//    |------------------------------------------|------|
+//    | iesdouyin / m.douyin / www.douyin 分享页  | 只有元信息，无视频字段 |
+//    | www.douyin.com/light/{id}（嵌入播放页）   | 只有 dns-prefetch 提示，无真地址 |
+//    | aweme/v1/web/aweme/detail（4 组参数）     | **HTTP 403 `Blocked by ArgusSecurityPlugin Uifid Not Found`** |
+//    | web/api/v2/aweme/iteminfo                 | HTTP 200 但**正文长度 0** |
+//    | 4 种 UA（WeChat/Weibo/AwemeApp/Googlebot）| 全部零视频线索 |
+//    一共 11 种组合，**一个 .mp4 都没有**。
+//    要拿到只有一条路：**逆向 `a_bogus` 签名 + 采集 `msToken`/`ttwid` cookie** ——
+//    那是正面硬刚字节的反爬（Argus），会随平台改版不断失效，
+//    还容易让服务器 IP 被标记。**决定不做**，抖音只发卡片。
 async function fetchDouyin(url) {
   let target = url;
   if (/^v\.douyin\.com$/i.test(hostOf(url))) target = await resolveShort(url);
@@ -459,7 +556,7 @@ async function fetchDouyin(url) {
     || (target.match(/[?&]modal_id=(\d{6,})/) || [])[1];
   if (!id) return null;
 
-  const html = await getText(`https://www.iesdouyin.com/share/video/${id}/`, { 'User-Agent': BOT_UA });
+  const html = await getText(`https://www.douyin.com/video/${id}`, { 'User-Agent': BOT_UA });
   const ld = extractLdJson(html, 'VideoObject');
   if (!ld) return null;
 
@@ -578,8 +675,9 @@ function renderCard(info) {
 function renderShortVideo(v, brand, siteName) {
   const lines = [];
   lines.push(`# ${mdEsc(cut(v.title, 40))}`);
-  // 封面统一按 16:9 摆（竖屏视频会被裁，但比不显示强）
-  if (v.cover) lines.push(`![封面 #480px #270px](${v.cover})`);
+  // ⚠️ 尺寸用 coverSize() 算出来的**真实比例** ——
+  //    抖音/快手 绝大多数是竖屏，写死 16:9 会把画面压扁（用户反馈过）
+  if (v.cover) lines.push(`![封面 ${v.coverSize || '#480px #270px'}](${v.cover})`);
 
   const pub = [
     v.author && `**作者**：${mdEsc(v.author)}`,
@@ -609,7 +707,8 @@ function renderKuaishou(v) {
 function renderBilibili(b) {
   const lines = [];
   lines.push(`# ${mdEsc(b.title)}`);
-  if (b.cover) lines.push(`![封面 #480px #270px](${b.cover})`);
+  // ⚠️ 尺寸用 coverSize() 算出来的**真实比例**（竖屏 B站 视频的封面也是竖的）
+  if (b.cover) lines.push(`![封面 ${b.coverSize || '#480px #270px'}](${b.cover})`);
 
   // ⚠️ 标签后面用**全角冒号**，不要用半角空格 ——
   //    实测（2026-09-22）QQ 的 markdown 会把 `**加粗**` 后面的半角空格**吃掉**，
@@ -701,11 +800,21 @@ async function parse(link) {
   else if (link.platform === 'douyin') info = await fetchDouyin(link.url);
   else if (link.platform === 'kuaishou') info = await fetchKuaishou(link.url);
   if (!info) return null;
+
+  // 封面的**真实**尺寸 → 决定卡片里图片框的比例（竖屏别被压扁）
+  // ⚠️ 这一步是"加分项"：探测失败就退回 16:9，绝不让它影响主流程
+  if (info.cover && cfg.policy.linkParse?.probeCoverSize !== false) {
+    const dim = await imageSize(info.cover);
+    info.coverSize = coverSize(dim?.w, dim?.h);
+    if (dim) console.log(`  ├ 封面 ${dim.w}×${dim.h} → ${info.coverSize}`);
+  }
+
   return { platform: link.platform, info, card: renderCard(info) };
 }
 
 module.exports = {
   findLink,
+  findLinks,
   parse,
   linkAllowed,
   markLink,
@@ -724,4 +833,6 @@ module.exports = {
   _enclosingJson: enclosingJson,
   _extractLdJson: extractLdJson,
   _parseIsoDuration: parseIsoDuration,
+  _coverSize: coverSize,
+  _imageSize: imageSize,
 };

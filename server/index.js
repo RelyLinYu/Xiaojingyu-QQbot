@@ -105,8 +105,8 @@ async function handleEvent(type, d) {
   //      · 而这条支路跑在 passHardRules **之前**，那里才是检查 author.bot 的地方
   //      · 一旦收到自己的消息（或另一个机器人发的同款卡片），就会**自己解析自己 → 自己回自己**
   //     所以这里**必须**自己先挡一道。
-  const link = d.author?.bot ? null : linkparse.findLink(d);
-  if (link) {
+  const links = d.author?.bot ? [] : linkparse.findLinks(d, cfg.policy.linkParse?.maxLinksPerMessage || 2);
+  if (links.length) {
     // ⚠️⚠️ 「被点名」必须和正常流程一样**绕过连发上限**（2026-09-22 实测踩到）：
     //     passHardRules 里是 `bypass = at || owner` —— @ 它、或主人说话，都不受
     //     maxConsecutive（3 分钟 2 次）约束。这条支路跑在它**前面**，得自己实现同样豁免。
@@ -116,12 +116,12 @@ async function handleEvent(type, d) {
     const named = brain.isOwner(d) || brain.isAtRobot(type, d);
     const gate = linkparse.linkAllowed(scope);
     if (!gate.ok) {
-      console.log(`  ├ 🔗 看到 ${link.platform} 链接，但先跳过（${gate.why}）`);
+      console.log(`  ├ 🔗 看到 ${links.length} 条链接（${links[0].platform} 等），但先跳过（${gate.why}）`);
     } else if (!named && !brain.consecutiveOk(scope)) {
       console.log('  ├ 🔗 看到链接，但先跳过（本群连发已达上限，且没被点名）');
     } else {
       linkparse.markLink(scope);
-      await handleLink(d, link, scope, isGroup, openid);
+      await handleLink(d, links, scope, isGroup, openid);
       return;
     }
   }
@@ -253,44 +253,68 @@ async function handleEvent(type, d) {
   }
 }
 
-// 🆕 链接卡片支路：抓元信息 → 发一张 Markdown 卡片
+// 🆕 链接卡片支路：抓元信息 → 发 Markdown 卡片（可能有多条链接 → 多张卡片）
 //
 // 全程**不调模型**（卡片是模板拼的）→ 这个功能不花钱，也天然免疫提示注入
 // （抓回来的标题是用户可控文本，但我们只把它当字符串拼进卡片，不当指令读）。
-async function handleLink(d, link, scope, isGroup, openid) {
-  console.log(`  ├ 🔗 ${link.platform} 链接: ${String(link.url).slice(0, 90)}`);
-  let parsed = null;
-  try {
-    parsed = await linkparse.parse(link);
-  } catch (e) {
-    console.warn(`  └ 链接解析异常: ${e.message || e}`);
-    return;
+//
+// 🔴 支持一条消息里贴**多个**链接（2026-09-22 用户实测踩到）：
+//    用户一条消息发了「抖音链接 + 快手链接」，旧版只解析第一个 →
+//    快手那条被**静默丢掉**，用户完全不知道发生了什么。
+//    ⚠️ 但不能无限发：**被动回复配额是 5 条 / 单条消息**，
+//       而每个链接最多要 3 条（卡片 + 解析提示 + 视频）。
+//       所以：卡片最多发 `maxLinksPerMessage`（默认 2）张，
+//       **视频整条消息最多发 1 个**（2 卡片 + 1 提示 + 1 视频 = 4 ≤ 5）。
+async function handleLink(d, links, scope, isGroup, openid) {
+  // ① 先把所有链接都解析出来（解析失败的不占位置）
+  const parsed = [];
+  for (const link of links) {
+    console.log(`  ├ 🔗 ${link.platform} 链接: ${String(link.url).slice(0, 90)}`);
+    try {
+      const p = await linkparse.parse(link);
+      if (p && p.card) parsed.push(p);
+      else console.log('  │  └ 这条解析不出内容，跳过');
+    } catch (e) {
+      console.warn(`  │  └ 链接解析异常: ${e.message || e}`);
+    }
   }
-  if (!parsed || !parsed.card) {
+  if (!parsed.length) {
     // ⚠️ 各平台的失败原因不一样，写全，免得以后翻日志时误判
     console.log('  └ 不回（链接解析不出内容 —— 私有仓库 / 已删除 / 番剧付费 / 抖音爬虫 UA 失效 / 快手页面改版）');
     return;
   }
-  console.log(`  ├ 卡片已生成（${parsed.card.length} 字）`);
-  const sent = isGroup
-    ? await sendGroupMarkdown(openid, parsed.card, d.id)
-    : await sendPrivateMarkdown(openid, parsed.card, d.id);
-  if (sent) {
+  if (parsed.length < links.length) {
+    console.log(`  ├ ⚠️ ${links.length} 条链接里有 ${links.length - parsed.length} 条没解析出来`);
+  }
+
+  // ② 逐张发卡片
+  let sentAny = false;
+  for (const p of parsed) {
+    console.log(`  ├ 卡片已生成（${p.platform}，${p.card.length} 字）`);
+    const sent = isGroup
+      ? await sendGroupMarkdown(openid, p.card, d.id)
+      : await sendPrivateMarkdown(openid, p.card, d.id);
+    if (sent) sentAny = true;
+    else console.log(`  │  └ ${p.platform} 卡片发送失败（看上面的 err_code）`);
+  }
+  if (sentAny) {
     // ⚠️ 只计入"本群连发上限"，**不调 markReplied** ——
     //    否则会把对方 60 秒的聊天冷却一起占掉，他接着问问题就不理了。
     brain.markScopeReplied(scope);
     console.log('  └ ✓ 卡片已发送');
-  } else {
-    console.log('  └ 卡片发送失败（看上面的 err_code）');
   }
 
-  // ===== P2：视频（B站 / 快手）=====
-  // 只在「群聊 + 支持的平台 + 开关开着」时走。私聊先不做（单聊的上传接口是另一套端点）。
-  // ⚠️ 抖音**没有直链**（SEO 页面里根本没有 .mp4），只发卡片 —— 这里直接跳过。
+  // ③ 视频：**整条消息最多发一个**（配额只剩 1 条，且 videoBusy 本来就串行）
+  //    取第一个"能出视频"的平台：B站 / 快手。
+  //    ⚠️ 抖音**没有直链**（见 linkparse.js 里 fetchDouyin 的注释），只会被跳过。
   const vcfg = cfg.policy.linkParse?.video;
-  const videoOk = isGroup && vcfg?.enabled
-    && (parsed.platform === 'bilibili' || parsed.platform === 'kuaishou');
-  if (videoOk) await sendVideo(d, parsed.info, openid);
+  if (!isGroup || !vcfg?.enabled) return;
+  const vtarget = parsed.find((p) => p.platform === 'bilibili' || p.platform === 'kuaishou');
+  if (!vtarget) return;
+  if (parsed.length > 1) {
+    console.log(`  ├ ⚠️ 这条消息有 ${parsed.length} 个链接，视频只发第一个（${vtarget.platform}）—— 被动回复配额只有 5 条`);
+  }
+  await sendVideo(d, vtarget.info, openid);
 }
 
 // 🆕 P2：把 B站视频下载下来 → 分片上传到 QQ → 用 msg_type=7 发出去

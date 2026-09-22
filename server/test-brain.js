@@ -1023,6 +1023,87 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       !/\*\*[^*]+\*\* [^：]/.test(cards.kuaishou), cards.kuaishou);
     check('renderCard(null) → null（防上游传空）', lp.renderCard(null) === null);
 
+    // --- 一条消息里的多个链接（用户 2026-09-22 实测踩到：快手那条被静默丢掉）---
+    const two = 'https://v.douyin.com/IbTyOLmZyDY/ https://v.kuaishou.com/JJYSn5HT';
+    const twoLinks = lp.findLinks({ content: two, message_type: 0 });
+    check('★ 一条消息里两个链接都要认（旧版只认第一个，第二个被静默丢掉）',
+      twoLinks.length === 2, twoLinks.map((x) => x.platform));
+    check('  └ 顺序按出现顺序', twoLinks[0].platform === 'douyin' && twoLinks[1].platform === 'kuaishou',
+      twoLinks.map((x) => x.platform));
+    check('  └ findLink 仍然只返回第一个（老接口兼容）',
+      lp.findLink({ content: two, message_type: 0 }).platform === 'douyin');
+    check(`  └ maxLinksPerMessage 默认是 2（被动回复配额只有 5 条）`,
+      cfg.policy.linkParse.maxLinksPerMessage === 2, cfg.policy.linkParse.maxLinksPerMessage);
+    const capped = lp.findLinks({
+      content: 'https://github.com/a/b https://b23.tv/x https://v.douyin.com/y/ https://v.kuaishou.com/z',
+      message_type: 0,
+    });
+    check('  └ 超过上限时截断，不会无限发（配额会爆）', capped.length === 2, capped.length);
+    check('  └ 上限可以传参调大', lp.findLinks({ content: two, message_type: 0 }, 5).length === 2);
+
+    // --- 封面尺寸：竖屏不能被压扁（用户 2026-09-22 反馈「竖屏都被压缩了」）---
+    check('★ 竖屏封面（320×640，1:2）→ 用窄框，不再套 16:9',
+      lp._coverSize(320, 640) === '#240px #480px', lp._coverSize(320, 640));
+    check('★ 9:16 竖屏 → 也是窄框', lp._coverSize(720, 1280) === '#240px #427px', lp._coverSize(720, 1280));
+    check('  横屏 16:9（1920×1080）→ 保持原来的 480×270',
+      lp._coverSize(1920, 1080) === '#480px #270px', lp._coverSize(1920, 1080));
+    check('  4:3（440×330，抖音 SEO 封面就是它）→ 按 4:3 出，不拉成 16:9',
+      lp._coverSize(440, 330) === '#480px #360px', lp._coverSize(440, 330));
+    check('  高得离谱的比例（1:10）高度被夹在 480', lp._coverSize(100, 1000) === '#240px #480px');
+    check('  宽得离谱的比例（10:1）高度被夹在 150', lp._coverSize(1000, 100) === '#480px #150px');
+    check('★ 探测不到尺寸时退回 16:9（绝不因此报错）',
+      lp._coverSize(0, 0) === '#480px #270px' && lp._coverSize(undefined, undefined) === '#480px #270px');
+    check('probeCoverSize 开关存在且默认开', cfg.policy.linkParse.probeCoverSize === true);
+
+    // --- imageSize：从图片字节头读尺寸（离线用构造的字节）---
+    //     ⚠️ 这里**不打网络**，直接喂构造出来的文件头，验证解析逻辑本身。
+    //        JPEG 的 SOF 里 **高在 +5、宽在 +7** —— 写反了就会得到转置的卡片，必须测。
+    const jpeg = Buffer.concat([
+      Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]), Buffer.alloc(12),        // APP0
+      Buffer.from([0xFF, 0xC0, 0x00, 0x11, 0x08]),                                // SOF0, 精度8
+      Buffer.from([0x01, 0x40, 0x02, 0x80]),                                      // 高=320 宽=640
+      Buffer.alloc(16),
+    ]);
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13]),
+      Buffer.from('IHDR'), Buffer.from([0, 0, 0x01, 0xE0, 0, 0, 0x02, 0x80]), Buffer.alloc(8),
+    ]);
+    const gif = Buffer.concat([Buffer.from('GIF89a'), Buffer.from([0xE0, 0x01, 0x80, 0x02]), Buffer.alloc(16)]);
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+
+    // 用一个临时 HTTP 桩把构造的字节喂给 imageSize（避免真的联网）
+    const realFetch = global.fetch;
+    let stubBuf = jpeg;
+    global.fetch = async () => ({ ok: true, status: 206, arrayBuffer: async () => stubBuf });
+    const jd = await lp._imageSize('http://stub/x.jpg');
+    check('★ imageSize 读 JPEG：宽 640 / 高 320（高在 +5、宽在 +7，写反就转置）',
+      jd && jd.w === 640 && jd.h === 320, jd);
+    stubBuf = png;
+    const pd = await lp._imageSize('http://stub/x.png');
+    check('imageSize 读 PNG：宽 480 / 高 640', pd && pd.w === 480 && pd.h === 640, pd);
+    stubBuf = gif;
+    const gd = await lp._imageSize('http://stub/x.gif');
+    check('imageSize 读 GIF：宽 480 / 高 640', gd && gd.w === 480 && gd.h === 640, gd);
+    stubBuf = svg;
+    check('★ 认不出的格式（SVG）→ null（不抛，让卡片退回 16:9）',
+      await lp._imageSize('http://stub/x.svg') === null);
+    global.fetch = async () => ({ ok: false, status: 403, arrayBuffer: async () => new ArrayBuffer(0) });
+    check('★ HTTP 403 → null（封面被防盗链挡住也不会炸）', await lp._imageSize('http://stub/403.jpg') === null);
+    global.fetch = async () => { throw new Error('network down'); };
+    check('★ 网络异常 → null（绝不抛到主流程）', await lp._imageSize('http://stub/err.jpg') === null);
+    global.fetch = realFetch;
+
+    // --- 卡片里真的用上了算出来的尺寸 ---
+    const portraitCard = lp.renderCard({
+      platform: 'kuaishou', title: '竖屏', author: 'A', duration: '0:11',
+      like: 1, view: 2, comment: 3, coverSize: '#240px #480px',
+      cover: 'https://p2.a.yximgs.com/x.jpg', htmlUrl: 'https://www.kuaishou.com/short-video/1',
+    });
+    check('★ coverSize 会被渲染进卡片', portraitCard.includes('#240px #480px'), portraitCard);
+    check('  没传 coverSize 时退回 16:9（老行为不变）',
+      lp.renderCard({ platform: 'kuaishou', title: 'x', cover: 'https://a/x.jpg', htmlUrl: 'https://a/b' })
+        .includes('#480px #270px'));
+
     // --- 视频：抖音拿不到直链（已知限制，不是 bug）；快手没直链时也要安静返回 null ---
     check('getKuaishouVideoUrl 对没有直链的 info 返回 null',
       await lp.getKuaishouVideoUrl({ platform: 'kuaishou' }, 1e9) === null);

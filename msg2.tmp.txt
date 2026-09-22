@@ -1,0 +1,42 @@
+fix(linkparse): 修竖屏封面被压扁 + 一条消息多链接被静默丢掉
+
+用户真机反馈（手机截图）：
+  1.「竖屏都被压缩了」
+  2.「抖音不会返回视频」
+查日志还发现第三个他没说出口的 bug：
+  3. 他在一条消息里同时发了抖音+快手两个链接，
+     机器人只解析了第一个，快手那条被【静默丢掉】
+
+修复
+- 封面比例：QQ 的 ![alt #宽px #高px] 是硬拉到指定尺寸、不按比例缩放。
+  写死 16:9 会把 1:2 的竖屏封面压成饼（快手 320x640）。
+  新增 imageSize()（Range 取前 16KB 读 JPEG SOF / PNG IHDR / WebP VP8X）
+  + coverSize()，按封面真实比例算框，读不出来就退回 16:9。
+- 多链接：findLink() -> findLinks(msg, max)，最多 2 个。
+  旧版静默丢弃是最糟的失败方式，现在日志会写明跳过原因。
+- 视频一条消息只发 1 个：被动回复配额只有 5 条，
+  2 个视频 = 6 条必爆。只给第一个能出视频的平台发。
+- 修正抖音的错误注释：旧注释写「必须停在 share 页」是错的，
+  数据在 www.douyin.com/video/{id} 上。改成直接抓那个页面。
+
+抖音没有视频 = 证据确凿，不是猜
+  11 种入口/接口 x UA 组合全部实测，零 .mp4：
+  - 4 种 UA 的分享页：只有元信息
+  - www.douyin.com/light/{id}（嵌入播放页 106KB）：只有 dns-prefetch 提示
+  - aweme/v1/web/aweme/detail（4 组参数 x 2 UA）: HTTP 403
+    Blocked by ArgusSecurityPlugin Uifid Not Found
+  - web/api/v2/aweme/iteminfo: HTTP 200 但正文长度 0
+  唯一的路是逆向 a_bogus 签名 + 采集 msToken/ttwid，正面硬刚 Argus 反爬。
+  不做：会一直坏、有 IP 被标记风险、收益低。抖音只发卡片。
+
+配置
+- 新增 maxLinksPerMessage: 2
+- 新增 probeCoverSize: true（关掉能省一次 Range 请求，但竖屏会被压扁）
+
+自测 221 -> 243 项
+  新增：多链接、封面比例（含「JPEG 高在+5 宽在+7」的转置回归）、
+  imageSize 的 4 种格式 + 3 种失败降级（403 / 网络异常 / SVG）
+
+文档
+- 16.1.1 多链接与配额、16.1.2 封面比例、16.3.3 抖音结论表
+- 12.6 新增坑 52~56；自测数全篇同步
