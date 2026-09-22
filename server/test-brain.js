@@ -444,7 +444,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       uniq > 5, `不同值个数=${uniq}（真随机下应接近 30）`);
   }
 
-  console.log('\n=== 12. ⭐ 上下文记忆：条数 + 时效双约束 ===');
+  console.log('\n=== 12. ⭐ 上下文记忆：条数 + 时效 + 长度 三重约束 ===');
   {
     const P = cfg.policy;
     console.log(`  配置: 最多 ${P.contextSize} 条 / 时效 ${P.contextMaxAgeMs / 60000} 分钟 / 会话 TTL ${P.contextScopeTtlMs / 60000} 分钟`);
@@ -492,6 +492,68 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     } finally {
       P.contextMaxAgeMs = realMaxAge2;
     }
+
+    // ---- 🆕 第三道闸：长度（2026-09-22 用户问「刷图多了判断回复的 token 不是也变多了」）----
+    //
+    // 实测依据：真实群聊消息中位 **7 字**，识图描述中位 **47 字**（≈7 条话的体量），
+    // 中文 **1 字 ≈ 0.567 token**，而上下文是**每次 L1/L2 调用都要重发一遍**的。
+    // → 只按"条数"收口拦不住"条目变长"，30 条全是图 ≈ 953 token，全是短句只要 187 token。
+    console.log(`  长度闸: 单条≤${P.contextMsgMaxChars} 字 · 总量≤${P.contextMaxChars} 字 · 至少留 ${P.contextMinKeep} 条`);
+
+    // ① 正常聊天**不能**受影响（这是最容易写坏的地方）
+    const L1 = 'group:CTX_LEN_NORMAL';
+    for (let i = 1; i <= P.contextSize; i++) brain.pushContext(L1, '群友', `第${i}句话`);
+    const gotN = brain.recentContext(L1);
+    check('★ 正常短句 30 条 → 一条都不丢（长度闸有余量，别误伤日常聊天）',
+      gotN.length === P.contextSize, gotN.length);
+    check('  └ 最旧的那条也还在', gotN[0].content === '第1句话', gotN[0].content);
+
+    // ② 图片/长文本把上下文撑爆时，必须真的收口
+    const L2 = 'group:CTX_LEN_IMG';
+    const DESC = '【图片】' + '猫叼梨背啤酒配文叼梨猫支啤谐音梗嘲讽'.repeat(2).slice(0, 47);
+    for (let i = 0; i < P.contextSize; i++) brain.pushContext(L2, '群友', DESC);
+    const gotI = brain.recentContext(L2);
+    const charsOf = (arr) => arr.reduce((a, m) => a + String(m.content).length + String(m.name).length + 2, 0);
+    const oldChars = P.contextSize * (DESC.length + 6);
+    check('★ 全是图片描述 → 真的收口了（旧行为会一路撑到 ' + oldChars + ' 字）',
+      charsOf(gotI) <= P.contextMaxChars, `${charsOf(gotI)} 字`);
+    check('  └ 收口后条数变少（丢的是旧的）', gotI.length < P.contextSize, gotI.length);
+    check('★ 丢的是**最旧的**，最新的必须留着（最近的对话才最有用）',
+      gotI[gotI.length - 1].content === DESC);
+    check(`  └ ≈token 从 ${Math.round(oldChars * 0.567)} 降到 ${Math.round(charsOf(gotI) * 0.567)}`
+      + `（1 字≈0.567 token，实测值）`,
+      Math.round(charsOf(gotI) * 0.567) < Math.round(oldChars * 0.567));
+    check('  └ 单条本身没被截断（47 字 < 单条上限）', gotI[0].content === DESC);
+
+    // ③ 单条超长：一条 617 字的粘贴不该霸占整个上下文
+    const L3 = 'group:CTX_LEN_LONG';
+    for (let i = 0; i < 3; i++) brain.pushContext(L3, '群友', '短句' + i);
+    brain.pushContext(L3, '群友', '长'.repeat(617));
+    const gotL = brain.recentContext(L3);
+    const bigOne = gotL[gotL.length - 1];
+    check('★ 单条 617 字 → 被截断到上限 + 省略号',
+      bigOne.content.length === P.contextMsgMaxChars + 1 && bigOne.content.endsWith('…'),
+      bigOne.content.length);
+
+    // ④ 极端：单条上限比总量上限还大时，也不能一条都不剩
+    const realMax = P.contextMaxChars;
+    const realPer = P.contextMsgMaxChars;
+    try {
+      P.contextMaxChars = 50;          // 故意调得比单条上限还小
+      P.contextMsgMaxChars = 200;
+      const L4 = 'group:CTX_LEN_TINY';
+      for (let i = 0; i < 10; i++) brain.pushContext(L4, '群友', '这是一句很长很长的话'.repeat(3));
+      const gotT = brain.recentContext(L4);
+      check('★ 极端配置下也至少留 minKeep 条（不能把上下文清空）',
+        gotT.length >= Math.min(P.contextMinKeep, 10), gotT.length);
+      check('  └ 且留下的是最新的', gotT[gotT.length - 1].content.length > 0);
+    } finally { P.contextMaxChars = realMax; P.contextMsgMaxChars = realPer; }
+
+    // ⑤ 配置健全性：闸门必须比"正常聊天"宽，否则会天天误伤
+    check('★ 总量上限要宽于正常 30 条短句（否则就是天天误伤）',
+      P.contextMaxChars > 30 * (12 + 6), `上限 ${P.contextMaxChars} vs 正常约 ${30 * (12 + 6)}`);
+    check('  单条上限要宽于识图描述中位数 47 字（否则图片描述会被切）',
+      P.contextMsgMaxChars > 47 * 2, `${P.contextMsgMaxChars} vs 47`);
   }
 
   console.log('\n=== 13. ⭐ @ 判定：只认指向自己的，别把"群友互 @"当成叫我 ===');

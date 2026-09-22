@@ -98,13 +98,52 @@ function pushContext(gid, name, content) {
   contexts.set(gid, arr);
 }
 
-// 取"该给模型看的"上下文：最近 N 条 **且在时效内** 的
+// 取"该给模型看的"上下文：最近 N 条 **且在时效内** **且总长度不超标** 的
+//
+// 🆕 第三道闸：长度（2026-09-22 加的）
+//
+// 起因：用户问「群里刷的图片多了，判断是否回复所需要的 token 不是也增加了？」
+//       —— **他说得对**，而且这是"条数+时效"两道闸拦不住的：
+//
+//   实测（当天真机数据）：
+//     · 真实群聊消息 中位 **7 字** · 识图描述 中位 **47 字** → **一条图 ≈ 7 条话**
+//     · 中文换算比（精确测的）**1 字 ≈ 0.567 token**
+//     · 30 条全是图 → `30 × 57 ≈ 1710 字 ≈ 970 token`
+//       30 条全是短句 → `30 × 15 ≈ 450 字 ≈ 255 token`   ← **差 3.8 倍**
+//
+//   🔴 而上下文是**每次 L1 判断 / L2 回复都要重发一遍**的 ——
+//      一条描述不是"花一次"，是"在它待在上下文里的这段时间里每次都花"。
+//
+// 所以：单条截断 + 总量收口，超了**从最旧的丢**（最近的才最有用）。
+// ⚠️ 取值留了余量，正常聊天完全不受影响（见 config.js 的说明）。
 function recentContext(gid) {
   const arr = contexts.get(gid) || [];
   const maxAge = cfg.policy.contextMaxAgeMs || 0;
   const now = Date.now();
   const fresh = maxAge > 0 ? arr.filter((m) => now - (m.ts || 0) <= maxAge) : arr;
-  return fresh;
+
+  // ① 单条截断：一条 600 字的粘贴不该霸占整个上下文
+  const perMsg = cfg.policy.contextMsgMaxChars || 0;
+  let out = perMsg > 0
+    ? fresh.map((m) => (String(m.content || '').length > perMsg
+      ? { ...m, content: String(m.content).slice(0, perMsg) + '…' }
+      : m))
+    : fresh;
+
+  // ② 总量收口：从最旧的开始丢，但至少留 minKeep 条最近的
+  const total = cfg.policy.contextMaxChars || 0;
+  if (total > 0 && out.length) {
+    const lenOf = (m) => String(m.content || '').length + String(m.name || '').length + 2;  // +2 = ": "
+    const minKeep = Math.max(1, cfg.policy.contextMinKeep ?? 5);
+    let sum = out.reduce((a, m) => a + lenOf(m), 0);
+    let cut = 0;
+    while (cut < out.length - minKeep && sum > total) {
+      sum -= lenOf(out[cut]);
+      cut++;
+    }
+    if (cut > 0) out = out.slice(cut);
+  }
+  return out;
 }
 
 // 定期清理：既清过期的消息，也清长时间没动静的整个会话（防内存无限涨）
