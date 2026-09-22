@@ -1358,6 +1358,50 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check(`recentImageMs 默认 60 秒（不能调太宽，否则会误伤）`,
       cfg.policy.vision.recentImageMs === 60000, cfg.policy.vision.recentImageMs);
 
+    // --- 同一张图只认一次（按内容 md5 去重）---
+    //
+    // 实测依据（2026-09-22）：QQ 的 fileid **每次都变**，没法用来去重；
+    // 但按大小+尺寸看，群里图片重复率 **28.6%**，一个表情包被发了 21 次。
+    check('去重配置存在（24 小时 / 最多 1000 张）',
+      cfg.policy.vision.dedupeTtlMs === 24 * 60 * 60 * 1000 && cfg.policy.vision.dedupeMax === 1000,
+      [cfg.policy.vision.dedupeTtlMs, cfg.policy.vision.dedupeMax]);
+    check('★ markVision(scope, false) 用来表示"没花钱"（缓存命中不占今日张数）',
+      vision.markVision.length >= 1);
+    // 真走一遍：第一次调模型，第二次必须**一次模型都不调**
+    {
+      const realFetchC = global.fetch;
+      const jpg = Buffer.alloc(64);
+      jpg[0] = 0xFF; jpg[1] = 0xD8; jpg[2] = 0xFF; jpg[3] = 0xE0;
+      jpg[4] = 0x00; jpg[5] = 0x10;
+      jpg[18] = 0xFF; jpg[19] = 0xC0; jpg[20] = 0x00; jpg[21] = 0x11; jpg[22] = 0x08;
+      jpg[23] = 0x01; jpg[24] = 0x40; jpg[25] = 0x02; jpg[26] = 0x80;
+      let modelCalls = 0;
+      global.fetch = async (url) => {
+        if (String(url).startsWith('http://stub/img')) {
+          return { ok: true, status: 206, headers: { get: () => null }, arrayBuffer: async () => jpg };
+        }
+        modelCalls++;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            choices: [{ message: { content: '一只猫' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+          }),
+        };
+      };
+      const r1 = await vision.describe({ url: 'http://stub/img', contentType: 'image/jpeg' }, () => {});
+      check('★ 第一次识图 → 真调模型，返回 { desc, cached:false }',
+        r1 && r1.desc === '一只猫' && r1.cached === false, r1);
+      check('  └ 确实花了 1 次模型调用', modelCalls === 1, modelCalls);
+      const r2 = await vision.describe({ url: 'http://stub/img', contentType: 'image/jpeg' }, () => {});
+      check('★ 第二次同一张图 → 命中缓存，描述一样、cached:true',
+        r2 && r2.desc === '一只猫' && r2.cached === true, r2);
+      check('★★ 而且**没有再调模型**（0 token，这就是省下来的）',
+        modelCalls === 1, `模型调用次数=${modelCalls}`);
+      global.fetch = realFetchC;
+    }
+
     // --- describe：拿到不是图片的字节时必须**抛异常**，不能硬传给模型 ---
     //     ⚠️ 这里只测"拦下来"这条路径 —— 它根本不发模型请求，
     //        所以自测**不会花钱**，也不会写 budget.json。

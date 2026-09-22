@@ -132,9 +132,10 @@ function visionAllowed(scope) {
   return { ok: true };
 }
 
-function markVision(scope) {
+// counted=false 表示"这次没花钱"（缓存命中）→ 不该占今日张数
+function markVision(scope, counted = true) {
   lastAt.set(scope, Date.now());
-  visionCount++;
+  if (counted) visionCount++;
 }
 
 // 每 5 分钟清一次冷却表，防内存涨（和 linkparse 一样的做法）
@@ -230,11 +231,28 @@ setInterval(() => {
   for (const [k, x] of LAST_IMG) if (now - x.ts > keep) LAST_IMG.delete(k);
 }, 60 * 1000).unref();
 
+// ---------- 描述去重缓存（按图片内容 md5）----------
+//
+// 🔴 为什么值得做（2026-09-22 实测数据）：
+//    · QQ 的 `fileid` **每次都变** —— 同一张图重发，fileid 是新的
+//      （实测 210 张图 210 个不同 fileid，重复率 0%）。**所以 fileid 不能用来去重。**
+//    · 但按 **大小+尺寸** 看，重复率 **28.6%** —— 其中一个表情包被发了 **21 次**。
+//      群里"同一个表情包反复发"是常态，而这正是用户最关心的场景。
+//
+// 所以用**图片内容的 md5** 做指纹（我们本来就要把图下下来 base64，
+// 顺手算个 md5 是零额外成本），同一张图**只花一次钱**。
+//
+// ⚠️ 只存内存，重启即失 —— 无所谓：这是省钱优化，不是功能正确性依赖。
+const DESC_CACHE = new Map();     // md5 -> { desc, ts }
+
 // ---------- 真正的识图 ----------
 //
-// 返回一句中文描述；任何失败都**抛异常**，由调用方决定要不要吞掉。
-// （⚠️ 故意不在这里 return '' —— 调用方需要区分"识别失败"和"识别出来是空"，
-//   前者该打日志，后者才该静默。）
+// 返回 `{ desc, cached }`：
+//   · desc   —— 一句中文描述（失败会**抛异常**，由调用方决定要不要吞）
+//   · cached —— true 表示"这张图之前认过、没花钱"
+//
+// ⚠️ 故意不返回裸字符串 —— 调用方需要知道这次**有没有花钱**，
+//    才能决定要不要计入"今日识图张数"（缓存命中不该占额度）。
 async function describe(img, log = () => {}) {
   const v = cfg.policy.vision || {};
   const maxBytes = (v.maxMB || 8) * 1024 * 1024;
@@ -249,15 +267,37 @@ async function describe(img, log = () => {}) {
   const mime = sniffMime(buf) || (/^image\//.test(img.contentType) ? img.contentType : '');
   if (!mime) throw new Error(`不是可识别的图片（文件头 ${buf.slice(0, 4).toString('hex')}）`);
 
+  // ③ 去重：这张图之前认过就**直接复用**，一次模型调用都不发
+  const hash = qqmedia._md5(buf);
+  const hit = DESC_CACHE.get(hash);
+  const ttl = v.dedupeTtlMs ?? 24 * 60 * 60 * 1000;
+  if (hit && Date.now() - hit.ts < ttl && hit.desc) {
+    log(`命中缓存（同一张图之前认过，${(buf.length / 1024).toFixed(0)}KB · 0 token）`);
+    return { desc: hit.desc, cached: true };
+  }
+
   log(`下载 OK ${(buf.length / 1024).toFixed(0)}KB · ${mime}`
     + (img.width && img.height ? ` · ${img.width}×${img.height}` : ''));
 
-  // ③ 交给模型（复用 brain 的重试 / 预算 / 记账 / 超时那一整套）
+  // ④ 交给模型（复用 brain 的重试 / 预算 / 记账 / 超时那一整套）
   const dataUrl = `data:${mime};base64,${buf.toString('base64')}`;
   const t0 = Date.now();
   const desc = await brain.describeImage(dataUrl, v.maxTokens || 200);
   log(`模型返回（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
-  return String(desc || '').trim();
+
+  const out = String(desc || '').trim();
+  if (out) {
+    DESC_CACHE.set(hash, { desc: out, ts: Date.now() });
+    // 防止无限涨（表情包再多也不会有几万张不同的）
+    const max = v.dedupeMax ?? 1000;
+    if (DESC_CACHE.size > max) {
+      for (const k of DESC_CACHE.keys()) {
+        DESC_CACHE.delete(k);
+        if (DESC_CACHE.size <= max) break;
+      }
+    }
+  }
+  return { desc: out, cached: false };
 }
 
 module.exports = {

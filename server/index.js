@@ -103,15 +103,19 @@ async function handleEvent(type, d) {
     } else {
       const vt = Date.now();
       try {
-        const desc = await vision.describe(img, (m) => console.log(`  ├ 🖼 ${m}`));
+        const r = await vision.describe(img, (m) => console.log(`  ├ 🖼 ${m}`));
+        const desc = r && r.desc;
         if (desc) {
-          vision.markVision(scope);
+          // ⚠️ 缓存命中（同一张图之前认过）**不占今日张数** —— 它一分钱没花。
+          //    但冷却照走（否则一个表情包刷屏会被瞬间处理一遍）。
+          vision.markVision(scope, !(r && r.cached));
           d.__vision = desc;      // ← extractText 会把它拼进文本
           // 🔑 把"这条消息的编号 → 描述"记下来：
           //    之后有人**引用这张图**时，QQ 不会再把图片给我们，
           //    只会给一个 ref_msg_idx —— 靠这个缓存才能查回来。
           vision.rememberImage(scope, vision.msgIdxOf(d), desc);
-          console.log(`  ├ 🖼 识别成功（${((Date.now() - vt) / 1000).toFixed(1)}s）：${desc}`);
+          console.log(`  ├ 🖼 ${r && r.cached ? '命中缓存' : '识别成功'}`
+            + `（${((Date.now() - vt) / 1000).toFixed(1)}s）：${desc}`);
         } else {
           // 只有"识别出来是空"才走这里（真失败会抛异常）
           console.log('  ├ 🖼 模型返回空描述，当没图处理');
