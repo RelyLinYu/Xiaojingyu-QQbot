@@ -3,7 +3,7 @@
 #  so later SSH/scp runs need no password.
 #
 #  Run it yourself (PowerShell 5.1 is fine):
-#      cd D:\Dsh_Work\MiniProject\QQBot
+#      cd <the-folder-containing-this-script>
 #      powershell -ExecutionPolicy Bypass -File .\setup-ssh-key.ps1
 #
 #  What it does:

@@ -258,6 +258,10 @@ function budgetOk() {
 }
 
 function inQuietHours() {
+  // ⚠️ 静默时段可以被**整体关掉**（config 的 policy.quietHoursEnabled: false）。
+  //    2026-09-21 起就是关着的 —— 半夜本来没几个人，静默反而让偶尔来的人以为它坏了。
+  if (cfg.policy.quietHoursEnabled === false) return false;
+
   const h = nowInBeijing().getHours();
   const [a, b] = cfg.policy.quietHours;
   return a <= b ? (h >= a && h < b) : (h >= a || h < b);
@@ -290,7 +294,7 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
   const am = detectAssistantMode(msg);
   if (am.on) {
     if (inQuietHours()) return { ok: false, why: '静默时段' };
-    if (!budgetOk()) return { ok: false, why: '今日调用额度已用完' };
+    if (!budgetOk()) return { ok: false, why: `今日调用次数已用完（${callCount}/${cfg.policy.dailyCallLimit} 次；这是次数上限，跟话费无关）` };
     return { ok: true, assistant: true, hitKeyword: false, isAt: isAtRobot(eventType, msg, opts.botOpenid), isOwner: isOwner(msg) };
   }
 
@@ -337,7 +341,7 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
   // 私聊：对方是专门来找它说话的，跳过抽样和冷却
   if (isPrivate && p.alwaysAnswerPrivate) {
     if (inQuietHours()) return { ok: false, why: '静默时段' };
-    if (!budgetOk()) return { ok: false, why: '今日调用额度已用完' };
+    if (!budgetOk()) return { ok: false, why: `今日调用次数已用完（${callCount}/${cfg.policy.dailyCallLimit} 次；这是次数上限，跟话费无关）` };
     return { ok: true, hitKeyword: false, isAt: true, isOwner: isOwner(msg) };
   }
 
@@ -364,7 +368,7 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
     }
   }
 
-  if (!budgetOk()) return { ok: false, why: '今日调用额度已用完' };
+  if (!budgetOk()) return { ok: false, why: `今日调用次数已用完（${callCount}/${cfg.policy.dailyCallLimit} 次；这是次数上限，跟话费无关）` };
 
   const hitKeyword = p.keywords.some((k) => text.includes(k));
 
@@ -808,6 +812,9 @@ module.exports = {
   stats: () => ({ calls: callCount, limit: cfg.policy.dailyCallLimit, day: callDay }),
   // 给 index.js 用的连续发言检查（回复前再确认一次）
   consecutiveOk,
+  // 只登记"本群刚发过言"（喂给 maxConsecutive），**不动某个人的冷却**。
+  // 用途：链接卡片是独立支路，不该占用对方 60 秒的聊天冷却，但必须计入连发上限。
+  markScopeReplied: (scope) => { replyLog.push({ scope, ts: Date.now() }); },
   // 给自测用
   isOverloaded,
   modelChain,

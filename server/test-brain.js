@@ -28,6 +28,9 @@ function beijingHourNow() {
   return d;
 }
 function isQuietNow() {
+  // ⚠️ 静默时段被关掉时（config 的 quietHoursEnabled: false）永远返回 false。
+  //    不这么做的话，半夜跑自测会"跳过若干项"，通过数从 153 变成 151 —— 看着像坏了。
+  if (cfg.policy.quietHoursEnabled === false) return false;
   const d = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + 8 * 3600 * 1000);
   const h = d.getHours();
   const [a, b] = cfg.policy.quietHours;
@@ -862,6 +865,167 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     } else {
       check('★ 降级链为空 → 天然不会跨服务商', true);
     }
+  }
+
+  console.log('\n=== 19. ⭐ 链接解析（平台识别 / 白名单 / 卡片 / 正文提取）===');
+  {
+    // ⚠️ 这一节**故意不联网** —— 自测要能离线、秒出、稳定。
+    //    真机联网验证靠"群里发一条链接看卡片"，不在自测里做（会因网络抖动假红）。
+    const lp = require('./linkparse');
+
+    // --- 平台识别：必须按"域名后缀"，不能被 includes 绕过 ---
+    check('github.com → github', lp.platformOf('github.com') === 'github');
+    check('www.github.com → github（子域）', lp.platformOf('www.github.com') === 'github');
+    check('b23.tv → bilibili', lp.platformOf('b23.tv') === 'bilibili');
+    check('v.douyin.com → douyin', lp.platformOf('v.douyin.com') === 'douyin');
+    check('www.iesdouyin.com → douyin', lp.platformOf('www.iesdouyin.com') === 'douyin');
+    check('v.kuaishou.com → kuaishou', lp.platformOf('v.kuaishou.com') === 'kuaishou');
+    check('★ v.m.chenzhongtech.com → kuaishou（快手短链中转域）',
+      lp.platformOf('v.m.chenzhongtech.com') === 'kuaishou');
+    check('★ notgithub.com 不算 github（防后缀绕过）', lp.platformOf('notgithub.com') === null);
+    check('★ evil.com 不算任何平台', lp.platformOf('evil.com') === null);
+
+    // --- 白名单：短链每一跳都要在里面 ---
+    check('白名单含 douyin.com', lp.hostAllowed('douyin.com') === true);
+    check('白名单含 iesdouyin.com（抖音短链中间跳）', lp.hostAllowed('iesdouyin.com') === true);
+    check('白名单含 chenzhongtech.com（快手短链中间跳）', lp.hostAllowed('chenzhongtech.com') === true);
+    check('白名单外域名被拒', lp.hostAllowed('evil.com') === false);
+    check('空域名被拒', lp.hostAllowed('') === false);
+
+    // --- 平台开关：4 个都该开着 ---
+    const P = cfg.policy.linkParse.platforms;
+    check('github / bilibili / douyin / kuaishou 四个开关都开',
+      P.github === true && P.bilibili === true && P.douyin === true && P.kuaishou === true, P);
+
+    // --- 正文提链：中文标点不能被吞进 URL ---
+    const u1 = lp.extractUrls('看这个 https://v.douyin.com/IbTyOLmZyDY/ 挺好');
+    check('中文句子里能提链', u1[0] === 'https://v.douyin.com/IbTyOLmZyDY/', u1);
+    const u2 = lp.extractUrls('链接：https://www.bilibili.com/video/BV1xx411c7mD，后面还有字');
+    check('★ 尾随的全角逗号不被吞进 URL',
+      u2[0] === 'https://www.bilibili.com/video/BV1xx411c7mD', u2);
+    const u3 = lp.extractUrls('https://github.com/a/b 和 https://v.kuaishou.com/JJYSn5HT');
+    check('一条消息里的多个链接都提出来', u3.length === 2, u3);
+    check('重复链接只算一次',
+      lp.extractUrls('https://github.com/a/b https://github.com/a/b').length === 1);
+
+    // --- findLink：普通消息 ---
+    const lk = lp.findLink({ content: 'https://v.kuaishou.com/JJYSn5HT', message_type: 0 });
+    check('findLink 认出快手短链并给出平台',
+      lk && lk.platform === 'kuaishou' && lk.host === 'v.kuaishou.com', lk);
+    check('findLink 认出抖音', lp.findLink({ content: 'https://v.douyin.com/IbTyOLmZyDY/', message_type: 0 }).platform === 'douyin');
+    check('没有链接的消息 → null', lp.findLink({ content: '大家好', message_type: 0 }) === null);
+
+    // --- findLink：递归扫 ark_data（转发卡片字段名不固定）---
+    const ark = {
+      content: '',
+      message_type: 3,
+      ark_data: {
+        ark_type: 1,
+        fields: [{ key: 'qqdocurl' }, { key: 'prompt', value: 'https://www.bilibili.com/video/BV1xx411c7mD' }],
+        nested: { deep: { u: 'https://github.com/RelyLinYu/QQBot' } },
+      },
+    };
+    const al = lp.findLink(ark);
+    check('★ 能在 ark_data 深层里挖到链接', !!al, al);
+    check('  └ 且平台识别正确', al && al.platform === 'bilibili', al);
+    check('★ 深层 github 链接也能挖到',
+      !!lp.findLink({ content: '', message_type: 3, ark_data: { a: { b: { c: 'https://github.com/RelyLinYu/QQBot' } } } }));
+
+    // --- 冷却 / 每日上限 ---
+    const sc = 'group:LINKTEST';
+    check('首次可解析', lp.linkAllowed(sc).ok === true);
+    lp.markLink(sc);
+    const again = lp.linkAllowed(sc);
+    check('★ 同群刚发过 → 被冷却拦住（防刷屏）',
+      again.ok === false && /冷却/.test(again.why), again);
+    check('别的群不受影响', lp.linkAllowed('group:LINKTEST2').ok === true);
+
+    // --- Markdown 转义：只转义真正影响行内渲染的字符 ---
+    check('★ 不转义连字符（否则出现 Xiaojingyu\\-QQbot）',
+      lp._mdEsc('Xiaojingyu-QQbot') === 'Xiaojingyu-QQbot', lp._mdEsc('Xiaojingyu-QQbot'));
+    check('不转义 . + ! # > 这几个',
+      lp._mdEsc('v1.0 + 好！ #标签 > 引用') === 'v1.0 + 好！ #标签 > 引用');
+    check('转义 * _ ` [ ] |（会影响行内渲染）', lp._mdEsc('a*b_c`d') === 'a\\*b\\_c\\`d');
+    check('换行被压成空格（卡片里不能有裸 \\n）', lp._mdEsc('a\nb') === 'a b');
+
+    // --- 时间 / 数字格式化 ---
+    check('fmtDuration 秒 → 0:11', lp._fmtDuration(11) === '0:11');
+    check('fmtDuration 分钟 → 13:04', lp._fmtDuration(784) === '13:04');
+    check('fmtDuration 小时 → 1:02:03', lp._fmtDuration(3723) === '1:02:03');
+    check('fmtNum 万', lp._fmtNum(10957) === '1.10 万', lp._fmtNum(10957));
+    check('fmtNum 亿', lp._fmtNum(3.4e8) === '3.40 亿', lp._fmtNum(3.4e8));
+
+    // --- closingJson：找"包住 anchor 的最小 JSON 对象" ---
+    //     ⚠️ 这是快手解析的核心。最容易踩的坑：往前找**最近的** `{` 会找到
+    //        一个已经闭合的兄弟对象，所以必须正向配平、取结束位置在 anchor 之后的。
+    const html = 'var a={"x":1}; noise {"other":{"caption":"hello \\"}\\" world","id":"42"},"tail":1} after';
+    const box = lp._enclosingJson(html, html.indexOf('"caption"') + 5);
+    check('★ enclosingJson 找到包含 caption 的那个对象', !!box, box && box.raw);
+    let obj = null;
+    try { obj = JSON.parse(box.raw); } catch (e) { /* 交给下面的断言报错 */ }
+    check('  └ 取的是**最小**那个（直接就是 caption 对象，id=42）',
+      obj && obj.id === '42' && !obj.other, obj);
+    check('  └ 字符串里的转义引号不会打乱配平', obj && obj.caption === 'hello "}" world',
+      obj && obj.caption);
+
+    // --- LD+JSON（抖音走这条）---
+    const ldhtml = '<script type="application/ld+json">{"@type":"BreadcrumbList"}</script>'
+      + '<script type="application/ld+json">{"@type":"VideoObject","name":"标题 - 抖音","duration":"PT0H13M4S"}</script>';
+    const vo = lp._extractLdJson(ldhtml, 'VideoObject');
+    check('★ 能从多个 ld+json 块里挑出 VideoObject', !!vo && vo.name === '标题 - 抖音', vo);
+    check('  └ 挑不到时返回 null', lp._extractLdJson(ldhtml, 'NotExist') === null);
+    check('  └ 坏 JSON 块不会抛异常', lp._extractLdJson('<script type="application/ld+json">{bad}</script>', 'X') === null);
+
+    // --- ISO8601 时长 ---
+    check('PT0H13M4S → 784 秒', lp._parseIsoDuration('PT0H13M4S') === 784, lp._parseIsoDuration('PT0H13M4S'));
+    check('PT1M → 60 秒', lp._parseIsoDuration('PT1M') === 60);
+    check('PT45S → 45 秒', lp._parseIsoDuration('PT45S') === 45);
+    check('垃圾输入 → 0（不抛）', lp._parseIsoDuration(null) === 0 && lp._parseIsoDuration('abc') === 0);
+
+    // --- 卡片渲染：三种平台各自渲染，且都带 0 宽空格换行 + 图片 ---
+    const cards = {
+      github: lp.renderCard({
+        platform: 'github', fullName: 'RelyLinYu/QQBot', owner: 'RelyLinYu', desc: '描述',
+        stars: 12, forks: 3, issues: 0, created: '2026-01-01', pushed: '2026-09-01',
+        language: 'JavaScript', license: 'MIT', topics: ['qq', 'bot'],
+        ogImage: 'https://opengraph.githubassets.com/1/RelyLinYu/QQBot',
+        htmlUrl: 'https://github.com/RelyLinYu/QQBot',
+      }),
+      bilibili: lp.renderCard({
+        platform: 'bilibili', title: 'B站标题', bvid: 'BV1xx411c7mD',
+        up: 'UP主', view: 100, like: 20, danmaku: 5, pubdate: '2020-01-01',
+        duration: '3:00', cover: 'https://i0.hdslb.com/x.jpg', desc: '简介',
+        htmlUrl: 'https://www.bilibili.com/video/BV1xx411c7mD',
+      }),
+      douyin: lp.renderCard({
+        platform: 'douyin', title: '抖音标题', author: '作者A', duration: '13:04',
+        pubdate: '2026-09-05', like: 34146, view: 0, comment: 0,
+        cover: 'https://p3-pc-sign.douyinpic.com/x.jpeg',
+        htmlUrl: 'https://www.douyin.com/video/123',
+      }),
+      kuaishou: lp.renderCard({
+        platform: 'kuaishou', title: '快手标题', author: '兔晴晴baby', duration: '0:11',
+        pubdate: '2026-09-19', like: 10957, view: 66220, comment: 72,
+        cover: 'https://p2.a.yximgs.com/x.jpg',
+        htmlUrl: 'https://www.kuaishou.com/short-video/123',
+      }),
+    };
+    for (const [k, c] of Object.entries(cards)) {
+      check(`${k} 卡片渲染出来了`, typeof c === 'string' && c.length > 20, c);
+      check(`  └ ${k} 用零宽空格换行（不是裸 \\n）`,
+        c.includes('\u200B\n') && !/[^\u200B]\n/.test(c));
+      check(`  └ ${k} 带图片`, /!\[.*\]\(https?:/.test(c));
+      check(`  └ ${k} 带可点链接`, /\[🔗 .*\]\(https?:/.test(c));
+    }
+    check('抖音卡片用"抖音"字样', /在 抖音 打开/.test(cards.douyin));
+    check('快手卡片用"快手"字样', /在 快手 打开/.test(cards.kuaishou));
+    check('★ 卡片里没有半角空格紧跟加粗的写法（会被 QQ 吃掉）',
+      !/\*\*[^*]+\*\* [^：]/.test(cards.kuaishou), cards.kuaishou);
+    check('renderCard(null) → null（防上游传空）', lp.renderCard(null) === null);
+
+    // --- 视频：抖音拿不到直链（已知限制，不是 bug）；快手没直链时也要安静返回 null ---
+    check('getKuaishouVideoUrl 对没有直链的 info 返回 null',
+      await lp.getKuaishouVideoUrl({ platform: 'kuaishou' }, 1e9) === null);
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

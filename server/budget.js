@@ -120,6 +120,21 @@ function isFreeModel(model) {
   return (cfg.budget.freeModels || []).some((m) => model === m || model.startsWith(m + '-'));
 }
 
+// 单价表里最贵的那一档 —— 给「未登记模型」做保守兜底用。
+//
+// 为什么需要它（2026-09-21 踩过的坑）：
+//   原来 record() 遇到"表里查不到的模型"是**直接 return，一分钱都不记**。
+//   后果：换一个没登记的新模型名 → daySpent 永远是 0 → **¥3/天 的上限彻底失效**，
+//   花多少都不拦。而这条路径**恰恰最该拦**（新模型通常更贵）。
+//   现在改成按最贵已知价计费：宁可高估，让它早点停。
+//   真要免费，就显式写进 cfg.budget.freeModels —— 那才叫"登记"。
+function mostExpensivePrice() {
+  const table = cfg.budget.priceTable || {};
+  const all = Object.values(table).filter((v) => Array.isArray(v) && v.length >= 2);
+  if (!all.length) return [10, 30];   // 表是空的也给个保守值，绝不返回"免费"
+  return all.reduce((a, b) => (b[0] + b[1] > a[0] + a[1] ? b : a));
+}
+
 // ---------- 调用前：能不能花？ ----------
 // 返回 { ok, reason }。reason 是给群里看的理由（会直接发出去）。
 function canSpend() {
@@ -152,22 +167,27 @@ function record(model, usage) {
   const outTok = Number(usage.completion_tokens || 0);
 
   // ⚠️ 先问"是不是免费模型"，再查单价表 —— 顺序不能反
-  const p = isFreeModel(model) ? FREE : priceOf(model);
+  //
+  // 🔴 查不到单价时**绝不能当成免费**（2026-09-21 修的）：
+  //    旧写法是 priceOf() 返回 null 就 return，什么都不记 ——
+  //    结果是"换个没登记的新模型 = 钱的上限瞎了 = 无限花"。
+  //    现在改成按最贵已知价保守计费，钱的上限在任何情况下都有效。
+  const free = isFreeModel(model);
+  const known = free ? FREE : priceOf(model);
+  const p = known || mostExpensivePrice();
+  const guessed = !free && !known;
 
   state.calls++;
   state.byModel[model] = state.byModel[model] || { calls: 0, yuan: 0 };
   state.byModel[model].calls++;
 
-  if (!p) {
-    // 表里没登记：只记次数，不记钱，并提醒一次
-    save();
-    if (!state.warnedUnpriced) {
-      state.warnedUnpriced = true;
-      save();
-      console.warn(`[budget] 模型 ${model} 未登记单价，只记次数不记钱（要计费请加进 priceTable）`);
-    }
-    return;
+  // 用了兜底价 → 提醒一次（不是错误，是让你知道这个模型的估算偏保守）
+  if (guessed && !state.warnedUnpriced) {
+    state.warnedUnpriced = true;
+    console.warn(`[budget] ⚠️ 模型 ${model} 未登记单价 —— 已按最贵的已知价 [${p[0]}, ${p[1]}] 保守计费`
+      + '（想精确请加进 priceTable，想免费请加进 freeModels）');
   }
+
   if (p[0] === 0 && p[1] === 0) { save(); return; }   // 免费模型，不花钱
 
   // 保守：按缓存未命中 + 高峰价算

@@ -10,7 +10,13 @@
 const cfg = require('./config');
 const gateway = require('./gateway');
 const brain = require('./brain');
-const { sendGroupMessage, sendPrivateMessage } = require('./qqapi');
+const linkparse = require('./linkparse');
+const qqmedia = require('./qqmedia');
+const {
+  sendGroupMessage, sendPrivateMessage,
+  sendGroupMarkdown, sendPrivateMarkdown,
+  sendGroupMedia, sendPrivateMedia,
+} = require('./qqapi');
 const fs = require('fs');
 
 // ---------- 兜底：绝不因为一条消息让进程死掉 ----------
@@ -85,6 +91,40 @@ async function handleEvent(type, d) {
   //    ⚠️ 不能只判 message_type===0 —— 103 引用消息是可读的，要让它也进上下文，
   //       否则机器人看不到"对方刚才引用了什么"。
   if (text && brain.hasUsableText(d)) brain.pushContext(scope, who, text);
+
+  // 4.5 🆕 链接解析（GitHub / B站）—— **故意放在 L0 之前**
+  //
+  // ⚠️ 为什么要绕过 L0：用户明确要求「无需 @，采集到就回复」，而 L0 里
+  //    `sampleNonKeyword: 0` 会把"没 @ 也没关键词"的消息全拦掉 —— 走不到这里。
+  //    代价是自己管护栏：同群冷却 / 每日上限 / 静默时段 / 连发上限（都在 linkparse 里）。
+  //
+  // ⚠️ 护栏没过时**不要 return**，要让它继续走下面的正常流程 ——
+  //    否则"在冷却期里问它一个问题"会被这条支路吞掉，那才是 bug。
+  // ⚠️⚠️ 机器人自己发的消息**绝不能走链接解析** —— 这是个真会死循环的坑：
+  //      · 卡片里本身就写着 `[🔗 在 B站打开](https://www.bilibili.com/...)`
+  //      · 而这条支路跑在 passHardRules **之前**，那里才是检查 author.bot 的地方
+  //      · 一旦收到自己的消息（或另一个机器人发的同款卡片），就会**自己解析自己 → 自己回自己**
+  //     所以这里**必须**自己先挡一道。
+  const link = d.author?.bot ? null : linkparse.findLink(d);
+  if (link) {
+    // ⚠️⚠️ 「被点名」必须和正常流程一样**绕过连发上限**（2026-09-22 实测踩到）：
+    //     passHardRules 里是 `bypass = at || owner` —— @ 它、或主人说话，都不受
+    //     maxConsecutive（3 分钟 2 次）约束。这条支路跑在它**前面**，得自己实现同样豁免。
+    //     不这么做的后果实测过：连发三条 @（你好 / 数字 / 链接），
+    //     前两条各回一次，第三条带链接时被判"连发已达上限"→ 跳过 → 退回普通闲聊，
+    //     卡片死活出不来。而普通流程因为 @ 豁免了，所以看起来"它明明收到了却不解析"。
+    const named = brain.isOwner(d) || brain.isAtRobot(type, d);
+    const gate = linkparse.linkAllowed(scope);
+    if (!gate.ok) {
+      console.log(`  ├ 🔗 看到 ${link.platform} 链接，但先跳过（${gate.why}）`);
+    } else if (!named && !brain.consecutiveOk(scope)) {
+      console.log('  ├ 🔗 看到链接，但先跳过（本群连发已达上限，且没被点名）');
+    } else {
+      linkparse.markLink(scope);
+      await handleLink(d, link, scope, isGroup, openid);
+      return;
+    }
+  }
 
   // 5. L0 硬规则
   const l0 = brain.passHardRules(scope, d, type, isPrivate);
@@ -210,6 +250,142 @@ async function handleEvent(type, d) {
     brain.pushContext(scope, cfg.persona.name, reply);
   } else {
     console.log('  └ 发送失败，不计入冷却（下条消息仍可尝试）');
+  }
+}
+
+// 🆕 链接卡片支路：抓元信息 → 发一张 Markdown 卡片
+//
+// 全程**不调模型**（卡片是模板拼的）→ 这个功能不花钱，也天然免疫提示注入
+// （抓回来的标题是用户可控文本，但我们只把它当字符串拼进卡片，不当指令读）。
+async function handleLink(d, link, scope, isGroup, openid) {
+  console.log(`  ├ 🔗 ${link.platform} 链接: ${String(link.url).slice(0, 90)}`);
+  let parsed = null;
+  try {
+    parsed = await linkparse.parse(link);
+  } catch (e) {
+    console.warn(`  └ 链接解析异常: ${e.message || e}`);
+    return;
+  }
+  if (!parsed || !parsed.card) {
+    console.log('  └ 不回（链接解析不出内容 —— 可能是私有仓库 / 已删除 / 番剧受限）');
+    return;
+  }
+  console.log(`  ├ 卡片已生成（${parsed.card.length} 字）`);
+  const sent = isGroup
+    ? await sendGroupMarkdown(openid, parsed.card, d.id)
+    : await sendPrivateMarkdown(openid, parsed.card, d.id);
+  if (sent) {
+    // ⚠️ 只计入"本群连发上限"，**不调 markReplied** ——
+    //    否则会把对方 60 秒的聊天冷却一起占掉，他接着问问题就不理了。
+    brain.markScopeReplied(scope);
+    console.log('  └ ✓ 卡片已发送');
+  } else {
+    console.log('  └ 卡片发送失败（看上面的 err_code）');
+  }
+
+  // ===== P2：视频（B站 / 快手）=====
+  // 只在「群聊 + 支持的平台 + 开关开着」时走。私聊先不做（单聊的上传接口是另一套端点）。
+  // ⚠️ 抖音**没有直链**（SEO 页面里根本没有 .mp4），只发卡片 —— 这里直接跳过。
+  const vcfg = cfg.policy.linkParse?.video;
+  const videoOk = isGroup && vcfg?.enabled
+    && (parsed.platform === 'bilibili' || parsed.platform === 'kuaishou');
+  if (videoOk) await sendVideo(d, parsed.info, openid);
+}
+
+// 🆕 P2：把 B站视频下载下来 → 分片上传到 QQ → 用 msg_type=7 发出去
+//
+// 🔴 为什么不能把直链直接丢给 QQ：B站直链有防盗链（必须带 Referer），
+//    实测让 QQ 去下会报 `40093007 富媒体文件下载失败`。所以只能我们自己下。
+//
+// ⏱ 实测耗时（10MB / 360P）：下载 10.2s + 上传 24.8s ≈ 37s。
+//    被动回复窗口是 5 分钟，够用。
+//
+// ⚠️ 一次只处理一个视频 —— 服务器 2核2G / 3M 带宽，并发下载+上传会把机器压垮。
+let videoBusy = false;
+
+// B站 qn 值 → 人话（给提示语用）
+const QN_NAME = {
+  6: '240P', 16: '360P', 32: '480P', 64: '720P', 74: '720P60',
+  80: '1080P', 112: '1080P+', 116: '1080P60', 120: '4K',
+};
+
+// 🆕 解析期间的提示语
+//
+// ⚠️ 调用时机很关键：必须**过了大小检查、确定要发**之后才调。
+//    否则会出现"提示了却什么都没来" —— 那比不提示更让人困惑。
+async function sendVideoPending(d, groupopenid, info, src, v) {
+  // 快手不给 size / quality，所以这两项都做成"有才显示"
+  const size = src.size ? (src.size / 1048576).toFixed(1) + 'MB' : '';
+  const quality = QN_NAME[src.quality] || src.qualityLabel || '原画';
+  const pool = Array.isArray(v.pendingTexts) && v.pendingTexts.length ? v.pendingTexts : [v.pendingTemplate];
+  let text = pool[Math.floor(Math.random() * pool.length)] || '🎬 正在解析视频…';
+  text = String(text)
+    .replace(/\{size\}/g, size)
+    .replace(/\{quality\}/g, quality)
+    .replace(/\{title\}/g, String(info.title || '').slice(0, 30));
+
+  const ok = await sendGroupMessage(groupopenid, text, d.id);
+  console.log(`  ├ 🎬 已发解析提示${ok ? '' : '（⚠️ 发送失败）'}：${text}`);
+}
+
+async function sendVideo(d, info, groupOpenid) {
+  const v = cfg.policy.linkParse.video;
+  const tag = info.platform === 'kuaishou' ? '  ├ 🎬[快手]' : '  ├ 🎬';
+
+  if (videoBusy) { console.log(`${tag} 已有视频在处理，跳过这一个`); return; }
+
+  // 时长太长的先挡掉（下载+上传太久，而且大概率超 30MB）
+  if (info.durationSec && info.durationSec > v.maxDurationSec) {
+    console.log(`${tag} 跳过（时长 ${info.durationSec}s > 上限 ${v.maxDurationSec}s）`);
+    return;
+  }
+
+  videoBusy = true;
+  const t0 = Date.now();
+  try {
+    // ① 拿直链（快手和 B站 是两套完全不同的取法）
+    const maxBytes = v.maxMB * 1024 * 1024;
+    const src = info.platform === 'kuaishou'
+      ? await linkparse.getKuaishouVideoUrl(info, maxBytes)
+      : await linkparse.getBilibiliVideoUrl(info, maxBytes);
+    if (!src) { console.log(`${tag} 拿不到直链（番剧 / 付费 / 已删除 都可能）`); return; }
+
+    const mb = src.size ? (src.size / 1048576).toFixed(1) + 'MB' : '大小未知';
+    console.log(`${tag} 直链 OK：${mb}${src.quality ? ' · qn=' + src.quality : ''}${src.downgraded ? '（已自动降清晰度）' : ''}`);
+
+    if (src.size && src.size > maxBytes) {
+      console.log(`${tag} 跳过（${mb} > 上限 ${v.maxMB}MB —— 超了 QQ 会把它降级成"文件"，不是可播放视频）`);
+      return;
+    }
+
+    // ①.5 🆕 到这里**基本确定能发**了 → 先给一句提示，免得后面 30 秒像卡死
+    //      （注意：这一步会占掉被动回复配额里的 1 次，加上卡片和视频共 3 次 / 上限 5 次）
+    await sendVideoPending(d, groupOpenid, info, src, v);
+
+    // ② 下载（⚠️ 必须带 Referer，否则 B站 403）
+    const buf = await qqmedia.downloadToBuffer(src.url, {
+      headers: src.headers,
+      maxBytes,
+      timeoutMs: 90000,
+    });
+    console.log(`${tag} 下载完成 ${(buf.length / 1048576).toFixed(2)}MB · ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+    // ③ 分片上传 → file_info（文件名用视频 id：B站是 BV 号，快手是 photoId）
+    const fileInfo = await qqmedia.uploadMedia(
+      'groups', groupOpenid, buf, `${info.bvid || info.id || 'video'}.mp4`, 2,
+      (m) => console.log(`${tag} ${m}`),
+    );
+
+    // ④ 发送（被动回复 —— 走"被动回复配额"，不占主动消息额度）
+    //    ⚠️ file_info 有 ttl，所以是"上传完立刻发"，中间不能拖
+    const ok = await sendGroupMedia(groupOpenid, fileInfo, d.id);
+    console.log(ok
+      ? `${tag} ✓ 视频已发送（全程 ${((Date.now() - t0) / 1000).toFixed(1)}s）`
+      : `${tag} ✗ 视频发送失败（看上面的 err_code）`);
+  } catch (e) {
+    console.warn(`${tag} 失败: ${e.message || e}`);
+  } finally {
+    videoBusy = false;
   }
 }
 

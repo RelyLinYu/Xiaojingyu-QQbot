@@ -79,8 +79,17 @@ async function postMessage(url, body, label) {
   // ⚠️ 空内容直接不发。
   //    QQ 收到空 content 会报 40011000「请求数据异常」，而那个码查不到含义，
   //    白白浪费一次调用还查不出原因。本地的 trim 检查比它清楚得多。
-  if (typeof body.content !== 'string' || body.content.trim() === '') {
-    console.error(`[send:${label}] ✗ 内容为空，已阻止发送（content=${JSON.stringify(body.content)}）`);
+  //
+  // ⚠️⚠️ 但**不能一律查 body.content**（2026-09-21 加 Markdown 时发现）：
+  //     · msg_type=0 纯文本 → 内容在 content
+  //     · msg_type=2 Markdown → 内容在 markdown.content，**没有 content 字段**
+  //     · msg_type=7 富媒体   → 内容在 media.file_info
+  //    旧写法一律查 body.content，会把 Markdown / 富媒体消息**全部拦掉**。
+  const digest = body.msg_type === 2 ? body.markdown?.content
+    : body.msg_type === 7 ? body.media?.file_info
+      : body.content;
+  if (typeof digest !== 'string' || digest.trim() === '') {
+    console.error(`[send:${label}] ✗ 内容为空，已阻止发送（msg_type=${body.msg_type}）`);
     return null;
   }
 
@@ -93,7 +102,7 @@ async function postMessage(url, body, label) {
     await new Promise((r) => setTimeout(r, 1500));
     const again = await postOnce(url, body, label);
     if (again.ok) {
-      console.log(`[send:${label}] ✓（重试成功）`, body.content);
+      console.log(`[send:${label}] ✓（重试成功）${describe(body)}`);
       return again.json;
     }
     last = again;
@@ -104,8 +113,16 @@ async function postMessage(url, body, label) {
     return null;
   }
 
-  console.log(`[send:${label}] ✓`, body.content);
+  console.log(`[send:${label}] ✓${describe(body)}`);
   return last.json;
+}
+
+// 日志用的内容摘要（Markdown / 富媒体没有 content，直接打 body.content 会是 undefined）
+function describe(body) {
+  const t = body.msg_type === 2 ? body.markdown?.content
+    : body.msg_type === 7 ? '[富媒体 file_info]'
+      : body.content;
+  return ' ' + String(t || '').replace(/\n/g, ' / ').slice(0, 120);
 }
 
 // ---------- 群聊 ----------
@@ -138,4 +155,55 @@ async function sendPrivateMessage(userOpenid, content, replyToMsgId, quoteRefId)
   return postMessage(`https://api.bot.qq.com/v2/users/${userOpenid}/messages`, body, 'private');
 }
 
-module.exports = { sendGroupMessage, sendPrivateMessage };
+// ---------- 群聊：Markdown 卡片 ----------
+// ⚠️ 官方明确（2026/04/23 起）：**单聊/群聊的自定义 Markdown 对所有机器人开放，无需申请模板**。
+//    别和"markdown 模版消息"（要 custom_template_id）搞混 —— 那个才要申请。
+// 语法是 QQ 自己的方言，见 docs/项目文档.md；长文本折行要用零宽空格，不能用 \n。
+async function sendGroupMarkdown(groupOpenid, markdown, replyToMsgId) {
+  const body = { msg_type: 2, markdown: { content: markdown } };
+  if (replyToMsgId) {
+    body.msg_id = replyToMsgId;
+    body.msg_seq = nextSeq(replyToMsgId);
+  }
+  return postMessage(`https://api.bot.qq.com/v2/groups/${groupOpenid}/messages`, body, 'group-md');
+}
+
+async function sendPrivateMarkdown(userOpenid, markdown, replyToMsgId) {
+  const body = { msg_type: 2, markdown: { content: markdown } };
+  if (replyToMsgId) {
+    body.msg_id = replyToMsgId;
+    body.msg_seq = nextSeq(replyToMsgId);
+  }
+  return postMessage(`https://api.bot.qq.com/v2/users/${userOpenid}/messages`, body, 'private-md');
+}
+
+// ---------- 富媒体消息（msg_type=7）----------
+// ⚠️ file_info 来自 qqmedia.js 的上传接口，**直接透传** ——
+//    官方原话："内部为序列化的二进制数据，开发者无需解析"。
+// ⚠️ file_info 有 ttl（有效期），过期就废了 → 流程必须是「上传完立刻发」。
+async function sendGroupMedia(groupOpenid, fileInfo, replyToMsgId) {
+  const body = { msg_type: 7, media: { file_info: fileInfo } };
+  if (replyToMsgId) {
+    body.msg_id = replyToMsgId;
+    body.msg_seq = nextSeq(replyToMsgId);
+  }
+  return postMessage(`https://api.bot.qq.com/v2/groups/${groupOpenid}/messages`, body, 'group-media');
+}
+
+async function sendPrivateMedia(userOpenid, fileInfo, replyToMsgId) {
+  const body = { msg_type: 7, media: { file_info: fileInfo } };
+  if (replyToMsgId) {
+    body.msg_id = replyToMsgId;
+    body.msg_seq = nextSeq(replyToMsgId);
+  }
+  return postMessage(`https://api.bot.qq.com/v2/users/${userOpenid}/messages`, body, 'private-media');
+}
+
+module.exports = {
+  sendGroupMessage,
+  sendPrivateMessage,
+  sendGroupMarkdown,
+  sendPrivateMarkdown,
+  sendGroupMedia,
+  sendPrivateMedia,
+};
