@@ -554,6 +554,50 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       P.contextMaxChars > 30 * (12 + 6), `上限 ${P.contextMaxChars} vs 正常约 ${30 * (12 + 6)}`);
     check('  单条上限要宽于识图描述中位数 47 字（否则图片描述会被切）',
       P.contextMsgMaxChars > 47 * 2, `${P.contextMsgMaxChars} vs 47`);
+
+    // ---- 🆕 当前这条消息**不能被送两遍**（2026-09-22 修）----
+    //
+    // 线上实打实打出来过：
+    //   最近群聊：
+    //   小红: 今天好热啊
+    //   小明: 这个表情包笑死我了        ← 作为"历史"（index.js 第 4 步推进来的）
+    //   最新：小明: 这个表情包笑死我了   ← 作为"当前"（L1/L2 又拼了一遍）
+    // 短消息多约 14 token/次回话；**图片描述 47 字 → 多约 58 token/次回话**。
+    {
+      const C = 'group:CTX_DUP';
+      brain.pushContext(C, '小红', '今天好热啊', 'MSG_A');
+      brain.pushContext(C, '小明', '是啊 开空调了', 'MSG_B');
+      const curMsg = { content: '这个表情包笑死我了', author: { username: '小明' }, message_type: 0, id: 'MSG_CUR' };
+      brain.pushContext(C, '小明', curMsg.content, curMsg.id);
+
+      check('★ 当前这条**仍然在**上下文里（后面几条消息要看得见它，不能为了省 token 就删）',
+        brain.recentContext(C).length === 3, brain.recentContext(C).length);
+
+      const txt = brain.contextText(C, curMsg);
+      const hits = txt.split('\n').filter((l) => l.includes('这个表情包笑死我了'));
+      check('★★ 但拼给模型的文本里，当前这条出现 **0 次**（它由「最新：」单独给）',
+        hits.length === 0, `出现了 ${hits.length} 次`);
+      check('  └ 更早的两条仍在（别把整个上下文都清掉）',
+        txt.includes('今天好热啊') && txt.includes('是啊 开空调了'), txt);
+      check('  └ 老接口 recentContext 不受影响（它只管"存了什么"）',
+        brain.recentContext(C).some((m) => m.content === curMsg.content));
+
+      // 没有 id 的消息（老数据 / 机器人自己的回复）不该被误伤
+      check('★ 没有 msgId 时不做剔除（老数据 / 机器人自己的发言不受影响）',
+        brain.contextText(C, { content: 'x', id: '' }).includes('这个表情包笑死我了'));
+
+      // 内容相同但 id 不同的两条，**不能**被误删
+      // （群里连着发两条"哈哈哈"是常态，用内容比对就会误伤）
+      const D = 'group:CTX_DUP2';
+      brain.pushContext(D, '小明', '哈哈哈', 'ID_1');
+      brain.pushContext(D, '小明', '哈哈哈', 'ID_2');
+      const t2 = brain.contextText(D, { content: '哈哈哈', id: 'ID_2' });
+      check('★ 内容相同但 id 不同的两条：只剔除 id 命中的那条（用内容比对会误伤）',
+        t2.split('\n').filter((l) => l.includes('哈哈哈')).length === 1, t2);
+
+      check('contextText 已导出（L1/L2 共用，别再各写一份）',
+        typeof brain.contextText === 'function');
+    }
   }
 
   console.log('\n=== 13. ⭐ @ 判定：只认指向自己的，别把"群友互 @"当成叫我 ===');

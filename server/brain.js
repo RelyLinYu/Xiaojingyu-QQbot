@@ -88,12 +88,13 @@ setInterval(() => {
   }
 }, 60 * 1000).unref();
 
-// ---------- 上下文（双约束：条数 + 时效）----------
-function pushContext(gid, name, content) {
+// ---------- 上下文（三重约束：条数 + 时效 + 长度）----------
+// msgId：这条消息自己的 id（可选）。**只用于"别把当前这条送两遍"**，见 contextText()
+function pushContext(gid, name, content, msgId) {
   const arr = contexts.get(gid) || [];
   // ⚠️ 必须记时间戳。只记内容的话没法判断"这条是 1 分钟前还是 3 小时前"，
   //    冷场后机器人会拿着很久以前的话题硬接，显得很怪。
-  arr.push({ name, content, ts: Date.now() });
+  arr.push({ name, content, ts: Date.now(), msgId: msgId || '' });
   while (arr.length > cfg.policy.contextSize) arr.shift();
   contexts.set(gid, arr);
 }
@@ -144,6 +145,36 @@ function recentContext(gid) {
     if (cut > 0) out = out.slice(cut);
   }
   return out;
+}
+
+// 给模型看的"群聊上下文"文本
+//
+// 🔴 必须**排除当前这条消息**（按 msgId 精确匹配），否则它会**被送两遍**：
+//
+//     最近群聊：
+//     小红: 今天好热啊
+//     小明: 这个表情包笑死我了        ← 作为"历史"（index.js 第 4 步把它推进了上下文）
+//
+//     最新：小明: 这个表情包笑死我了   ← 作为"当前"（L1/L2 自己又拼了一遍）
+//
+//   （线上实打实打出来过，就是这么两行。）
+//
+// 代价：短消息每次回话多约 14 token（L1+L2 各一份）；
+//      **图片消息的描述有 47 字 → 一次回话多约 58 token** ——
+//      而且这是"每次回话都发生"，不是一次性的。
+//
+// ⚠️ 为什么不能简单地"不把当前消息推进上下文"：它**必须**进上下文，
+//    否则后面几条消息就看不到它了（机器人会失忆）。
+//    所以只能"存进去，但拼提示词时把它挑出来"。
+//
+// ⚠️ 为什么不用"内容相同就跳过"：群里有人连着发两条一样的"哈哈哈"是常态，
+//    那会误伤。用 msgId 是精确的。
+function contextText(scope, msg) {
+  const cur = msg?.id || '';
+  return recentContext(scope)
+    .filter((m) => !(cur && m.msgId === cur))
+    .map((m) => `${m.name}: ${m.content}`)
+    .join('\n');
 }
 
 // 定期清理：既清过期的消息，也清长时间没动静的整个会话（防内存无限涨）
@@ -529,7 +560,9 @@ async function shouldReply(scope, msg, hitKeyword, at) {
   if (hitKeyword) return { reply: true, score: 9, reason: '提到关键词' };
 
   // 只带"时效内"的消息 —— 冷场 10 分钟后不该再拿旧话题判断
-  const ctx = recentContext(scope).map((m) => `${m.name}: ${m.content}`).join('\n');
+  // ⚠️ 用 contextText() 而不是直接 recentContext()：它会把**当前这条**挑出去，
+  //    否则同一条消息会在提示词里出现两次（见 contextText 的注释）
+  const ctx = contextText(scope, msg);
 
   // ⭐ @ 了别人 → 对方在跟那个人说话，机器人不该抢答
   //    （开关见 config.js 的 policy.avoidButtingInWhenAtOther，默认开）
@@ -615,7 +648,8 @@ function nextSendDelay() {
 // ---------- L2：生成回复 ----------
 async function generateReply(scope, msg) {
   // 只带"时效内"的消息 —— 这是"冷场后不乱接话"的关键
-  const ctx = recentContext(scope).map((m) => `${m.name}: ${m.content}`).join('\n');
+  // ⚠️ 同样用 contextText()：当前这条由下面的 `who` 单独给，别重复送
+  const ctx = contextText(scope, msg);
   // ⭐ 把"当前时间"告诉它。
   //
   // 踩过的坑（2026-09 实测）：
@@ -926,6 +960,8 @@ module.exports = {
   extractText,
   extractQuoted,
   hasUsableText,
+  // 🆕 给模型看的上下文文本（会**挑出当前这条**，避免重复送）
+  contextText,
   isAtRobot,
   isMentionOnly,
   detectAssistantMode,

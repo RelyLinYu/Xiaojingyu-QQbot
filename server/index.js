@@ -161,7 +161,9 @@ async function handleEvent(type, d) {
   // 4. 能提出文本的消息才进上下文（卡片/并行消息/聊天记录不进，避免污染判断）
   //    ⚠️ 不能只判 message_type===0 —— 103 引用消息是可读的，要让它也进上下文，
   //       否则机器人看不到"对方刚才引用了什么"。
-  if (text && brain.hasUsableText(d)) brain.pushContext(scope, who, text);
+  //    ⚠️ 第 4 个参数 d.id 是给"别把当前这条送两遍"用的（见 brain.contextText）：
+  //       它必须进上下文（后面几条消息要看得见它），但拼提示词时要挑出去。
+  if (text && brain.hasUsableText(d)) brain.pushContext(scope, who, text, d.id);
 
   // 4.5 🆕 链接解析（GitHub / B站）—— **故意放在 L0 之前**
   //
