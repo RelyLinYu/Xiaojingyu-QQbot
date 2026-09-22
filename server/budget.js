@@ -12,8 +12,13 @@
 //      · 数据落盘 data/budget.json，重启不丢
 //
 //  记账依据：API 返回的 usage 里真实的 prompt_tokens / completion_tokens。
-//  ⚠️ 按"高峰价 + 缓存未命中"保守计算（高估），实际只会花得更少。
+//  ⚠️ 除了"缓存命中"那一段，其余都按**高峰价 + 缓存未命中**保守计算（高估），
+//     实际只会花得更少。缓存命中按真实的 1/50 价算（见 record() 的注释）。
 // ============================================================
+
+// 缓存命中的单价 = 未命中价的 1/50
+//   官方价目：空闲 0.02/1/4、高峰 0.04/2/8 —— 命中/未命中 恒为 1/50
+const CACHE_HIT_RATIO = 0.02;
 
 const fs = require('fs');
 const path = require('path');
@@ -190,8 +195,27 @@ function record(model, usage) {
 
   if (p[0] === 0 && p[1] === 0) { save(); return; }   // 免费模型，不花钱
 
-  // 保守：按缓存未命中 + 高峰价算
-  const yuan = (inTok / 1e6) * p[0] + (outTok / 1e6) * p[1];
+  // 记账：**区分"缓存命中"和"缓存未命中"**（2026-09-22 改）
+  //
+  // 🔴 为什么要改：旧写法把**所有** prompt token 都按未命中价（高峰 2 元/M）算，
+  //    而缓存命中的真实单价是它的 **1/50**（0.04 元/M）。
+  //    两个后果：
+  //      ① 账本虚高（保守是好事，但虚高到 4 倍就没意义了）
+  //      ② **优化看不见** —— 我们刚把 system 里的时间挪走、把缓存命中率从 0% 拉到 53%，
+  //         如果记账还按全价算，账本上一点变化都没有，等于白干
+  //
+  // ⚠️ 其余部分**保持保守**：未命中的输入按高峰价、输出按高峰价。
+  //    只有"缓存命中"这一段用真实比例 —— 那是实打实省下来的。
+  // ⚠️ 兼容别的服务商：它们不返回这两个字段 → hitTok=0，退化成旧公式，不会算错。
+  const hitTok = Math.max(0, Number(usage.prompt_cache_hit_tokens || 0));
+  const missTok = usage.prompt_cache_miss_tokens != null
+    ? Math.max(0, Number(usage.prompt_cache_miss_tokens))
+    : Math.max(0, inTok - hitTok);
+  const cachePrice = p[0] * CACHE_HIT_RATIO;
+
+  const yuan = (missTok / 1e6) * p[0]
+    + (hitTok / 1e6) * cachePrice
+    + (outTok / 1e6) * p[1];
   state.daySpent += yuan;
   state.spentYuan += yuan;
   state.byModel[model].yuan += yuan;

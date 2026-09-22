@@ -669,10 +669,27 @@ async function generateReply(scope, msg) {
     ? `\n\n${cfg.policy.assistantMode.systemNote}`
     : '';
 
+  // ⚠️⚠️ 【当前时间】必须放在 **user** 消息里，不能放 system（2026-09-22 实测修）
+  //
+  // 🔴 这是一个**纯浪费**的坑，而且很隐蔽：
+  //    DeepSeek 的上下文缓存是**前缀匹配**的，命中价是未命中价的 **1/50**。
+  //    我们的前缀是 `system(人设 141 token) → examples(147 token) → user`，
+  //    本来是稳定的、**本该每次都命中**。
+  //    但旧写法把【当前时间】**放在 system 的末尾**，而时间**每分钟都变** ——
+  //    于是整个前缀每分钟失效一次。
+  //
+  //    实测对比（同一段前缀，只改时间）：
+  //      A 时间在 system：同一条消息重发 → 命中 52%
+  //                      时间过 1 分钟     → 命中 **0%**
+  //                      时间过 5 分钟     → 命中 **0%**
+  //      B 时间挪到 user：时间过 1 分钟     → 命中 **53%**
+  //                      时间过 5 分钟     → 命中 **53%**
+  //                      连上下文都换了     → 命中 **55%**
+  //
+  //    ⇒ 挪到 user 之后，256 token 的稳定前缀**永久可缓存**，
+  //      跟时间变不变、上下文变不变都无关。
   const sys = cfg.persona.systemPrompt
     + `\n\n你的昵称是「${cfg.persona.name}」。直接说话，不要加昵称前缀，不要任何解释。`
-    + `\n\n【当前时间】${timeStr}\n`
-    + `（有人问时间/日期/星期，直接照这个答。别编造，也别说"我又不是时钟"——你知道现在几点。）`
     + assistantNote;
 
   // ⭐ 反重复：把它最近说过的话摆出来，要求换一种说法
@@ -697,7 +714,10 @@ async function generateReply(scope, msg) {
     ? `\n\n注意：上面标注的身份决定了你该用哪套规则。你要接一句：`
     : `\n\n你要接一句：`;
 
-  const user = `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + tail;
+  // 【当前时间】放在 user 的最前面（原因见上面 sys 那段注释 —— 放 system 会打掉缓存）
+  const user = `【当前时间】${timeStr}\n`
+    + `（有人问时间/日期/星期，直接照这个答。别编造，也别说"我又不是时钟"——你知道现在几点。）\n\n`
+    + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + tail;
   const r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples);
   // 预算用光时，把"没钱了"的理由原样带回去，由 index.js 发到群里
   if (r.budgetStop) return r;
@@ -904,8 +924,13 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
       const st = budget.status();
       const day = st.dayLeft === null ? '不限' : `剩¥${st.dayLeft.toFixed(3)}`;
       const tot = st.totalLeft === null ? '不限' : `剩¥${st.totalLeft.toFixed(3)}`;
-      console.log(`[ai] ${model} in=${j.usage.prompt_tokens} out=${j.usage.completion_tokens} `
-        + `(今日第 ${callCount}/${cfg.policy.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
+      // 🆕 把"缓存命中"也打出来 —— 这是唯一能**在线上看见**缓存优化有没有生效的地方。
+      //    （命中价是未命中价的 1/50，命中率高低直接决定话费）
+      const hit = Number(j.usage.prompt_cache_hit_tokens || 0);
+      const hitPct = j.usage.prompt_tokens ? Math.round((hit / j.usage.prompt_tokens) * 100) : 0;
+      console.log(`[ai] ${model} in=${j.usage.prompt_tokens} out=${j.usage.completion_tokens}`
+        + (hit ? ` 缓存命中${hit}(${hitPct}%)` : ' 缓存0%')
+        + ` (今日第 ${callCount}/${cfg.policy.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
     }
     // ⭐ 记账：用 API 返回的真实 token 数算钱
     budget.record(model, j.usage);

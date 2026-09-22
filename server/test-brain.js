@@ -343,11 +343,13 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
   //      纯本地，不发网络请求、不花钱、不影响真实预算。
   const realFetch = global.fetch;
   let called = 0;
+  let lastBody = null;      // 🆕 抓取真实请求体，用来验证"提示词长什么样"
 
   global.fetch = async (url, opts) => {
     const u = String(url);
     if (u.includes('chat/completions')) {
       called++;
+      try { lastBody = JSON.parse(String(opts && opts.body)); } catch (e) { lastBody = null; }
       const payload = {
         choices: [{ message: { role: 'assistant', content: '在。' }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 100, completion_tokens: 3 },
@@ -374,8 +376,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('返回值有 text 键', r && 'text' in r, Object.keys(r || {}).join(','));
     // ★ 核心断言
     check('★ r.text 是字符串（不是嵌套对象）',
-      typeof r.text === 'string',
-      `r.text 的类型是 ${typeof r.text}，值=${JSON.stringify(r.text)}`);
+      typeof r.text === 'string',      `r.text 的类型是 ${typeof r.text}，值=${JSON.stringify(r.text)}`);
     check('★ r.text 内容正确', r.text === '在。', JSON.stringify(r.text));
     // 如果真的被双层包裹，这里会明确指出来
     if (r && r.text && typeof r.text === 'object') {
@@ -389,8 +390,64 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('generateReply 依然返回 { text, segments }',
       typeof r2.text === 'string' && Array.isArray(r2.segments),
       JSON.stringify({ text: typeof r2.text, segs: r2.segments && r2.segments.length }));
+
+    // ---- 🔴 回归：时间必须在 **user** 里，不能进 system（2026-09-22 实测修的）----
+    //
+    // 为什么：DeepSeek 的上下文缓存是**前缀匹配**、命中价是 1/50。
+    // 前缀 = system(人设) → examples → user。时间放 system 末尾的话，
+    // **每分钟前缀就失效一次**，缓存命中率从 53% 掉到 0%。
+    // 实测：时间在 system 时"过 1 分钟"命中 0%；挪到 user 后稳定 53%。
+    {
+      const msgs = (lastBody && lastBody.messages) || [];
+      const systemMsgs = msgs.filter((m) => m.role === 'system').map((m) => String(m.content)).join('\n');
+      const userMsgs = msgs.filter((m) => m.role === 'user').map((m) => String(m.content)).join('\n');
+      check('★ 提示词里确实带了当前时间（功能不能丢）',
+        /【当前时间】/.test(userMsgs) || /【当前时间】/.test(systemMsgs));
+      check('★★ 时间在 **user** 里，**不在** system 里（放 system 会把 prompt 缓存全打掉）',
+        !/【当前时间】/.test(systemMsgs) && /【当前时间】/.test(userMsgs),
+        { system里有: /【当前时间】/.test(systemMsgs), user里有: /【当前时间】/.test(userMsgs) });
+      check('  └ system 是**稳定前缀**（不含时间 → 跨分钟也能命中缓存）',
+        !/\d{1,2}:\d{2}/.test(systemMsgs), systemMsgs.slice(0, 80));
+      check('  └ 示例对话在 system 之后、且是独立的多轮消息（缓存前缀的一部分）',
+        msgs.filter((m) => m.role === 'assistant').length >= 5,
+        msgs.filter((m) => m.role === 'assistant').length);
+    }
   } finally {
     global.fetch = realFetch;   // 一定恢复，否则污染后面的代码
+  }
+
+  // ---- 🆕 记账要区分"缓存命中"（1/50 价），否则账本虚高、优化看不见 ----
+  //
+  // ⚠️ 这里**直接调 budget.record**，不经过模型 ——
+  //    因为本地默认模型是 glm-4.7-flash（免费），走真实调用会记 ¥0，测不出东西。
+  {
+    const budget = require('./budget');
+    const b0 = budget.status().spentYuan;
+    // 命中 800 + 未命中 200 + 输出 10
+    budget.record('deepseek-flash', {
+      prompt_tokens: 1000, completion_tokens: 10,
+      prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200,
+    });
+    const withCache = budget.status().spentYuan - b0;
+    // 期望：200/1e6*2 + 800/1e6*(2*0.02) + 10/1e6*8 = 0.0004 + 0.000032 + 0.00008
+    const expect = 200e-6 * 2 + 800e-6 * 0.04 + 10e-6 * 8;
+    check('★★ 记账区分缓存命中（旧算法会把 1000 全按 2 元/M 记成 ¥0.00208）',
+      Math.abs(withCache - expect) < 1e-7, `记了 ¥${withCache.toFixed(6)}，期望 ¥${expect.toFixed(6)}`);
+    check('  └ 缓存命中的那 800 token 确实按 1/50 价算',
+      withCache < 1000e-6 * 2 * 0.6, '（若按全价会接近 ¥0.0021）');
+
+    // 别的服务商不返回 cache 字段 → 必须退化成旧公式，不能算错
+    const b1 = budget.status().spentYuan;
+    budget.record('deepseek-flash', { prompt_tokens: 1000, completion_tokens: 10 });
+    const noCache = budget.status().spentYuan - b1;
+    check('★ 没有 cache 字段时退化成旧公式（兼容别的服务商）',
+      Math.abs(noCache - (1000e-6 * 2 + 10e-6 * 8)) < 1e-7, noCache.toFixed(6));
+
+    // 免费模型仍然不记钱
+    const b2 = budget.status().spentYuan;
+    budget.record('glm-4.7-flash', { prompt_tokens: 9999, completion_tokens: 999 });
+    check('  免费模型（glm-4.7-flash）依旧不记钱',
+      budget.status().spentYuan === b2, budget.status().spentYuan - b2);
   }
 
   console.log('\n=== 11. ⭐ 多行回复分段逻辑 ===');
