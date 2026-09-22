@@ -1289,6 +1289,75 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('  有提示词（不能空着，否则模型只能瞎猜）',
       typeof cfg.policy.vision.prompt === 'string' && cfg.policy.vision.prompt.length > 20);
 
+    // --- 🔴 引用图片 + @机器人（用户 2026-09-22 真机踩到：回了"咋了"）---
+    //
+    //     真机数据长这样（message_type=103）：
+    //       content     = "<@机器人>"        ← 只有 @ 标记
+    //       msg_elements= 空                 ← 被引用的是图片，没有文字
+    //       attachments = 无                 ← 🔴 被引用的图片附件**根本不给**
+    //       message_scene.ext = ["ref_msg_idx=REFIDX_A", "msg_idx=REFIDX_B"]
+    //     解法：收到图时记下 "自己的 msg_idx → 描述"，引用时用 ref_msg_idx 查回来。
+    const IMG_MSG = {
+      message_type: 0,
+      message_scene: { ext: ['msg_idx=REFIDX_IMG1', 'auth_token=x'] },
+    };
+    check('  msgIdxOf 能从 message_scene.ext 里取出 msg_idx',
+      vision.msgIdxOf(IMG_MSG) === 'REFIDX_IMG1', vision.msgIdxOf(IMG_MSG));
+    check('  没有 message_scene 时不崩，返回空串',
+      vision.msgIdxOf({}) === '' && vision.msgIdxOf(null) === '');
+
+    const QUOTE_MSG = {
+      message_type: 103,
+      content: `<@${BOT}>`,
+      mentions: [{ is_you: true, bot: true }],
+      message_scene: { ext: ['ref_msg_idx=REFIDX_IMG1', 'msg_idx=REFIDX_QUOTE1', 'auth_token=y'] },
+    };
+    check('  refIdxOf 能取出 ref_msg_idx（引用指向的那条）',
+      vision.refIdxOf(QUOTE_MSG) === 'REFIDX_IMG1', vision.refIdxOf(QUOTE_MSG));
+    check('  msg_idx 和 ref_msg_idx 是两个不同的值（别搞混）',
+      vision.msgIdxOf(QUOTE_MSG) === 'REFIDX_QUOTE1' && vision.refIdxOf(QUOTE_MSG) === 'REFIDX_IMG1');
+
+    const VSCOPE = 'group:QUOTE_TEST';
+    check('  还没记过 → 查不到', vision.getImageDesc(VSCOPE, 'REFIDX_IMG1') === '');
+    vision.rememberImage(VSCOPE, 'REFIDX_IMG1', '叼梨猫支啤的谐音梗表情包');
+    check('★ 记下之后能按 msg_idx 查回来',
+      vision.getImageDesc(VSCOPE, 'REFIDX_IMG1') === '叼梨猫支啤的谐音梗表情包');
+    check('  别的群查不到（缓存按群隔离，别串台）',
+      vision.getImageDesc('group:OTHER', 'REFIDX_IMG1') === '');
+    check('★ 引用命中后，extractText 就能拿到图（于是不会回"咋了"）', (() => {
+      const m = { ...QUOTE_MSG };
+      m.__vision = vision.getImageDesc(VSCOPE, vision.refIdxOf(m));
+      return brain.isMentionOnly('GROUP_MESSAGE_CREATE', m) === false
+        && brain.extractText(m).includes('叼梨猫支啤');
+    })());
+
+    // ② 兜底：刚发过图，紧接着只 @ 它（图和 @ 是两条消息）
+    const RSCOPE = 'group:RECENT_TEST';
+    check('  还没图 → 查不到"最近一张"', vision.recentImageDesc(RSCOPE, 60000) === '');
+    vision.rememberImage(RSCOPE, 'REFIDX_X', '一只流泪吃面的猫');
+    check('★ 记下之后能查到"本群最近一张"',
+      vision.recentImageDesc(RSCOPE, 60000) === '一只流泪吃面的猫');
+    check('★ 窗口过了就查不到（别把几十秒前的图硬扯进来）',
+      vision.recentImageDesc(RSCOPE, -1) === '');
+    check('  别的群没有（按群隔离）', vision.recentImageDesc('group:OTHER2', 60000) === '');
+
+    // ⚠️ 顺序问题：先用 isMentionOnly 判断"要不要兜底"，**再**设 __vision。
+    //    设完之后它就不算纯 @ 了 —— 这是先有鸡还是先有蛋，顺序反了就兜不住。
+    const bareAt = {
+      message_type: 0, content: `<@${BOT}>`, mentions: [{ is_you: true, bot: true }],
+    };
+    check('★ 顺序：设 __vision 之前，isMentionOnly 为真（才能触发兜底）',
+      brain.isMentionOnly('GROUP_MESSAGE_CREATE', bareAt) === true);
+    bareAt.__vision = vision.recentImageDesc(RSCOPE, 60000);
+    check('  └ 设完之后为假（于是会真的回一句，而不是"咋了"）',
+      brain.isMentionOnly('GROUP_MESSAGE_CREATE', bareAt) === false);
+
+    // 配置健全性
+    check(`imageCacheMs 默认 10 分钟（${cfg.policy.vision.imageCacheMs}）`,
+      cfg.policy.vision.imageCacheMs === 10 * 60 * 1000);
+    check(`recentImageMs 默认 60 秒（不能调太宽，否则会误伤）`,
+      cfg.policy.vision.recentImageMs === 60000, cfg.policy.vision.recentImageMs);
+
     // --- describe：拿到不是图片的字节时必须**抛异常**，不能硬传给模型 ---
     //     ⚠️ 这里只测"拦下来"这条路径 —— 它根本不发模型请求，
     //        所以自测**不会花钱**，也不会写 budget.json。

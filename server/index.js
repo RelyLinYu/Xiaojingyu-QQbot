@@ -107,6 +107,10 @@ async function handleEvent(type, d) {
         if (desc) {
           vision.markVision(scope);
           d.__vision = desc;      // ← extractText 会把它拼进文本
+          // 🔑 把"这条消息的编号 → 描述"记下来：
+          //    之后有人**引用这张图**时，QQ 不会再把图片给我们，
+          //    只会给一个 ref_msg_idx —— 靠这个缓存才能查回来。
+          vision.rememberImage(scope, vision.msgIdxOf(d), desc);
           console.log(`  ├ 🖼 识别成功（${((Date.now() - vt) / 1000).toFixed(1)}s）：${desc}`);
         } else {
           // 只有"识别出来是空"才走这里（真失败会抛异常）
@@ -115,6 +119,30 @@ async function handleEvent(type, d) {
       } catch (e) {
         // ⚠️ 识图失败**不能影响正常聊天** —— 图看不懂就照原样继续（文字还在）
         console.warn(`  ├ 🖼 识别失败: ${e.message || e}`);
+      }
+    }
+  } else if (!d.author?.bot) {
+    // ===== 没有新图片，但可能"指向"了一张老图 =====
+    //
+    // 🔴 两种情况，都是用户真机上很难受、必须兜住的：
+    //   ① **引用了一张图 + @它**（手机 QQ 上没法"@ + 带图"，群友就这么干）
+    //      这种消息 message_type=103，QQ **不给被引用的图片附件**，
+    //      只给 `ref_msg_idx` → 用缓存查回描述。
+    //   ② **刚发过图，紧接着只 @ 它**（图和 @ 分成两条消息）
+    //      → 用本群最近那张图的描述。
+    //
+    // ⚠️ ② 的判断条件是 `brain.isMentionOnly(...)`，**必须在设 `__vision` 之前问** ——
+    //    设完之后它就不算"只有@"了（这是个先有鸡还是先有蛋的顺序问题）。
+    const refIdx = vision.refIdxOf(d);
+    const quoted = refIdx ? vision.getImageDesc(scope, refIdx) : '';
+    if (quoted) {
+      d.__vision = quoted;
+      console.log(`  ├ 🖼 引用的是一条**图片**消息 → 用之前存下的描述：${quoted}`);
+    } else if (brain.isMentionOnly(type, d)) {
+      const recent = vision.recentImageDesc(scope, cfg.policy.vision?.recentImageMs ?? 30000);
+      if (recent) {
+        d.__vision = recent;
+        console.log(`  ├ 🖼 本群刚发过图、这句只 @ 了它 → 用那张图的描述：${recent}`);
       }
     }
   }

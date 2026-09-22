@@ -144,6 +144,92 @@ setInterval(() => {
   for (const [k, t] of lastAt) if (now - t > max) lastAt.delete(k);
 }, 5 * 60 * 1000).unref();
 
+// ---------- 图片索引缓存（专门解决「引用图片 + @机器人」）----------
+//
+// 🔴 为什么需要（2026-09-22 用户真机踩到，线上日志原样是）：
+//
+//     [群] GROUP_MESSAGE_CREATE | spaceyee: (无文本内容)
+//       ├ message_type=103 mentions=[{... "is_you":true ...}]
+//       └ 只有@没有内容 → 回固定应答
+//     [send:group] ✓ 咋了
+//
+//   「引用一张图 + @机器人」时，QQ 推来的消息是：
+//     · message_type = 103（引用消息）
+//     · content      = `<@机器人>`（**只有 @ 标记**）
+//     · msg_elements = 空     ← 被引用的是**图片**，没有文字可给我们
+//     · attachments  = **无** ← 🔴 **被引用的图片附件根本不给**
+//     · message_scene.ext = ["ref_msg_idx=REFIDX_xxx", "msg_idx=REFIDX_yyy", ...]
+//   于是 extractText 得到空串 → 被判成"只有@没内容" → 回一句固定的「咋了」，
+//   图完全白看了。
+//
+// ✅ 但 QQ **给了 `ref_msg_idx`** —— 那就是被引用那条消息的 `msg_idx`。
+//    而**每条正常消息**的 `message_scene.ext` 里都有它自己的 `msg_idx`。
+//    所以：收到图时就把它自己的 `msg_idx` + 描述一起记下来，
+//    之后有人引用它，用 `ref_msg_idx` 就能查回来。
+//
+//    💡 比"重新下载那张图"更好：不用管 rkey 过期，也不重复花钱
+//       （描述在收到图的那一刻就已经算好了）。
+//
+// 另外再兜一层 `LAST_IMG`：**刚发过图、紧接着只 @ 它**（图和 @ 分成两条消息发）
+// 这种在手机 QQ 上很常见的操作，也能用上那张图的描述，而不是回「咋了」。
+const IMG_CACHE = new Map();     // `${scope}|${msg_idx}` -> { desc, ts }
+const LAST_IMG = new Map();      // scope -> { desc, ts }
+const IMG_CACHE_MAX = 500;       // 防内存涨
+
+// message_scene.ext 是个 `["key=value", ...]` 的数组，转成对象
+function extMap(d) {
+  const out = {};
+  const arr = (d && d.message_scene && d.message_scene.ext) || [];
+  for (const s of arr) {
+    const i = String(s).indexOf('=');
+    if (i > 0) out[String(s).slice(0, i)] = String(s).slice(i + 1);
+  }
+  return out;
+}
+
+// 这条消息自己的编号（记图时用）
+const msgIdxOf = (d) => extMap(d).msg_idx || '';
+// 这条消息**引用**的那条消息的编号（找图时用）
+const refIdxOf = (d) => extMap(d).ref_msg_idx || '';
+
+function rememberImage(scope, idx, desc) {
+  if (!desc) return;
+  const now = Date.now();
+  if (idx) IMG_CACHE.set(`${scope}|${idx}`, { desc, ts: now });
+  LAST_IMG.set(scope, { desc, ts: now });
+  // 超量就丢最早的（Map 保持插入顺序）
+  if (IMG_CACHE.size > IMG_CACHE_MAX) {
+    for (const k of IMG_CACHE.keys()) {
+      IMG_CACHE.delete(k);
+      if (IMG_CACHE.size <= IMG_CACHE_MAX) break;
+    }
+  }
+}
+
+// 按 msg_idx 查（用于"引用的是一条图片消息"）
+function getImageDesc(scope, idx, withinMs) {
+  const hit = IMG_CACHE.get(`${scope}|${idx}`);
+  if (!hit) return '';
+  if (withinMs && Date.now() - hit.ts > withinMs) return '';
+  return hit.desc;
+}
+
+// 查这个群最近描述过的图（用于"刚发过图 + 只 @ 了它"）
+function recentImageDesc(scope, withinMs) {
+  const hit = LAST_IMG.get(scope);
+  if (!hit) return '';
+  return (Date.now() - hit.ts > withinMs) ? '' : hit.desc;
+}
+
+// 定期清理，防内存涨（和上面两个限流表一样的做法）
+setInterval(() => {
+  const v = cfg.policy.vision || {};
+  const now = Date.now();
+  const keep = Math.max(v.imageCacheMs || 600000, v.recentImageMs || 30000);
+  for (const [k, x] of IMG_CACHE) if (now - x.ts > keep) IMG_CACHE.delete(k);
+  for (const [k, x] of LAST_IMG) if (now - x.ts > keep) LAST_IMG.delete(k);
+}, 60 * 1000).unref();
+
 // ---------- 真正的识图 ----------
 //
 // 返回一句中文描述；任何失败都**抛异常**，由调用方决定要不要吞掉。
@@ -181,6 +267,13 @@ module.exports = {
   visionAllowed,
   markVision,
   sniffMime,
+  // 🆕 图片索引缓存（「引用图片 + @机器人」靠它）
+  msgIdxOf,
+  refIdxOf,
+  rememberImage,
+  getImageDesc,
+  recentImageDesc,
   // 给自测用
   _beijingToday: beijingToday,
+  _extMap: extMap,
 };
