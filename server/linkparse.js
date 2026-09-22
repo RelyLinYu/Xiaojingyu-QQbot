@@ -483,9 +483,23 @@ async function fetchBilibili(url) {
 }
 
 // ---------- 格式化 ----------
+
+// ISO 时间串的**容错**处理
+//
+// 🔴 抖音给的是**坏值**：`"2026-09-05T17:00:00+08:00Z"`
+//    —— 已经有 `+08:00` 时区偏移了，末尾**还多一个 `Z`**。
+//    `new Date('2026-09-05T17:00:00+08:00Z')` → **Invalid Date**，
+//    于是卡片上的「发布」被静默跳过（用户 2026-09-22 反馈「抖音卡片没有发布时间」）。
+//    ⚠️ 这是抖音自己的 bug，但**得我们兜着**：解析失败原本只是"当没有"，
+//       而"当没有"的后果是信息缺失且**没有任何日志**，是最难发现的那类问题。
+//    这里统一把"偏移量后面多余的 Z"剪掉。
+function fixIso(s) {
+  return String(s || '').trim().replace(/([+-]\d{2}:?\d{2})Z$/i, '$1');
+}
+
 function fmtDate(iso) {
   if (!iso) return '';
-  const d = new Date(iso);
+  const d = new Date(fixIso(iso));
   if (Number.isNaN(d.getTime())) return '';
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
@@ -561,6 +575,11 @@ async function fetchDouyin(url) {
   if (!ld) return null;
 
   // interactionStatistic 是个数组，每项形如 { interactionType: {'@type':'LikeAction'}, userInteractionCount: 34146 }
+  //
+  // ⚠️ 它挂在 `creator` 下面，但里面装的其实是**这条视频**的数据（不是作者总量）：
+  //      LikeAction   = 本条点赞
+  //      FollowAction = 作者的粉丝数（这个我们**不用**）
+  //    抖音的 SEO 数据里**只有这两个**，**没有播放量**（详见下面 view 的注释）。
   const stat = (kind) => {
     for (const it of (ld.creator?.interactionStatistic || [])) {
       const t = String(it.interactionType?.['@type'] || it.interactionType || '');
@@ -577,14 +596,24 @@ async function fetchDouyin(url) {
     title: String(ld.name || '').replace(/\s*[-–]\s*抖音\s*$/, '').trim(),
     author: ld.creator?.name || '',
     authorUrl: ld.creator?.url || '',
+    // ⚠️ uploadDate 是**坏值**（末尾多一个 Z），fmtDate 里已统一容错
     pubdate: fmtDate(ld.uploadDate),
     durationSec: sec,
     duration: fmtDuration(sec),
     cover: (Array.isArray(ld.thumbnailUrl) ? ld.thumbnailUrl[0] : ld.thumbnailUrl) || '',
     like: stat('Like'),
-    comment: stat('Comment'),
+    // 🔴 评论数在**顶层** `commentCount`，**不在** creator.interactionStatistic 里。
+    //    早期只扫了 interactionStatistic → 卡片上"评论"永远不显示（已修）。
+    comment: Number(ld.commentCount) || stat('Comment'),
+    // 🔴 抖音**没有播放量**：VideoObject 顶层字段里根本没有 viewCount，
+    //    interactionStatistic 里也只有 LikeAction / FollowAction（没有 ViewAction）。
+    //    这是抖音自己的数据就不给，不是我们没读到。所以卡片上**不显示播放**。
     view: stat('View') || stat('Watch'),
-    htmlUrl: `https://www.douyin.com/video/${id}`,
+    // 🔴 卡片上的「打开」链接**不能用 `www.douyin.com/video/{id}`** ——
+    //    那个地址在**手机**上打开的是「抖音精选」PC 版网页（用户 2026-09-22 反馈），
+    //    不是那个视频。手机上的视频 H5 页是 `iesdouyin.com/share/video/{id}/`
+    //    （实测手机 UA 直出该页、不跳转；PC 上它会 302 回 douyin.com，也没有损失）。
+    htmlUrl: `https://www.iesdouyin.com/share/video/${id}/`,
   };
 }
 
@@ -835,4 +864,6 @@ module.exports = {
   _parseIsoDuration: parseIsoDuration,
   _coverSize: coverSize,
   _imageSize: imageSize,
+  _fixIso: fixIso,
+  _fmtDate: fmtDate,
 };

@@ -1023,6 +1023,22 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       !/\*\*[^*]+\*\* [^：]/.test(cards.kuaishou), cards.kuaishou);
     check('renderCard(null) → null（防上游传空）', lp.renderCard(null) === null);
 
+    // --- ★ 抖音卡片必须带「发布」和「评论」，且不该出现"播放"（抖音没这个数据）---
+    const dyCard = lp.renderCard({
+      platform: 'douyin', title: '抖音标题', author: '作者A', duration: '13:04',
+      pubdate: '2026-09-05', like: 34168, view: 0, comment: 2490,
+      cover: 'https://p3.douyinpic.com/x.jpeg', coverSize: '#480px #360px',
+      htmlUrl: 'https://www.iesdouyin.com/share/video/7681631364923329842/',
+    });
+    check('★ 抖音卡片有「发布」（旧 bug：整行消失）', /发布.*2026-09-05/.test(dyCard), dyCard);
+    check('★ 抖音卡片有「评论」（旧 bug：commentCount 读漏了）',
+      /评论 2490/.test(dyCard), dyCard);
+    check('★ 抖音卡片不显示「播放」（抖音的数据里根本没有播放量）',
+      !/播放/.test(dyCard), dyCard);
+    check('★ 抖音卡片的「打开」链接是手机 H5 页，不是抖音精选 PC 版',
+      /\[🔗 .*\]\(https:\/\/www\.iesdouyin\.com\/share\/video\//.test(dyCard)
+      && !/douyin\.com\/video\//.test(dyCard), dyCard);
+
     // --- 一条消息里的多个链接（用户 2026-09-22 实测踩到：快手那条被静默丢掉）---
     const two = 'https://v.douyin.com/IbTyOLmZyDY/ https://v.kuaishou.com/JJYSn5HT';
     const twoLinks = lp.findLinks({ content: two, message_type: 0 });
@@ -1092,6 +1108,26 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     global.fetch = async () => { throw new Error('network down'); };
     check('★ 网络异常 → null（绝不抛到主流程）', await lp._imageSize('http://stub/err.jpg') === null);
     global.fetch = realFetch;
+
+    // --- 日期容错：抖音给的 uploadDate 是**坏值**（末尾多一个 Z）---
+    //     ⚠️ 用户 2026-09-22 反馈「抖音卡片没有发布时间」就是这个：
+    //        旧的 `new Date('2026-09-05T17:00:00+08:00Z')` → Invalid Date
+    //        → fmtDate 返回空串 → 卡片上「发布」被**静默跳过**（连日志都没有）。
+    check('★ 抖音的坏日期能被修正（偏移量后面多余的 Z）',
+      lp._fixIso('2026-09-05T17:00:00+08:00Z') === '2026-09-05T17:00:00+08:00',
+      lp._fixIso('2026-09-05T17:00:00+08:00Z'));
+    // ⚠️ 这里不写死 '2026-09-05' —— 具体日期取决于运行机器的时区。
+    //    真正要锁住的是「**不再是空串**」（旧的 bug 就是返回空串、静默少一行）。
+    const dyDate = lp._fmtDate('2026-09-05T17:00:00+08:00Z');
+    check('★ 坏日期不再返回空串（旧 bug：卡片上「发布」整行消失）',
+      /^2026-09-0[456]$/.test(dyDate), JSON.stringify(dyDate));
+    check('  正常 ISO 照常工作',
+      lp._fmtDate('2020-01-01T12:00:00Z') === '2020-01-01', lp._fmtDate('2020-01-01T12:00:00Z'));
+    check('  带偏移量的也照常工作',
+      lp._fmtDate('2020-01-01T12:00:00+08:00') === '2020-01-01',
+      lp._fmtDate('2020-01-01T12:00:00+08:00'));
+    check('  垃圾输入仍然返回空串（不抛）',
+      lp._fmtDate('abc') === '' && lp._fmtDate('') === '' && lp._fmtDate(null) === '');
 
     // --- 卡片里真的用上了算出来的尺寸 ---
     const portraitCard = lp.renderCard({
