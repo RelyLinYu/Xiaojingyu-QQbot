@@ -267,7 +267,8 @@ async function handleLink(d, link, scope, isGroup, openid) {
     return;
   }
   if (!parsed || !parsed.card) {
-    console.log('  └ 不回（链接解析不出内容 —— 可能是私有仓库 / 已删除 / 番剧受限）');
+    // ⚠️ 各平台的失败原因不一样，写全，免得以后翻日志时误判
+    console.log('  └ 不回（链接解析不出内容 —— 私有仓库 / 已删除 / 番剧付费 / 抖音爬虫 UA 失效 / 快手页面改版）');
     return;
   }
   console.log(`  ├ 卡片已生成（${parsed.card.length} 字）`);
