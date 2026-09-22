@@ -12,6 +12,9 @@
 //    · 只监听 0.0.0.0:PORT，**入站安全组只放行这一个端口**
 //    · 全站只读，没有任何"执行命令""改配置"的入口
 //    · 不上传任何用户输入到别处，不落盘访问日志
+//    · 🆕 只有 `/og/...` 一条路径是**公开**的（放给 QQ 平台抓图片用，它不会带密码），
+//         而且那条路径只接受结构化的 `<owner>/<repo>`，**不接受任意 URL** ——
+//         细节与理由见 tools/ogcache.js 的文件头
 //
 //  用法：
 //    LOG_PASSWORD=你的密码 PORT=8080 node tools/logweb.js
@@ -23,6 +26,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const ogcache = require('./ogcache');
 
 const PORT = Number(process.env.PORT) || 8080;
 const PASSWORD = process.env.LOG_PASSWORD || '';
@@ -246,6 +250,23 @@ load(true);
 // ---------- 服务器 ----------
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+
+  // GitHub 仓库预览图的中转缓存（公开路由，**故意放在密码校验之前** —— QQ 不会带密码）
+  //
+  // 为什么需要、怎么验证的、有哪些安全约束，全部写在 tools/ogcache.js 的文件头里。
+  // 一句话：官方文档说 markdown 里的图「开放平台会下载转存」，
+  //         而 GitHub 的预览图接口**间歇性 429** → QQ 抓那一下失败就永远没图了。
+  //         所以让它抓我们，我们抓的时候能重试 + 缓存。
+  //
+  // ⚠️ 只在配置了对外地址时才启用（没配就是"没这个能力"，直接 404，别留个半成品路由）。
+  try {
+    const handled = await ogcache.handle(req, res, url.pathname, (m) => console.log(`[ogcache] ${m}`));
+    if (handled) return;
+  } catch (e) {
+    console.log(`[ogcache] 未捕获异常: ${e.message}`);
+    if (!res.headersSent) { res.writeHead(500); res.end('ogcache error'); }
+    return;
+  }
 
   if (!authed(req, url)) {
     res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });

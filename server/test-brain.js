@@ -1508,6 +1508,116 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       global.fetch = realFetchC;
     }
 
+    // --- 🆕 GitHub 预览图走自建中转（2026-09-22）---
+    //
+    // 起因：用户反馈「GitHub 卡片的图片读取不到的情况还是太多」。
+    // 根因：官方文档说 markdown 里的图「开放平台会下载转存」→ QQ **发卡片那一刻抓一次**、
+    //      失败不重试；而 GitHub 的预览图接口**间歇性 429**（实测密集请求 20%~50%）。
+    // 所以让 QQ 抓我们（我们能重试+缓存）。已实测 QQ 会来抓、且接受 http://。
+    const ogc = require('./tools/ogcache');
+    const lp = require('./linkparse');     // 第 19 组里也 require 过，这里按需再取一次（模块有缓存）
+
+    // ① 地址拼装：配了中转就走中转，没配就退回直连（**不能更差**）
+    const realOg = cfg.policy.linkParse.ogProxy;
+    try {
+      cfg.policy.linkParse.ogProxy = { enabled: true, base: 'http://1.2.3.4:8080' };
+      const u = lp.renderCard({
+        platform: 'github', fullName: 'a/b', owner: 'a', desc: '', stars: 1, forks: 0,
+        issues: 0, created: '2026-01-01', pushed: '2026-01-01', language: '', license: '',
+        topics: [], ogImage: 'http://1.2.3.4:8080/og/a/b.png', htmlUrl: 'https://github.com/a/b',
+      });
+      check('★ 配了中转就用中转地址', u.includes('http://1.2.3.4:8080/og/a/b.png'), u);
+    } finally { cfg.policy.linkParse.ogProxy = realOg; }
+
+    check('★ 中转地址是"配置驱动"的（留空就退回直连 GitHub，不会更差）',
+      typeof cfg.policy.linkParse.ogProxy?.base === 'string');
+    // ⚠️ 这里**故意不断言"线上一定开了中转"** —— base 来自 .env，
+    //    仓库里是空的（脱敏：不能把服务器公网 IP 写进代码）。
+    //    只断言"如果配了，必须是个 http(s) 地址"。
+    check('  配了就必须是 http(s) 地址；没配就是空串（不许写个半成品）',
+      cfg.policy.linkParse.ogProxy.base === ''
+      || /^https?:\/\/[^\s]+$/.test(cfg.policy.linkParse.ogProxy.base),
+      cfg.policy.linkParse.ogProxy.base);
+    check('★ 脱敏：仓库里的 config.js **不含**真实服务器 IP',
+      !/101\.200\.78\.81/.test(require('fs').readFileSync(__dirname + '/config.js', 'utf8')));
+
+    // ② 路由解析：只认结构化的 owner/repo，**绝不接受任意 URL**
+    check('★ 能认出合法的 /og/<owner>/<repo>.png',
+      JSON.stringify(ogc.parsePath('/og/RelyLinYu/Xiaojingyu-QQbot.png')) ===
+      JSON.stringify({ owner: 'RelyLinYu', repo: 'Xiaojingyu-QQbot', key: 'relylinyu/xiaojingyu-qqbot' }),
+      ogc.parsePath('/og/RelyLinYu/Xiaojingyu-QQbot.png'));
+    check('  大小写不同的 owner 归到同一个缓存 key（天然去重）',
+      ogc.parsePath('/og/relylinyu/Xiaojingyu-QQbot.png').key === ogc.parsePath('/og/RelyLinYu/Xiaojingyu-QQbot.png').key);
+    check('  带点/下划线/横线的名字都合法', !!ogc.parsePath('/og/a-b_c.d/e.f_g-h.png'));
+    check('★ 不是 /og/ 开头的路径不归它管（返回 null，让别的路由处理）',
+      ogc.parsePath('/api/state') === null && ogc.parsePath('/') === null);
+    check('★ 缺一段 → null', ogc.parsePath('/og/RelyLinYu.png') === null && ogc.parsePath('/og/RelyLinYu/') === null);
+    check('★ 多一层路径 → null（防越权访问别的路径）',
+      ogc.parsePath('/og/a/b/c.png') === null);
+    check('★ 路径穿越 → null（`..` 必须挡掉）',
+      ogc.parsePath('/og/../b.png') === null && ogc.parsePath('/og/a/....png') === null,
+      ogc.parsePath('/og/../b.png'));
+    check('★ 非法字符 → null（防注入到上游 URL 里）',
+      ogc.parsePath('/og/a b/c.png') === null
+      && ogc.parsePath('/og/a%2Fb/c.png') === null
+      && ogc.parsePath('/og/a/b?x=1.png') === null);
+    check('★ 开头的横线/点不合法（GitHub 用户名不可能这样开头）',
+      ogc.parsePath('/og/-a/b.png') === null && ogc.parsePath('/og/.a/b.png') === null);
+    check('★ 上游 host 是**写死**的，不接受调用方指定（否则就是开放代理）',
+      ogc._UPSTREAM === 'https://opengraph.githubassets.com/1', ogc._UPSTREAM);
+
+    // ③ 默认参数健全性
+    const oc = ogc._cfgOf();
+    check('  缓存 1 小时（仓库信息变了会重新抓）', oc.ttlMs === 60 * 60 * 1000, oc.ttlMs);
+    check('  最多 100 张（≈15MB，2G 内存够用）', oc.maxEntries === 100, oc.maxEntries);
+    check('  每 IP 每分钟 60 次', oc.ratePerMin === 60, oc.ratePerMin);
+    check('  抓上游带重试（治间歇性 429 的关键）', oc.retries >= 3, oc.retries);
+
+    // ④ 🆕 发卡片前**先预热**（这一版最重要的设计点）
+    //
+    // 为什么必须提前抓：QQ 是"发卡片那一刻抓一次、失败不重试"，
+    // 而 GitHub 的 429 窗口比它那一下长得多（实测重试隔 1 秒仍是 429）。
+    // → "等 QQ 来抓时才去抓"太被动；**它没时间等，我们有**。
+    check('   预热超时配置存在（不能无限等，卡片要发出去）',
+      cfg.policy.linkParse.ogProxy.warmTimeoutMs >= 2000
+      && cfg.policy.linkParse.ogProxy.warmTimeoutMs <= 15000,
+      cfg.policy.linkParse.ogProxy.warmTimeoutMs);
+    {
+      const realFetchW = global.fetch;
+      const okInfo = { platform: 'github', ogImage: 'http://stub/og/a/b.png' };
+      global.fetch = async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(1234) });
+      const r1 = await lp.warmOgImage(okInfo, () => {});
+      check('★ 预热成功 → 保留图片', r1 === true && okInfo.ogImage !== '', okInfo);
+
+      const badInfo = { platform: 'github', ogImage: 'http://stub/og/a/b.png' };
+      global.fetch = async () => ({ ok: false, status: 429, arrayBuffer: async () => new ArrayBuffer(0) });
+      const r2 = await lp.warmOgImage(badInfo, () => {});
+      check('★★ 预热失败(429) → **把图从卡片里摘掉**，而不是留个加载不出来的破框',
+        r2 === false && badInfo.ogImage === '' && badInfo.ogImageDropped === true, badInfo);
+
+      const errInfo = { platform: 'github', ogImage: 'http://stub/og/a/b.png' };
+      global.fetch = async () => { throw new Error('network down'); };
+      check('★ 预热异常 → 同样摘掉，且**不抛到主流程**',
+        await lp.warmOgImage(errInfo, () => {}) === false && errInfo.ogImage === '');
+
+      const noImg = { platform: 'github', ogImage: '' };
+      global.fetch = realFetchW;
+      check('  本来就没图 → 直接 false，不发请求',
+        await lp.warmOgImage(noImg, () => {}) === false);
+      global.fetch = realFetchW;
+    }
+
+    // ⑤ 摘掉图之后，卡片里真的没有那行图片了
+    const noImgCard = lp.renderCard({
+      platform: 'github', fullName: 'a/b', owner: 'a', desc: '', stars: 1, forks: 0,
+      issues: 0, created: '2026-01-01', pushed: '2026-01-01', language: '', license: '',
+      topics: [], ogImage: '', htmlUrl: 'https://github.com/a/b',
+    });
+    check('★ ogImage 为空 → 卡片不渲染图片行（干净的无图卡片）',
+      !/!\[/.test(noImgCard), noImgCard);
+    check('  └ 但卡片的其它信息都在（标题/Star/链接）',
+      noImgCard.includes('a/b') && noImgCard.includes('Star') && noImgCard.includes('github.com/a/b'));
+
     // --- describe：拿到不是图片的字节时必须**抛异常**，不能硬传给模型 ---
     //     ⚠️ 这里只测"拦下来"这条路径 —— 它根本不发模型请求，
     //        所以自测**不会花钱**，也不会写 budget.json。

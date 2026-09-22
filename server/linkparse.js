@@ -380,13 +380,72 @@ async function fetchGithub(url) {
     license: j.license?.spdx_id && j.license.spdx_id !== 'NOASSERTION' ? j.license.spdx_id : '',
     topics: Array.isArray(j.topics) ? j.topics.slice(0, 5) : [],
     htmlUrl: j.html_url || url,
-    // 🆕 仓库预览图：GitHub 自动生成的 OpenGraph 图（实测 1200×600，正好 2:1）
+    // 🆕 仓库预览图
     //
     // ⚠️ 这张图是**给 QQ 去下载的**，我们自己不拉 —— 所以不占我们带宽、也不涉及 SSRF。
     // ⚠️ 路径里的 hash 部分**随便填都行**（实测 `1` 和 `abc123` 返回同一张图），
     //    所以不用为了拿图多调一次 API。
-    ogImage: `https://opengraph.githubassets.com/1/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+    //
+    // 🔴 但**不要直接把 GitHub 的地址给 QQ**（用户 2026-09-22 反馈"图读取不到的情况还是太多"）：
+    //    · 官方文档说 markdown 里的图「**开放平台会下载转存该资源**」
+    //      → QQ 是**发卡片那一刻抓一次**，抓失败**不重试，这张卡片的图就永远没了**
+    //    · 而 `opengraph.githubassets.com` **间歇性限流**（实测密集请求 20%~50% 是 429）
+    //    ⇒ 所以走我们自己的中转（`policy.linkParse.ogProxy`）：我们抓的时候能**重试 + 缓存**。
+    //      实测 QQ 会来抓我们（日志里能看到腾讯的 IP），而且**接受 http://**。
+    //      没配 ogProxy 就退回直连 GitHub —— 和以前一样，不会更差。
+    ogImage: ogImageUrl(owner, repo),
   };
+}
+
+// 仓库预览图的地址：优先走自己的中转，没配就直连 GitHub
+function ogImageUrl(owner, repo) {
+  const g = cfg.policy.linkParse?.ogProxy;
+  const base = String(g?.base || '').replace(/\/+$/, '');
+  if (g?.enabled && base) {
+    // ⚠️ 只拼 owner/repo，**绝不接受任意 URL**；服务端还会再校验一次字符集
+    return `${base}/og/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.png`;
+  }
+  return `https://opengraph.githubassets.com/1/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+}
+
+// 🆕 发卡片**之前**先把预览图预热好（2026-09-22）
+//
+// 🔴 为什么必须"提前"抓，而不是等 QQ 抓（这是这一版最重要的设计点）：
+//    · 官方文档说 markdown 里的图「开放平台会下载转存该资源」
+//      → QQ 是**发卡片那一刻抓一次，且失败不重试**
+//    · 而 GitHub 的预览图接口会 **429**，实测**重试隔 1 秒仍是 429**
+//      （限流窗口比"QQ 那一下就抓完"的时间长得多）
+//    ⇒ 所以"QQ 来抓的时候我们才去抓"这个时机**太被动**：它没有时间等，我们有。
+//
+// ✅ 现在改成：**我们先把图抓进缓存，再发卡片**。
+//    这样 QQ 来抓的时候是**缓存命中**，必定成功。
+//    （实测：QQ 确实会来抓我们，而且接受 http://，见 tools/ogcache.js 的文件头）
+//
+// ⚠️ 抓不到时**把图从卡片里去掉**，而不是留着让它显示成破图 ——
+//    "没有图但卡片干净"比"有一个加载不出来的框"体验好。
+//
+// 返回 true = 图可用，false = 已经把它从卡片里摘掉了
+async function warmOgImage(info, log = () => {}) {
+  if (!info?.ogImage) return false;
+  const g = cfg.policy.linkParse?.ogProxy;
+  const t0 = Date.now();
+  try {
+    const r = await fetch(info.ogImage, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(g?.warmTimeoutMs || 6000),
+    });
+    if (r.ok) {
+      const len = (await r.arrayBuffer()).byteLength;
+      log(`预览图预热成功 ${len}B（${Date.now() - t0}ms）`);
+      return true;
+    }
+    log(`预览图预热失败 HTTP ${r.status}（${Date.now() - t0}ms）→ 卡片里不放图`);
+  } catch (e) {
+    log(`预览图预热异常 ${e.name}（${Date.now() - t0}ms）→ 卡片里不放图`);
+  }
+  info.ogImage = '';
+  info.ogImageDropped = true;
+  return false;
 }
 
 // ---------- B站 ----------
@@ -838,6 +897,13 @@ async function parse(link) {
     if (dim) console.log(`  ├ 封面 ${dim.w}×${dim.h} → ${info.coverSize}`);
   }
 
+  // 🆕 GitHub 预览图：**发卡片之前**先预热（原因见 warmOgImage 的注释）
+  //    ⚠️ 必须在 renderCard **之前** —— 因为预热失败时会把 ogImage 清空，
+  //       卡片要按"最终有没有图"来渲染。
+  if (link.platform === 'github') {
+    await warmOgImage(info, (m) => console.log(`  ├ 🖼 ${m}`));
+  }
+
   return { platform: link.platform, info, card: renderCard(info) };
 }
 
@@ -854,6 +920,9 @@ module.exports = {
   hostOf,
   platformOf,
   hostAllowed,
+  // 🆕 发卡片前预热 GitHub 预览图（也导出给自测用）
+  warmOgImage,
+  ogImageUrl,
   // 给自测用
   _fmtDuration: fmtDuration,
   _fmtNum: fmtNum,
