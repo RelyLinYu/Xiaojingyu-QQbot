@@ -1145,6 +1145,167 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       await lp.getKuaishouVideoUrl({ platform: 'kuaishou' }, 1e9) === null);
   }
 
+  console.log('\n=== 20. ⭐ 识图（图片/表情包 → 可读文本）===');
+  {
+    // ⚠️ 和链接解析那组一样：**故意不联网**。
+    //    真机联网验证靠"群里发个表情包看它认不认得"，不放进自测
+    //    （否则网络一抖就"假红"，而且会把钱花在自测里）。
+    const vision = require('./vision');
+    const BOT = 'BOT0PEN1D000000000000000000000000';
+
+    // --- 格式嗅探：**不信 filename**（实测 QQ 给过 .jpg 后缀但内容是 GIF）---
+    const B = (arr) => Buffer.from(arr);
+    const mk = (head, tail = []) => Buffer.concat([B(head), Buffer.alloc(16), B(tail)]);
+    check('★ JPEG 嗅探（ffd8ff）', vision.sniffMime(mk([0xFF, 0xD8, 0xFF, 0xE0])) === 'image/jpeg');
+    check('★ PNG 嗅探（89504e47）',
+      vision.sniffMime(mk([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])) === 'image/png');
+    check('★ GIF 嗅探（474946）', vision.sniffMime(mk(B('GIF89a'))) === 'image/gif');
+    check('★ WebP 嗅探（RIFF....WEBP）',
+      vision.sniffMime(Buffer.concat([
+        B('RIFF'), B([0, 0, 0, 0]), B('WEBP'), Buffer.alloc(16),
+      ])) === 'image/webp');
+    check('  垃圾字节 → 空串（让上层报错，别硬猜）', vision.sniffMime(mk(B('hello world!'))) === '');
+    check('  太短的 buffer → 空串（不越界读）', vision.sniffMime(B([0xFF, 0xD8])) === '');
+    check('  null / undefined → 空串', vision.sniffMime(null) === '' && vision.sniffMime(undefined) === '');
+
+    // --- findImage：QQ 推图片时 message_type 是 0，图片在 attachments 里 ---
+    const imgMsg = {
+      message_type: 0,
+      content: '',
+      attachments: [{
+        content_type: 'image/gif',
+        filename: '120A6FDE.jpg',        // ← 故意写 .jpg：实测 QQ 就是这么给的
+        width: 120, height: 120, size: 82933,
+        url: 'https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=x&rkey=y',
+      }],
+    };
+    const found = vision.findImage(imgMsg);
+    check('★ 能从 attachments 里找到图片（真机数据）', !!found, found);
+    check('  └ 拿到 url / content_type / 宽高',
+      /^https:\/\/multimedia\.nt\.qq\.com\.cn\//.test(found.url)
+      && found.contentType === 'image/gif' && found.width === 120, found);
+    check('★ 视频附件不算图片（video/mp4 要被跳过）',
+      vision.findImage({ message_type: 0, attachments: [{ content_type: 'video/mp4', url: 'https://a/b.mp4' }] }) === null);
+    check('  纯文本消息 → null',
+      vision.findImage({ message_type: 0, content: '你好', attachments: [] }) === null);
+    check('  content_type 是 image 但 url 不是 http → 不算（防脏数据）',
+      vision.findImage({ attachments: [{ content_type: 'image/jpeg', url: 'ftp://a/b.jpg' }] }) === null);
+    check('  地址放在 content 里也认（另一种形态）',
+      !!vision.findImage({ attachments: [{ content_type: 'image/jpeg', content: 'https://a/b.jpg' }] }));
+    check('  多个附件时取第一张图（跳过前面的视频）',
+      vision.findImage({
+        attachments: [
+          { content_type: 'video/mp4', url: 'https://a/v.mp4' },
+          { content_type: 'image/png', url: 'https://a/p.png' },
+        ],
+      }).contentType === 'image/png');
+    check('★ 引用消息里的图（msg_elements）也能找到',
+      !!vision.findImage({ message_type: 103, msg_elements: [{ content_type: 'image/jpeg', url: 'https://a/b.jpg' }] }));
+
+    // hasImage：不看开关，纯看数据
+    check('hasImage 认得附件里的图', vision.hasImage(imgMsg) === true);
+    check('hasImage 对纯文本为假', vision.hasImage({ content: 'x' }) === false);
+    check('hasImage 对 null 为假（不抛）', vision.hasImage(null) === false);
+
+    // 关掉开关后 findImage 要立刻不认
+    const vCfg = cfg.policy.vision;
+    const savedEnabled = vCfg.enabled;
+    vCfg.enabled = false;
+    check('★ 开关关掉后 findImage 直接返回 null', vision.findImage(imgMsg) === null);
+    check('  └ 但 hasImage 仍然为真（它是纯数据判断，开关由上层管）', vision.hasImage(imgMsg) === true);
+    vCfg.enabled = savedEnabled;
+
+    // --- ⭐ 核心：识图结果必须被 extractText「看见」---
+    //     这是整个功能的枢纽：只改 extractText 一处，L0/L1/L2 和上下文就都看得见图。
+    const onlyImg = { message_type: 0, content: '', __vision: '一只流泪吃面的猫' };
+    check('★ 只有图片时：文本变成「【图片】描述」',
+      brain.extractText(onlyImg) === '【图片】一只流泪吃面的猫', brain.extractText(onlyImg));
+    const textImg = { message_type: 0, content: '这个好搞笑', __vision: '一只流泪吃面的猫' };
+    check('★ 图文都有时：两段都在，且能分清哪句是图',
+      brain.extractText(textImg) === '这个好搞笑（附带图片：一只流泪吃面的猫）',
+      brain.extractText(textImg));
+    check('  没有识图结果时行为完全不变',
+      brain.extractText({ message_type: 0, content: '你好' }) === '你好');
+    // ⚠️ QQ 的表情标记是**协议字段**（给客户端渲染用的），不能被当正文喂给模型。
+    //    实测：一个表情包消息的 content 就只有这串东西，加上识图后它会进到提示词里。
+    check('★ QQ 的表情标记被清掉，不会当正文喂给模型',
+      brain.stripAtMentions('<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">') === '',
+      JSON.stringify(brain.stripAtMentions('<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">')));
+    check('  └ 表情标记 + 真实文字时，只留文字',
+      brain.extractText({ message_type: 0, content: '哈哈<faceType=6,faceId="0",ext="x">这个好笑' })
+        === '哈哈 这个好笑',
+      brain.extractText({ message_type: 0, content: '哈哈<faceType=6,faceId="0",ext="x">这个好笑' }));
+    check('  └ 商城表情 <emoji:...> 也清掉',
+      brain.stripAtMentions('笑死<emoji:1234>') === '笑死');
+    check('  └ 普通尖括号文字不受影响（别误伤）',
+      brain.stripAtMentions('a < b > c') === 'a < b > c');
+    check('  空 __vision 不影响（不是所有消息都有图）',
+      brain.extractText({ message_type: 0, content: '你好', __vision: '' }) === '你好');
+    check('★ hasUsableText 认为"只有图"也是可用内容（旧版判它为空消息）',
+      brain.hasUsableText(onlyImg) === true);
+    check('  引用消息 + 图片：引用原文和图片描述都在',
+      brain.extractText({
+        message_type: 103, content: '',
+        msg_elements: [{ content: '被引用的原文' }], __vision: '一只猫',
+      }).includes('被引用的原文') && brain.extractText({
+        message_type: 103, content: '',
+        msg_elements: [{ content: '被引用的原文' }], __vision: '一只猫',
+      }).includes('一只猫'));
+
+    // --- 🔴 回归：@机器人 + 一张表情包，不能被当成"只有@"回一句"咋了" ---
+    //     踩点：这种消息 content 只有 <@openid>、mentions 有 is_you，
+    //     正好满足 isMentionOnly 的路径 B → 回「咋了」→ 图白看了。
+    const atStickerNoVision = {
+      message_type: 0, content: `<@${BOT}>`,
+      mentions: [{ is_you: true, bot: true }],
+    };
+    check('  （前提）没有识图结果时，@ + 空内容 = 纯 @（回"咋了"）',
+      brain.isMentionOnly('GROUP_MESSAGE_CREATE', atStickerNoVision) === true);
+    const atSticker = { ...atStickerNoVision, __vision: '一只熊猫头在憋笑' };
+    check('★ @ + 表情包：识图后就【不是】纯 @ 了（旧逻辑会回"咋了"、图白看）',
+      brain.isMentionOnly('GROUP_MESSAGE_CREATE', atSticker) === false);
+    check('  └ 且能通过 L0（会被认真回一句）',
+      brain.passHardRules('group:VISION_TEST', atSticker, 'GROUP_MESSAGE_CREATE', false).ok === true);
+
+    // --- 限流：识图有自己一套，不共用 dailyCallLimit ---
+    const s = 'group:VISION_TEST2';
+    check('首次可识图', vision.visionAllowed(s).ok === true);
+    vision.markVision(s);
+    const again = vision.visionAllowed(s);
+    check('★ 同群刚识别过 → 被冷却拦住（防表情包连发烧钱）',
+      again.ok === false && /冷却/.test(again.why), again);
+    check('别的群不受影响', vision.visionAllowed('group:VISION_TEST3').ok === true);
+    check(`识图上限是独立的（${cfg.policy.vision.dailyLimit}，不共用 dailyCallLimit ${cfg.policy.dailyCallLimit}）`,
+      cfg.policy.vision.dailyLimit === 300 && cfg.policy.vision.dailyLimit !== cfg.policy.dailyCallLimit);
+
+    // --- 配置健全性 ---
+    check('识图默认开着', cfg.policy.vision.enabled === true);
+    check('★ detail 用 low（缩到 512×512，一张约 220 token）',
+      cfg.policy.vision.detail === 'low', cfg.policy.vision.detail);
+    check('★ 识图**不单独配模型名**（用 ai.replyModel，避免跨服务商误配）',
+      !('model' in cfg.policy.vision), Object.keys(cfg.policy.vision));
+    check('  单图上限 8MB（base64 后约 11MB，低于 48MiB 请求体上限）',
+      cfg.policy.vision.maxMB === 8, cfg.policy.vision.maxMB);
+    check('  有提示词（不能空着，否则模型只能瞎猜）',
+      typeof cfg.policy.vision.prompt === 'string' && cfg.policy.vision.prompt.length > 20);
+
+    // --- describe：拿到不是图片的字节时必须**抛异常**，不能硬传给模型 ---
+    //     ⚠️ 这里只测"拦下来"这条路径 —— 它根本不发模型请求，
+    //        所以自测**不会花钱**，也不会写 budget.json。
+    const realFetchV = global.fetch;
+    global.fetch = async () => ({
+      ok: true, status: 200,
+      headers: { get: () => null },
+      arrayBuffer: async () => Buffer.from('this is definitely not an image').buffer,
+    });
+    let threw = false;
+    try {
+      await vision.describe({ url: 'http://stub/x', contentType: 'application/octet-stream' });
+    } catch (e) { threw = /不是可识别的图片/.test(e.message); }
+    check('★ 下回来的不是图片 → 抛异常（绝不把垃圾喂给模型花钱）', threw === true);
+    global.fetch = realFetchV;
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();

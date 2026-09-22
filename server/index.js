@@ -11,6 +11,7 @@ const cfg = require('./config');
 const gateway = require('./gateway');
 const brain = require('./brain');
 const linkparse = require('./linkparse');
+const vision = require('./vision');
 const qqmedia = require('./qqmedia');
 const {
   sendGroupMessage, sendPrivateMessage,
@@ -80,6 +81,44 @@ async function handleEvent(type, d) {
   // 私聊事件里 username 常常是空的
   const who = d.author.username || (isPrivate ? '私聊用户' : '群友');
   const scope = isGroup ? `group:${openid}` : `private:${openid}`;
+
+  // 4.4 🆕 识图（2026-09-22）：把图片/表情包变成一句可读的话
+  //
+  // 🔑 为什么必须放在"提取文本"**之前**：识图结果要当成"这条消息的文字"，
+  //    挂在消息对象的 `__vision` 上，`brain.extractText()` 会把它拼进去。
+  //    这样 L0/L1/L2、上下文记忆、助手模式……**全都自动看得见图片**，
+  //    一处改动就够（改在 extractText 那个唯一出口）。
+  //
+  // ⚠️ 识图"只是让它看得见"，**不是"触发回复"**：
+  //    光发一张表情包（没 @ 也没关键词）描述完照样会被 L0 拦下 ——
+  //    这是"不抢答 / 省钱"的既有设计，别在这里破例。
+  //    但描述**已经进了上下文**，之后有人问"刚那图啥意思"它能答上来。
+  //
+  // ⚠️ 机器人自己发的消息绝不识图（自环）：作者是 bot 就直接跳过。
+  const img = d.author?.bot ? null : vision.findImage(d);
+  if (img) {
+    const vg = vision.visionAllowed(scope);
+    if (!vg.ok) {
+      console.log(`  ├ 🖼 有图片，但跳过识别（${vg.why}）`);
+    } else {
+      const vt = Date.now();
+      try {
+        const desc = await vision.describe(img, (m) => console.log(`  ├ 🖼 ${m}`));
+        if (desc) {
+          vision.markVision(scope);
+          d.__vision = desc;      // ← extractText 会把它拼进文本
+          console.log(`  ├ 🖼 识别成功（${((Date.now() - vt) / 1000).toFixed(1)}s）：${desc}`);
+        } else {
+          // 只有"识别出来是空"才走这里（真失败会抛异常）
+          console.log('  ├ 🖼 模型返回空描述，当没图处理');
+        }
+      } catch (e) {
+        // ⚠️ 识图失败**不能影响正常聊天** —— 图看不懂就照原样继续（文字还在）
+        console.warn(`  ├ 🖼 识别失败: ${e.message || e}`);
+      }
+    }
+  }
+
   const text = brain.extractText(d);
 
   console.log(`[${isGroup ? '群' : '私聊'}] ${type} | ${who}: ${text || '(无文本内容)'}`);

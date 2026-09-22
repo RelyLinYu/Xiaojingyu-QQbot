@@ -130,8 +130,22 @@ setInterval(() => {
 //    不剥掉的话，模型会看到一串乱码 ID，长度检查也会被撑长（"@它 在吗"其实是 2 个字）。
 const AT_MARKUP = /<@!?[^>\s]+>/g;
 
+// QQ 自己的**表情/图片内部标记**，形如：
+//   <faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">
+//   <emoji:1234>               （商城表情）
+// 这些是**给客户端渲染用的协议字段**，对模型来说完全是噪音 ——
+// 实测（2026-09-22 加识图时）：一个表情包消息的 content 只有这串标记，
+// 而它会被原样拼进提示词里，白占 token 还干扰理解。
+// ⚠️ 加识图之前就存在这个问题，只是那时这类消息根本进不到模型（被判"空消息"）；
+//    现在识图让它能进来了，所以顺手清掉。
+const QQ_INTERNAL_MARKUP = /<(?:faceType|emoji)[^>]*>/gi;
+
 function stripAtMentions(text) {
-  return String(text ?? '').replace(AT_MARKUP, ' ').replace(/\s+/g, ' ').trim();
+  return String(text ?? '')
+    .replace(AT_MARKUP, ' ')
+    .replace(QQ_INTERNAL_MARKUP, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // ---------- 提取被引用的内容（message_type=103）----------
@@ -160,14 +174,27 @@ function extractText(msg) {
   const am = detectAssistantMode(msg);
   const main = am.on ? am.text : own;
 
+  // 🆕 识图结果：vision.js 把描述写在 msg.__vision 上。
+  //
+  // 🔑 为什么挂在**消息对象**上、而不是每个调用点自己拼：
+  //    extractText() 是**唯一的文本出口**（hasUsableText / passHardRules /
+  //    isMentionOnly / 上下文入栈 全都走它）。挂在消息上，只改这一处，
+  //    下面所有逻辑就自动"看得见"图片了 —— 少改一处就少一个漏改的坑。
+  const vis = String(msg?.__vision || '').trim();
+  const withVis = (t) => {
+    if (!vis) return t;
+    // 分成两种情况，是为了让模型分得清"他说的话"和"图里是什么"
+    return t ? `${t}（附带图片：${vis}）` : `【图片】${vis}`;
+  };
+
   // 引用消息：把自己的话 + 被引用的原文一起给它，让它看得懂上下文
   if (msg.message_type === 103) {
     const quoted = extractQuoted(msg);
-    if (quoted && main) return `（引用了一条消息：「${quoted}」）${main}`;
-    if (quoted) return `（引用了一条消息：「${quoted}」）`;
-    return main;
+    if (quoted && main) return withVis(`（引用了一条消息：「${quoted}」）${main}`);
+    if (quoted) return withVis(`（引用了一条消息：「${quoted}」）`);
+    return withVis(main);
   }
-  return main;
+  return withVis(main);
 }
 
 // 这条消息是不是"提不出文本"（真正该跳过的那些）
@@ -232,6 +259,15 @@ function isAtRobot(eventType, msg, botOpenid) {
 function isMentionOnly(eventType, msg) {
   const raw = String(msg?.content ?? '');
   const mentions = Array.isArray(msg?.mentions) ? msg.mentions : [];
+
+  // 🔴🆕 有识图结果就**绝对不是**"只有@没内容"。
+  //
+  //    踩过的坑（2026-09-22 加识图时想到的）：`@机器人 + 一张表情包` 的 content
+  //    只有 `<@openid>` 占位、mentions 有 is_you，正好满足下面的路径 B →
+  //    被判成"纯 @" → 回一句固定的「咋了」→ **图完全白看了**，
+  //    而且用户会觉得"识图没生效"。
+  if (String(msg?.__vision || '').trim()) return false;
+
   // ⚠️ 只处理 message_type === 0（纯文本）。
   //    卡片(3)/并行(101)/聊天记录(102) 的 content 本来就是空的，
   //    但那是"提不出内容"，不是"没说话" —— 它们有自己的分支，不能被误判成纯 @。
@@ -640,7 +676,7 @@ async function respectMinGap() {
 //
 // 为什么不是"同一个模型重试多次"：实测 glm-4.7-flash 高峰会**持续** 429，
 // 死等它半天不如立刻换 glm-4-flash —— 换过去通常一次就成功。
-async function callAI(system, user, preferredModel, maxTokens, forceJson, examples) {
+async function callAI(system, user, preferredModel, maxTokens, forceJson, examples, imageDataUrl) {
   const chain = modelChain(preferredModel);
   const attempts = Math.max(1, cfg.ai.maxAttempts);
   let lastErr = null;
@@ -664,7 +700,7 @@ async function callAI(system, user, preferredModel, maxTokens, forceJson, exampl
         //    踩过的坑：写成 `return { text: out }` 就变成 { text: { text: "..." } } 双层嵌套，
         //    于是 index.js 取的 gen.text 还是对象，QQ 收到非法内容报 40011000「请求数据异常」，
         //    而那个错误码官方文档查不到，极难定位。
-        const out = await callAIOnce(system, user, model, maxTokens, forceJson, examples);
+        const out = await callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl);
         if (mi > 0) console.log(`[ai] ↳ 已降级到 ${model}`);
         return out;
       } catch (e) {
@@ -694,7 +730,7 @@ async function callAI(system, user, preferredModel, maxTokens, forceJson, exampl
   throw lastErr || new Error('callAI 无可用模型');
 }
 
-async function callAIOnce(system, user, model, maxTokens, forceJson, examples) {
+async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl) {
   callCount++;
 
   // ⭐ 示例对话：作为**真实的多轮消息**拼在 system 和当前用户消息之间。
@@ -724,6 +760,27 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples) {
     max_tokens: maxTokens,
     temperature: forceJson ? 0.2 : 0.9,
   };
+
+  // 🆕 识图：把当前这条 user 消息换成**内容块数组**（文本 + 图片）。
+  //
+  // ⚠️ 三个硬性约束（官方文档）：
+  //    1. 图片**只能出现在 user 消息里** —— 放进 system/assistant 直接 400
+  //       （所以示例对话里不能带图，这里也只替换最后那条 user）
+  //    2. `detail: 'low'` 会把图缩到 512×512 → 省 token（一张约 220 token）
+  //    3. 传的是 base64 data URL，会计入请求体 48MiB 上限
+  //       （我们的图上限 8MB，base64 后约 11MB，安全）
+  if (imageDataUrl) {
+    body.messages[body.messages.length - 1] = {
+      role: 'user',
+      content: [
+        { type: 'text', text: user },
+        {
+          type: 'image_url',
+          image_url: { url: imageDataUrl, detail: cfg.policy.vision?.detail || 'low' },
+        },
+      ],
+    };
+  }
 
   // 关掉"思考"：我们只要一句短回复，思考既吃 token 又拖慢响应，
   // 而响应太慢会逼近 QQ 被动回复的 5 分钟上限。
@@ -788,6 +845,37 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples) {
   }
 }
 
+// ---------- 🆕 识图：让模型描述一张图 ----------
+//
+// 刻意**复用 callAI**，于是白拿一整套：预算拦截 / 重试 / 指数退避 /
+// 降级链 / token 记账 / 超时 / 只取 content 丢掉思维链。
+// 也正因为复用，识图的模型调用**同样计入** callCount 和 budget ——
+// 这是应该的：钱是真的花了，必须记。
+//
+// ⚠️ 模型用 `cfg.ai.replyModel`（= `deepseek-flash`），**不单独配一个模型名**：
+//    官方文档写明 `deepseek-flash` 本身就支持图片输入（旧的
+//    `deepseek-v4-flash-vision-exp` 已下线，请求由最新 Flash 承接）。
+//    再配一个名字只会引入"跨服务商误配"的风险 —— 那正是自测第 18 组在防的事。
+async function describeImage(imageDataUrl, maxTokens = 200) {
+  const v = cfg.policy.vision || {};
+  const r = await callAI(
+    v.system || '你是一个看图助手。',
+    v.prompt || '用一句中文描述这张图。',
+    cfg.ai.replyModel,
+    maxTokens,
+    false,
+    null,
+    imageDataUrl,
+  );
+  // 预算被拦时 callAI 返回的是 { budgetStop: true, text: 理由 } ——
+  // 🔴 text 里是"钱不够了"，**绝不能**当成图片描述塞进对话。
+  if (r?.budgetStop) {
+    console.warn('[vision] 预算拦截，本次不识别');
+    return '';
+  }
+  return String(r?.text || '').trim();
+}
+
 module.exports = {
   pushContext,
   recentContext,
@@ -805,6 +893,10 @@ module.exports = {
   mentionedOthers,
   messageRefId,
   stripAtMentions,
+  // 🆕 识图用：描述一张图（复用 callAI 的预算/重试/记账）
+  describeImage,
+  // 🆕 识图用：静默时段检查（避免和时间计算的代码重复一份）
+  inQuietHours,
   markReplied: (scope, openid) => {
     lastReply.set(`${scope}|${openid}`, Date.now());
     replyLog.push({ scope, ts: Date.now() });
