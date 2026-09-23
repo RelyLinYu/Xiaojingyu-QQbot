@@ -993,6 +993,9 @@ module.exports = {
   mentionedOthers,
   messageRefId,
   stripAtMentions,
+  // 🆕 给"开关机命令"用：判断原文里有没有 @ 标记
+  //    （stripAtMentions 之后就看不出来了 —— 必须看没剥之前的 content）
+  hasAtMarkup,
   // 🆕 识图用：描述一张图（复用 callAI 的预算/重试/记账）
   describeImage,
   // 🆕 识图用：静默时段检查（避免和时间计算的代码重复一份）

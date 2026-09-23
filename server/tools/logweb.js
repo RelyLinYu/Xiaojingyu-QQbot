@@ -67,6 +67,25 @@ async function serviceState() {
   return (stdout || '').trim() || 'unknown';
 }
 
+// 🆕 开关机状态（2026-09-22）
+//
+// 🔴 为什么日志网页必须显示它：这是"开关机"功能**唯一的自救入口之一**。
+//    "关机"之后它就不说话了，很容易忘了 —— 打开这个页面一眼就能看到是开是关，
+//    而不用去猜"它怎么不理人"。
+// ⚠️ 故意**不 require power.js**：那样会把 brain/config 一起拉进这个只读进程，
+//    而且两个进程各有一份内存状态、容易看串。直接读文件最准。
+function powerState() {
+  try {
+    const f = path.join(APP_DIR, 'data', 'power.json');
+    if (!fs.existsSync(f)) return { on: true, since: 0, by: '', default: true };
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    return { on: j.on !== false, since: Number(j.since) || 0, by: String(j.by || ''), default: false };
+  } catch (e) {
+    // 读坏了按"开机"显示 —— 和 power.js 的处理保持一致
+    return { on: true, since: 0, by: '', error: e.message };
+  }
+}
+
 function budgetState() {
   try {
     const f = path.join(APP_DIR, 'data', 'budget.json');
@@ -180,6 +199,7 @@ const PAGE = (pwd) => `<!doctype html>
   <span id="svc" class="pill">…</span>
   <span id="upd" class="pill">…</span>
 </header>
+<div id="power" style="display:none;background:#7a1f1f;color:#fff;padding:10px 12px;font-size:14px;position:sticky;top:0;z-index:9"></div>
 <main>
   <section>
     <h2>额度</h2>
@@ -216,6 +236,19 @@ async function load(manual){
     svc.textContent = j.service;
     svc.className = 'pill ' + (j.service === 'active' ? 'on' : 'off');
     document.getElementById('upd').textContent = new Date().toLocaleTimeString('zh-CN');
+
+    // 🆕 开关机横幅：关机时**最显眼**（否则"它怎么不理人"会被当成故障排查半天）
+    const pw = document.getElementById('power');
+    if (pw) {
+      if (j.power && !j.power.on) {
+        pw.style.display = 'block';
+        pw.textContent = '⏻ 已关机：不回话、不解析链接、不识别图片'
+          + (j.power.by ? '（由 ' + j.power.by + ' 设置）' : '')
+          + '　恢复：在群里 @我说「开机」';
+      } else {
+        pw.style.display = 'none';
+      }
+    }
 
     const b = j.budget;
     document.getElementById('budget').innerHTML = b ? (
@@ -277,9 +310,10 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/state') {
     const [log, service] = await Promise.all([journalLines(200), serviceState()]);
     const budget = budgetState();
+    const power = powerState();
     const events = recentEvents(30);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ log, service, budget, events }));
+    res.end(JSON.stringify({ log, service, budget, power, events }));
     return;
   }
 
@@ -287,10 +321,13 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/summary') {
     const [log, service] = await Promise.all([journalLines(50), serviceState()]);
     const b = budgetState();
+    const p = powerState();
     const events = recentEvents(10);
     const last = events[events.length - 1];
     const lines = [
       `服务状态 : ${service}`,
+      `开关状态 : ${p.on ? '⏻ 开机' : '⏻ 【关机】—— 不回话、不解析链接、不识别图片'}`
+        + (p.on ? '' : `（${p.by ? `由 ${p.by} ` : ''}设置 · 恢复：群里 @我说「开机」）`),
       `今日花费 : ¥${(b?.daySpent ?? 0).toFixed(4)} / ¥${b?.dailyLimit ?? '?'}   （剩 ¥${(b?.dayLeft ?? 0).toFixed(4)}）`,
       `累计花费 : ¥${(b?.spentYuan ?? 0).toFixed(4)} / ¥${b?.totalLimit ?? '?'}   （剩 ¥${(b?.totalLeft ?? 0).toFixed(4)}）`,
       `调用次数 : ${b?.calls ?? 0}`,

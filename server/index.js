@@ -12,6 +12,7 @@ const gateway = require('./gateway');
 const brain = require('./brain');
 const linkparse = require('./linkparse');
 const vision = require('./vision');
+const power = require('./power');
 const qqmedia = require('./qqmedia');
 const {
   sendGroupMessage, sendPrivateMessage,
@@ -81,6 +82,38 @@ async function handleEvent(type, d) {
   // 私聊事件里 username 常常是空的
   const who = d.author.username || (isPrivate ? '私聊用户' : '群友');
   const scope = isGroup ? `group:${openid}` : `private:${openid}`;
+
+  // 3.5 🆕 全局开关机（2026-09-22）
+  //
+  // 🔴 位置很关键：必须在**识图 / 链接解析 / L0 之前**。
+  //    关机要真的是"什么都不做" —— 不识图（不花钱）、不解析链接（不发卡片）、不回话。
+  //    放到后面任何一步，那一步的钱就已经花掉了。
+  //
+  // ⚠️ 但"开关机命令"本身**必须在关机状态下也能用** —— 否则关了就打不开了。
+  //    所以顺序是：先看是不是开关机命令 → 是就处理；不是、且已关机 → 静默跳过。
+  const powerCmd = power.matchCommand(d, isPrivate);
+  if (powerCmd) {
+    const changed = power.setOn(powerCmd === 'on', d.author?.member_openid || d.author?.user_openid);
+    const text = power.replyFor(powerCmd, changed, who);
+    console.log(`  ├ ⏻ 主人 ${who} 发送了「${powerCmd === 'on' ? '开机' : '关机'}」`
+      + `${changed ? '' : '（状态没变）'} → 现在【${power.isOn() ? '开机' : '关机'}】`);
+    const sent = isGroup
+      ? await sendGroupMessage(openid, text, d.id)
+      : await sendPrivateMessage(openid, text, d.id);
+    console.log(`  └ ${sent ? '✓ 已回复' : '✗ 回复失败'}: ${text}`);
+    return;   // 🛑 处理完就结束，不走下面任何流程
+  }
+
+  // 🛑 已关机：只留一行日志，什么都不做（不识别、不解析、不回话、不花钱）
+  //
+  // ⚠️ 连"上下文"都不记 —— 关机期间发生的事，开机后不该被它拿去接话
+  //    （否则会出现"它刚醒就评论几小时前的话题"这种怪事）。
+  // ⚠️ 事件仍然会落盘（handleEvent 第 1 步）—— 那是排查用的，不花钱，也方便看
+  //    "关机这段时间群里发生了什么"。
+  if (!power.isOn()) {
+    console.log('  └ ⏻ 已关机，忽略（@我说「开机」可恢复）');
+    return;
+  }
 
   // 4.4 🆕 识图（2026-09-22）：把图片/表情包变成一句可读的话
   //
@@ -496,6 +529,21 @@ function sleep(ms) {
 console.log('[小蓝鲸] 启动中…');
 console.log('[小蓝鲸] 模型:', cfg.ai.replyModel, '@', cfg.ai.baseUrl);
 console.log('[小蓝鲸] 判断模型:', cfg.ai.judgeModel, '| 日额度:', cfg.policy.dailyCallLimit);
+
+// 🆕 开机/关机状态**一定要在启动时就打出来** ——
+//    否则"它怎么不理人"会被当成故障排查半天，其实就是关着机。
+{
+  const ps = power.status();
+  if (ps.on) console.log('[小蓝鲸] ⏻ 开关状态: 开机');
+  else {
+    console.warn(`[小蓝鲸] ⏻ 开关状态: 【关机】—— 不会回话、不解析链接、不识别图片`);
+    console.warn(`[小蓝鲸]    （${ps.by ? `由 ${ps.by} ` : ''}于 ${ps.sinceText}设置）`);
+    console.warn('[小蓝鲸]    恢复方式：在群里 @我说「开机」，或删掉 data/power.json 后重启');
+  }
+  if (!cfg.ownerOpenid) {
+    console.warn('[小蓝鲸] ⚠️ 没有配置主人（OWNER_OPENID）—— 开关机命令将无人可用！');
+  }
+}
 
 if (!cfg.appId || !cfg.secret) {
   console.error('[小蓝鲸] ❌ 缺少 QQ_BOT_APPID / QQ_BOT_SECRET，检查 .env');

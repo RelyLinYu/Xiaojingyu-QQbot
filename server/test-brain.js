@@ -1692,6 +1692,130 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     global.fetch = realFetchV;
   }
 
+  console.log('\n=== 21. ⭐ 全局开关机（@我说「开机 / 关机」）===');
+  {
+    const power = require('./power');
+    const pfs = require('fs');
+    const BOTID = 'BOT0PEN1D000000000000000000000000';
+    // ⚠️ 主人 openid 来自 .env（本地没有）—— 临时模拟一个，测完还原
+    const realOwner = cfg.ownerOpenid;
+    const OWNER = 'TEST_OWNER_OPENID_0001';
+
+    const msg = (content, fromOwner = true) => ({
+      id: 'M' + Math.random().toString(36).slice(2),
+      content,
+      message_type: 0,
+      mentions: [{ is_you: true, bot: true, id: BOTID }],
+      author: { bot: false, username: '某人', member_openid: fromOwner ? OWNER : 'SOMEONE_ELSE' },
+    });
+
+    try {
+      cfg.ownerOpenid = OWNER;
+      check('  （前提）测试用的假主人能被 isOwner 认出来', brain.isOwner(msg('x')) === true);
+
+      // --- 命令识别：必须 @ 它 + 必须是主人 + 必须是整句 ---
+      check('★ 主人 @它 +「开机」→ on',
+        power.matchCommand(msg(`<@${BOTID}> 开机`), false) === 'on');
+      check('★ 主人 @它 +「关机」→ off',
+        power.matchCommand(msg(`<@${BOTID}> 关机`), false) === 'off');
+      check('  结尾随手加的标点不影响（手机常这样）',
+        power.matchCommand(msg(`<@${BOTID}> 关机。`), false) === 'off'
+        && power.matchCommand(msg(`<@${BOTID}> 开机！`), false) === 'on');
+      check('  中间夹了空格也不影响（全角半角都行）',
+        power.matchCommand(msg(`<@${BOTID}> 关 机`), false) === 'off'
+        && power.matchCommand(msg(`<@${BOTID}>　开　机`), false) === 'on');
+      check('  别名也认：醒来/起床/上班 → 开机；睡吧/睡了/下班 → 关机',
+        power.matchCommand(msg(`<@${BOTID}> 醒来`), false) === 'on'
+        && power.matchCommand(msg(`<@${BOTID}> 睡吧`), false) === 'off');
+
+      // 🔒 这三条是安全性，最重要
+      check('★★ 普通人 @它说「关机」→ **不认**（只有主人能操作）',
+        power.matchCommand(msg(`<@${BOTID}> 关机`, false), false) === null);
+      check('★★ 主人说「关机」但**没 @ 它** → 不认（防聊天里随口提到就误触）',
+        power.matchCommand(msg('关机'), false) === null);
+      check('★★ 不是整句就不认（「这个功能怎么关机啊」不该触发）',
+        power.matchCommand(msg(`<@${BOTID}> 这个功能怎么关机啊`), false) === null
+        && power.matchCommand(msg(`<@${BOTID}> 别关机`), false) === null,
+        power.matchCommand(msg(`<@${BOTID}> 别关机`), false));
+      check('  私聊里**不需要 @**（一对一，没法 @）',
+        power.matchCommand(msg('关机'), true) === 'off');
+      check('  私聊里非主人照样不认', power.matchCommand(msg('关机', false), true) === null);
+      check('  空消息 / null 不崩', power.matchCommand(null, false) === null
+        && power.matchCommand(msg(''), false) === null);
+    } finally {
+      cfg.ownerOpenid = realOwner;
+    }
+
+    // 🔒 没配主人时：谁都不能操作（宁可关不掉，也不能谁都能关）
+    check('★★ 没配主人（OWNER_OPENID 为空）时谁都不能操作',
+      cfg.ownerOpenid ? true : power.matchCommand(msg(`<@${BOTID}> 关机`), false) === null,
+      `ownerOpenid=${JSON.stringify(cfg.ownerOpenid)}`);
+    check('  且 isOwner 对任何人都返回 false',
+      cfg.ownerOpenid ? true : brain.isOwner(msg('x')) === false);
+
+    // --- 回复文案：短、有、不空 ---
+    for (const pair of [['on', true], ['on', false], ['off', true], ['off', false]]) {
+      const t = power.replyFor(pair[0], pair[1], '测试');
+      check(`  replyFor(${pair[0]}, changed=${pair[1]}) 给出了非空短句`,
+        typeof t === 'string' && t.length > 0 && t.length < 40, t);
+    }
+
+    // --- 状态持久化（⚠️ 必须在 finally 里**原样还原**，绝不能把线上机器人留在关机态）---
+    //
+    // 还原是"字节级"的：先备份文件内容，测完写回 —— 连 since/by 都不留测试痕迹。
+    // （否则线上 power.json 里会永远留着 `"by": "TEST_RES…"`，看起来像被人动过）
+    const wasOn = power.isOn();
+    const snap = pfs.existsSync(power._STATE_FILE) ? pfs.readFileSync(power._STATE_FILE, 'utf8') : null;
+    try {
+      power.setOn(false, 'TEST_DUMMY_ID');
+      check('★ setOn(false) 后 isOn() 为 false', power.isOn() === false);
+      check('★ 状态确实落盘了（否则一重启"关机"就悄悄失效）',
+        pfs.existsSync(power._STATE_FILE)
+        && JSON.parse(pfs.readFileSync(power._STATE_FILE, 'utf8')).on === false,
+        power._STATE_FILE);
+      check('  重复设为同一个值 → 返回 false（表示"状态没变"，据此说"本来就开着"）',
+        power.setOn(false, 'X') === false);
+      check('  状态文件在 data/ 下（那目录已 gitignore，不会进仓库）',
+        power._STATE_FILE.includes('data'), power._STATE_FILE);
+    } finally {
+      power.setOn(wasOn, 'TEST_RESTORE');
+      // 再把文件原样写回（把 since/by 也恢复成测试前的样子）
+      try {
+        if (snap !== null) pfs.writeFileSync(power._STATE_FILE, snap);
+        else if (pfs.existsSync(power._STATE_FILE)) pfs.unlinkSync(power._STATE_FILE);
+      } catch (e) { /* 还原失败不该让自测变红，下面那条断言会兜 */ }
+    }
+    check('★★ 测试结束后状态已还原（绝不能让跑一次自测就把机器人关掉）',
+      power.isOn() === wasOn, `现在 on=${power.isOn()}，原本 on=${wasOn}`);
+    check('★ 而且状态文件里**不留测试痕迹**（否则线上会看到 by=TEST_RES…）',
+      snap !== null
+        ? pfs.readFileSync(power._STATE_FILE, 'utf8') === snap
+        : !pfs.existsSync(power._STATE_FILE));
+
+    // --- 🔴 顺序保护：关机判断必须在**所有会花钱/会发言的分支之前** ---
+    //
+    // 这是这个功能最容易写坏的地方：放晚了，那一步的钱已经花掉了。
+    // 用源码位置锁住顺序（和"跨文件接口一致性"同一类做法）。
+    const srcIdx = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
+    const pos = (s) => srcIdx.indexOf(s);
+    const iCmd = pos('power.matchCommand');
+    const iOff = pos('if (!power.isOn())');
+    const iVision = pos('vision.findImage');
+    const iLink = pos('linkparse.findLinks');
+    const iL0 = pos('brain.passHardRules');
+    check('★ index.js 里确实有开关机判断', iCmd > 0 && iOff > 0, JSON.stringify({ iCmd, iOff }));
+    check('★★ 关机判断在**识图之前**（否则关机期间照样花钱识图）',
+      iOff > 0 && iVision > 0 && iOff < iVision, JSON.stringify({ iOff, iVision }));
+    check('★★ 关机判断在**链接解析之前**（否则关机期间照样发卡片）',
+      iOff > 0 && iLink > 0 && iOff < iLink, JSON.stringify({ iOff, iLink }));
+    check('★★ 关机判断在 **L0 硬规则之前**（否则还会走判断/回复）',
+      iOff > 0 && iL0 > 0 && iOff < iL0, JSON.stringify({ iOff, iL0 }));
+    check('★ 开关机命令的判断在"已关机就跳过"**之前**（否则关了就打不开）',
+      iCmd > 0 && iOff > 0 && iCmd < iOff, JSON.stringify({ iCmd, iOff }));
+    check('★ 启动时会打印当前是开机还是关机（免得把"关着机"当故障排查）',
+      /开关状态/.test(srcIdx));
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();
