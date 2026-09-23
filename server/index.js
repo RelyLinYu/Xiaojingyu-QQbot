@@ -374,23 +374,43 @@ async function handleEvent(type, d) {
 async function handleLink(d, links, scope, isGroup, openid) {
   // ① 先把所有链接都解析出来（解析失败的不占位置）
   const parsed = [];
+  const seenId = new Set();
   for (const link of links) {
     console.log(`  ├ 🔗 ${link.platform} 链接: ${String(link.url).slice(0, 90)}`);
     try {
       const p = await linkparse.parse(link);
-      if (p && p.card) parsed.push(p);
-      else console.log('  │  └ 这条解析不出内容，跳过');
+      if (!p || !p.card) { console.log('  │  └ 这条解析不出内容，跳过'); continue; }
+
+      // 🔴 解析之后**再**去一次重 —— 按"解析出来的身份"，不是按 URL。
+      //    实测：一条合并转发里有 3 个 issue 链接（141/140/136），全指向同一个仓库，
+      //    按 URL 去重一个都不少 → 发了 2 张一模一样的卡片。
+      //    （findLinks 里已经按 URL 抠出的 id 去过一次，这里兜住"短链才解析出真 id"的情况）
+      const ikey = linkparse.infoKey(p.info);
+      if (ikey && seenId.has(ikey)) {
+        console.log(`  │  └ 和前面那条指向同一个内容（${ikey}），跳过`);
+        continue;
+      }
+
+      // 🔴 "刚发过"就跳过 —— 这是治「群友引用机器人卡片 → 卡片又发一次」的主防线。
+      //    引用时 QQ 会把我们卡片的 markdown 原样喂回来，链接一模一样，
+      //    按 key 一查就知道"这是我们自己刚发的"。
+      const ago = linkparse.wasCarded(scope, [link.key, ikey]);
+      if (ago) {
+        console.log(`  │  └ 本群 ${ago} 秒前刚发过这条（${ikey || link.key}），跳过（防自我二次解析）`);
+        continue;
+      }
+
+      if (ikey) seenId.add(ikey);
+      p._keys = [link.key, ikey];
+      parsed.push(p);
     } catch (e) {
       console.warn(`  │  └ 链接解析异常: ${e.message || e}`);
     }
   }
   if (!parsed.length) {
     // ⚠️ 各平台的失败原因不一样，写全，免得以后翻日志时误判
-    console.log('  └ 不回（链接解析不出内容 —— 私有仓库 / 已删除 / 番剧付费 / 抖音爬虫 UA 失效 / 快手页面改版）');
+    console.log('  └ 不回（链接解析不出内容 / 刚发过 —— 私有仓库 / 已删除 / 番剧付费 / 抖音爬虫 UA 失效 / 快手页面改版）');
     return;
-  }
-  if (parsed.length < links.length) {
-    console.log(`  ├ ⚠️ ${links.length} 条链接里有 ${links.length - parsed.length} 条没解析出来`);
   }
 
   // ② 逐张发卡片
@@ -400,8 +420,13 @@ async function handleLink(d, links, scope, isGroup, openid) {
     const sent = isGroup
       ? await sendGroupMarkdown(openid, p.card, d.id)
       : await sendPrivateMarkdown(openid, p.card, d.id);
-    if (sent) sentAny = true;
-    else console.log(`  │  └ ${p.platform} 卡片发送失败（看上面的 err_code）`);
+    if (sent) {
+      sentAny = true;
+      // ✅ 只有真发出去了才记 —— 发失败的话下次还该能发
+      linkparse.markCarded(scope, p._keys || []);
+    } else {
+      console.log(`  │  └ ${p.platform} 卡片发送失败（看上面的 err_code）`);
+    }
   }
   if (sentAny) {
     // ⚠️ 只计入"本群连发上限"，**不调 markReplied** ——

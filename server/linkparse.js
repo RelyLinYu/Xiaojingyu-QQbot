@@ -49,6 +49,94 @@ function hostAllowed(host) {
   return list.some((h) => host === h || host.endsWith('.' + h));
 }
 
+// ---------- 链接「身份」：去重要按"指向什么"算，不能按 URL 字符串算 ----------
+//
+// 🔴 两个真实 bug 都出在这里（2026-09-23 用户报「群友引用我发的链接会二次解析」）：
+//
+//  ① 一条合并转发里有 **3 个 issue 链接**，全指向同一个仓库：
+//       .../issues/141、.../issues/140、.../issues/136
+//     按 URL 去重 → 三个都不重复 → **发了 2 张一模一样的仓库卡片**。
+//  ② 群友**引用机器人自己发的卡片**时，QQ 会把卡片的 markdown **原样喂回来**
+//     （实测 `msg_elements[0].content` 就是整张卡片，含
+//      `[🔗 在 抖音 打开](https://www.iesdouyin.com/share/video/7687919372530262739/)`）
+//     → 我们把自己刚发的链接又解析了一遍 → **卡片又发一次**。
+//
+// 所以需要一个"这条链接到底指向什么"的 key：
+//   · 解析前能算的（从 URL 里抠 id）—— 在**一条消息内部**去重，省掉多余的 API 调用
+//   · 解析后才能算的（info.id / bvid / fullName）—— 判断"是不是刚发过"
+//   ⚠️ 两者格式必须**一致**，否则"短链"和"长链"指向同一个东西却对不上。
+function linkKey(url, platform) {
+  const u = String(url || '');
+  try {
+    if (platform === 'github') {
+      const m = u.match(/github\.com\/([^/\s?#]+)\/([^/\s?#]+)/i);
+      if (m) return `github:${m[1]}/${m[2]}`.toLowerCase().replace(/\.git$/, '');
+    }
+    if (platform === 'bilibili') {
+      const m = u.match(/(BV[0-9A-Za-z]{10})/);
+      if (m) return `bilibili:${m[1]}`;
+    }
+    if (platform === 'douyin') {
+      const m = u.match(/\/(?:video|share\/video)\/(\d{6,})/);
+      if (m) return `douyin:${m[1]}`;
+    }
+    if (platform === 'kuaishou') {
+      const m = u.match(/\/(?:short-video|photo|fw\/photo)\/([0-9A-Za-z_-]{6,})/);
+      if (m) return `kuaishou:${m[1]}`;
+    }
+  } catch { /* 落回 URL */ }
+  // 短链（v.douyin.com/xxx、b23.tv/xxx）里没有 id，只能先用 URL 当 key；
+  // 解析出真 id 之后会再补一个 infoKey（见 index.js）
+  return `url:${u}`;
+}
+
+// 解析之后的身份（和 linkKey 同一套格式）
+function infoKey(info) {
+  if (!info) return '';
+  if (info.platform === 'github') return `github:${String(info.fullName || '').toLowerCase()}`;
+  const id = info.bvid || info.id || '';
+  return id ? `${info.platform}:${id}` : '';
+}
+
+// ---------- "刚发过" 记忆：防止把自己发过的卡片再解析一遍 ----------
+//
+// 为什么不能只靠"作者是 bot 就跳过"：那个守卫（index.js 里的 `d.author?.bot`）
+// 只能挡住**机器人自己的消息**；而这里的情况是**群友引用/转发了机器人的卡片** ——
+// 消息是群友发的，但内容是我们刚发出去的东西。
+//
+// ⚠️ 必须**按群隔离**：同一个链接发到另一个群，那边的群友没见过，该发。
+const cardedAt = new Map();     // `${scope}|${key}` -> ts
+
+function cardedTtl() {
+  return cfg.policy.linkParse?.cardedTtlMs ?? 10 * 60 * 1000;
+}
+
+// 返回"多少秒前发过"；没发过返回 0
+function wasCarded(scope, keys) {
+  const now = Date.now();
+  const ttl = cardedTtl();
+  const list = Array.isArray(keys) ? keys : [keys];
+  for (const k of list) {
+    if (!k) continue;
+    const t = cardedAt.get(`${scope}|${k}`);
+    if (t && now - t < ttl) return Math.max(1, Math.round((now - t) / 1000));
+  }
+  return 0;
+}
+
+function markCarded(scope, keys) {
+  const now = Date.now();
+  const list = Array.isArray(keys) ? keys : [keys];
+  for (const k of list) if (k) cardedAt.set(`${scope}|${k}`, now);
+}
+
+// 定期清理，防内存涨
+setInterval(() => {
+  const now = Date.now();
+  const ttl = cardedTtl() * 2;
+  for (const [k, t] of cardedAt) if (now - t > ttl) cardedAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
 // ---------- 从各种来源里抠出 URL ----------
 // ⚠️ 中文标点也要当分隔符 —— 群里常见「看看这个 https://b23.tv/xxx 挺好笑」
 const URL_RE = /https?:\/\/[^\s"'<>()[\]{}，。；！？、“”‘’]+/gi;
@@ -97,12 +185,36 @@ function findLinks(msg, max = 2) {
 
   const sources = [];
 
+  // 🔴 先剔除"**这是我们自己卡片的原文**"的那种来源。
+  //
+  // 群友引用机器人发的卡片时，QQ 会把卡片的 markdown **原样喂回来**（实测）：
+  //   msg_elements[0].content = "# 戴夫…\n![封面 #480px #360px](https://qqbot.ugcimg.cn/…)\n
+  //                              …[🔗 在 抖音 打开](https://www.iesdouyin.com/share/video/…)​"
+  // 于是我们把自己刚发的链接又解析了一遍 → 卡片再发一次。
+  //
+  // 指纹就是**我们自己插进去的零宽空格 + 换行**（`\u200B\n`）：
+  // 卡片每一行之间都是它，而**用户手打不出来**这个字符 —— 所以它很可靠。
+  // （这是第二道防线；第一道是下面的"刚发过"记忆，见 wasCarded）
+  const isOurCard = (s) => String(s || '').includes('\u200B\n');
+
   // ① 正文
   sources.push(String(msg.content || ''));
 
   // ② 被引用的原文（引用消息时，链接常在引用里）
+  //    ⚠️ 但"机器人自己刚发过的卡片"要排除 —— 见上面
+  let skipOurCard = 0;
   for (const el of (Array.isArray(msg.msg_elements) ? msg.msg_elements : [])) {
-    sources.push(String(el?.content || ''));
+    const c = String(el?.content || '');
+    if (isOurCard(c)) { skipOurCard++; continue; }
+    sources.push(c);
+  }
+  // 正文本身也可能就是被引用的卡片（有些形态会把引用内容拼进 content）
+  if (isOurCard(sources[0]) && sources.length === 1) {
+    console.log('  ├ 🔗 这条消息内容本身就是机器人发过的卡片，跳过（防自解析）');
+    return [];
+  }
+  if (skipOurCard) {
+    console.log(`  ├ 🔗 引用的原文里有 ${skipOurCard} 段是机器人自己发过的卡片，跳过（防自解析）`);
   }
 
   // ③ 卡片：ark_data 里所有字符串值
@@ -113,19 +225,25 @@ function findLinks(msg, max = 2) {
     if (msg[k]) sources.push(...deepStrings(msg[k]));
   }
 
-  const blob = sources.join('\n').slice(0, lp.maxTextLen || 2000);
+  const blob = sources.filter((s) => !isOurCard(s)).join('\n').slice(0, lp.maxTextLen || 2000);
 
   const out = [];
   const seen = new Set();
   for (const url of extractUrls(blob)) {
-    if (seen.has(url)) continue;                    // 同一个 URL 只算一次
-    seen.add(url);
     const host = hostOf(url);
     if (!hostAllowed(host)) continue;               // 🔒 SSRF 第一道闸
     const platform = platformOf(host);
     if (!platform) continue;
     if (lp.platforms && lp.platforms[platform] === false) continue;   // 平台开关
-    out.push({ url, host, platform });
+
+    // 🔴 按**身份**去重，不是按 URL 字符串去重。
+    //    实测踩到：一条合并转发里有 3 个 issue 链接（141/140/136），
+    //    全指向同一个仓库 → 按 URL 去重一个都不少 → 发了 2 张一模一样的卡片。
+    const key = linkKey(url, platform);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({ url, host, platform, key });
     if (out.length >= max) break;
   }
   return out;
@@ -923,6 +1041,11 @@ module.exports = {
   // 🆕 发卡片前预热 GitHub 预览图（也导出给自测用）
   warmOgImage,
   ogImageUrl,
+  // 🆕 链接身份与"刚发过"记忆（防自我二次解析 / 防同内容重复发卡）
+  linkKey,
+  infoKey,
+  wasCarded,
+  markCarded,
   // 给自测用
   _fmtDuration: fmtDuration,
   _fmtNum: fmtNum,

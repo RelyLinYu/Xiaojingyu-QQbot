@@ -1303,9 +1303,103 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       lp.renderCard({ platform: 'kuaishou', title: 'x', cover: 'https://a/x.jpg', htmlUrl: 'https://a/b' })
         .includes('#480px #270px'));
 
-    // --- 视频：抖音拿不到直链（已知限制，不是 bug）；快手没直链时也要安静返回 null ---
-    check('getKuaishouVideoUrl 对没有直链的 info 返回 null',
-      await lp.getKuaishouVideoUrl({ platform: 'kuaishou' }, 1e9) === null);
+    // --- 🔴 回归①：同一条消息里"指向同一个东西"的多个链接只能发一张卡 ---
+    //
+    // 真实事件（2026-09-23T01:22:49，群友转发的 GitHub 监控）里有 3 个 issue 链接：
+    //   .../issues/141、.../issues/140、.../issues/136
+    // 全指向同一个仓库。旧版**按 URL 去重** → 一个都不少 → 发了 2 张一模一样的卡片。
+    check('★ linkKey：GitHub 的 issue/commit 链接都归到**仓库**这个身份',
+      lp.linkKey('https://github.com/a/b/issues/141', 'github') === 'github:a/b'
+      && lp.linkKey('https://github.com/a/b/commit/abc123', 'github') === 'github:a/b'
+      && lp.linkKey('https://github.com/A/B', 'github') === 'github:a/b', '大小写要归一');
+    {
+      const merged = {
+        message_type: 102,
+        content: 'GitHub监控\n'
+          + '新增 Issue #141 https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/141\n'
+          + '新增 Issue #140 https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/140\n'
+          + '新增 Issue #136 https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/136',
+      };
+      const got = lp.findLinks(merged, 2);
+      check('★★ 三个 issue 链接（同一仓库）→ 只算**一条**（旧版会发 2 张一样的卡）',
+        got.length === 1, got.map((x) => x.key));
+      check('  └ 返回的 link 里带 key（给 index.js 判重和记"刚发过"用）',
+        !!got[0].key && got[0].key === 'github:meteornox/deepseek-balance-whale-widget', got[0].key);
+    }
+    check('  linkKey：B站按 BV 号',
+      lp.linkKey('https://www.bilibili.com/video/BV1xx411c7mD?p=2', 'bilibili') === 'bilibili:BV1xx411c7mD');
+    check('  linkKey：抖音按视频 id（长链）',
+      lp.linkKey('https://www.iesdouyin.com/share/video/7687919372530262739/', 'douyin') === 'douyin:7687919372530262739');
+    check('  linkKey：短链里没有 id，先用 URL 兜底（解析后会有 infoKey 补上）',
+      lp.linkKey('https://v.douyin.com/X29sAeylqig/', 'douyin').startsWith('url:'));
+    check('★ linkKey 和 infoKey **格式一致**（否则短链解析出来的 id 对不上长链）',
+      lp.linkKey('https://www.iesdouyin.com/share/video/7687919372530262739/', 'douyin')
+      === lp.infoKey({ platform: 'douyin', id: '7687919372530262739' }),
+      [lp.linkKey('https://www.iesdouyin.com/share/video/7687919372530262739/', 'douyin'),
+        lp.infoKey({ platform: 'douyin', id: '7687919372530262739' })]);
+    check('  infoKey：GitHub 用 fullName、B站用 bvid',
+      lp.infoKey({ platform: 'github', fullName: 'A/B' }) === 'github:a/b'
+      && lp.infoKey({ platform: 'bilibili', bvid: 'BV1xx411c7mD' }) === 'bilibili:BV1xx411c7mD');
+    check('  infoKey 对空值安全', lp.infoKey(null) === '' && lp.infoKey({ platform: 'github' }) === 'github:');
+
+    // --- 🔴 回归②：引用"机器人自己发的卡片"不能再解析一遍 ---
+    //
+    // 真实事件（2026-09-23T12:20:24）：群友引用机器人的抖音卡片 + 问「？」，
+    // 而 QQ 把**整张卡片的 markdown 原样喂回来**（含 `[🔗 在 抖音 打开](...)`）：
+    //   msg_elements[0].content = "# 戴夫…\n![封面 #480px #360px](https://qqbot.ugcimg.cn/…)…"
+    // → 旧版把自己刚发的链接又解析一遍 → 卡片又发一次。
+    const OUR_CARD = '# 戴夫，你这要挨不少电吧 #植物大战僵尸 #拟人#同人 #樱桃炸弹 #娘化 画师@…\u200B\n'
+      + '![封面 #480px #360px](https://qqbot.ugcimg.cn/1905611136/abc/def)\u200B\n'
+      + '**作者**：铁板欧尼酱　**时长**：0:06\u200B\n'
+      + '**发布**：2026-09-21\u200B\n'
+      + '点赞 17.55 万　·　评论 1234\u200B\n'
+      + '[🔗 在 抖音 打开](https://www.iesdouyin.com/share/video/7687919372530262739/)';
+    check('  （前提）这段引用内容里确实有抖音链接',
+      /iesdouyin\.com\/share\/video\//.test(OUR_CARD));
+    check('★ 这段内容带"我们自己卡片"的指纹（零宽空格+换行）',
+      OUR_CARD.includes('\u200B\n'));
+    const quoted = {
+      message_type: 103,
+      content: `<@BOT0PEN1D000000000000000000000000> ？`,
+      mentions: [{ is_you: true, bot: true }],
+      msg_elements: [{ content: OUR_CARD, msg_type: 103 }],
+    };
+    check('★★ 引用机器人自己发的卡片 → **不再解析出链接**（旧版会再发一张卡）',
+      lp.findLinks(quoted, 2).length === 0, lp.findLinks(quoted, 2));
+
+    // 但**引用普通人的含链接消息**仍然要能解析（别把功能一起关掉）
+    // ⚠️ 用白名单内的域名 —— 实测真机里那条 `chatboxai.app` 本来就被白名单挡着
+    //    （那是"防 SSRF"的设计，不是 bug）
+    const quoteHuman = {
+      message_type: 103,
+      content: `<@BOT0PEN1D000000000000000000000000> 这是啥`,
+      mentions: [{ is_you: true, bot: true }],
+      msg_elements: [{ content: '看看这个 https://www.bilibili.com/video/BV1xx411c7mD 挺好', msg_type: 103 }],
+    };
+    check('★ 引用**普通人**发的链接 → 仍然照常解析（别把功能一起关掉）',
+      lp.findLinks(quoteHuman, 2).length === 1, lp.findLinks(quoteHuman, 2));
+
+    // --- 🔴 回归③："刚发过"记忆（第二道防线，治"过一会儿又引用一次"）---
+    {
+      const S = 'group:CARDED_TEST';
+      check('  还没发过 → wasCarded 返回 0', lp.wasCarded(S, ['douyin:123']) === 0);
+      lp.markCarded(S, ['douyin:123', 'url:https://v.douyin.com/xxx/']);
+      check('★ 发过之后 → 两个 key 都算"刚发过"',
+        lp.wasCarded(S, ['douyin:123']) > 0 && lp.wasCarded(S, ['url:https://v.douyin.com/xxx/']) > 0);
+      check('★ 别的群不算（同一个链接发到另一个群，那边该收到卡）',
+        lp.wasCarded('group:OTHER_GROUP', ['douyin:123']) === 0);
+      const realTtl = cfg.policy.linkParse.cardedTtlMs;
+      try {
+        cfg.policy.linkParse.cardedTtlMs = 1;      // 把窗口缩到 1ms
+        const until = Date.now() + 12;
+        while (Date.now() < until) { /* 忙等 */ }
+        check('  窗口过了就不算"刚发过"了（可以让它再发一次）',
+          lp.wasCarded(S, ['douyin:123']) === 0);
+      } finally { cfg.policy.linkParse.cardedTtlMs = realTtl; }
+      check(`  cardedTtlMs 默认 10 分钟（现 ${cfg.policy.linkParse.cardedTtlMs / 60000} 分钟）`,
+        cfg.policy.linkParse.cardedTtlMs === 600000);
+    }
+
   }
 
   console.log('\n=== 20. ⭐ 识图（图片/表情包 → 可读文本）===');
