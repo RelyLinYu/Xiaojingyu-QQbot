@@ -1313,8 +1313,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       && lp.linkKey('https://github.com/a/b/commit/abc123', 'github') === 'github:a/b'
       && lp.linkKey('https://github.com/A/B', 'github') === 'github:a/b', '大小写要归一');
     {
+      // ⚠️ 这里用 `message_type: 0`（普通消息）而不是 102 ——
+      //    因为 2026-09-23 起 **102（转发聊天记录）整个不解析**（见本组回归④）。
+      //    去重逻辑本身仍然要测，所以换成一个"会被解析"的类型。
+      //    （现实中也成立：有人一条消息里粘好几个链接）
       const merged = {
-        message_type: 102,
+        message_type: 0,
         content: 'GitHub监控\n'
           + '新增 Issue #141 https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/141\n'
           + '新增 Issue #140 https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/140\n'
@@ -1324,7 +1328,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       check('★★ 三个 issue 链接（同一仓库）→ 只算**一条**（旧版会发 2 张一样的卡）',
         got.length === 1, got.map((x) => x.key));
       check('  └ 返回的 link 里带 key（给 index.js 判重和记"刚发过"用）',
-        !!got[0].key && got[0].key === 'github:meteornox/deepseek-balance-whale-widget', got[0].key);
+        !!got[0] && got[0].key === 'github:meteornox/deepseek-balance-whale-widget', got[0] && got[0].key);
     }
     check('  linkKey：B站按 BV 号',
       lp.linkKey('https://www.bilibili.com/video/BV1xx411c7mD?p=2', 'bilibili') === 'bilibili:BV1xx411c7mD');
@@ -1398,6 +1402,52 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       } finally { cfg.policy.linkParse.cardedTtlMs = realTtl; }
       check(`  cardedTtlMs 默认 10 分钟（现 ${cfg.policy.linkParse.cardedTtlMs / 60000} 分钟）`,
         cfg.policy.linkParse.cardedTtlMs === 600000);
+    }
+
+    // --- 🔴 回归④：转发的聊天记录（message_type=102）**不解析**里面的链接 ---
+    //
+    // 用户 2026-09-23 要求。源头是真事故：一条转发的「GitHub 监控」聊天记录里
+    // 塞了 3 个 issue 链接（全指向同一个仓库）→ 发了 2 张一样的卡。
+    // 上一轮修的是去重；这一轮按用户要求**彻底不看这种消息**。
+    //
+    // ⚠️ 只挡 102。引用消息 103 不挡 —— 那是"有人指着链接问"，是正常分享意图。
+    {
+      const forward = {
+        message_type: 102,
+        content: '【GitHub监控】\n🆕 新增 Issue #141 建议给浮层层级表达一个…\n'
+          + '🔗 https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/141\n'
+          + '🆕 新增 Issue #140 出厂台词与默认泡泡文案…\n'
+          + '🔗 https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/140',
+      };
+      check('  （前提）这条转发记录里确实有 GitHub 链接',
+        /github\.com\/MeteorNOX/.test(forward.content));
+      check('★★ 转发的聊天记录 → **一条链接都不解析**（用户 2026-09-23 要求）',
+        lp.findLinks(forward, 2).length === 0, lp.findLinks(forward, 2).map((x) => x.url));
+
+      check('★ 开关能关掉（设成 false 恢复旧行为，便于哪天想改回来）', (() => {
+        const real = cfg.policy.linkParse.skipForwarded;
+        try {
+          cfg.policy.linkParse.skipForwarded = false;
+          return lp.findLinks(forward, 2).length > 0;
+        } finally { cfg.policy.linkParse.skipForwarded = real; }
+      })());
+
+      // 🔴 引用消息**不能**被一起挡掉（那是正常分享意图）
+      const quote103 = {
+        message_type: 103,
+        content: '<@BOT0PEN1D000000000000000000000000> 这是啥',
+        mentions: [{ is_you: true, bot: true }],
+        msg_elements: [{ content: '看看 https://github.com/a/b', msg_type: 103 }],
+      };
+      check('★★ 引用消息（103）**照常解析** —— 别把"转发记录"和"引用"搞混',
+        lp.findLinks(quote103, 2).length === 1, lp.findLinks(quote103, 2).map((x) => x.key));
+
+      check('  普通消息（0）照常解析',
+        lp.findLinks({ message_type: 0, content: '看这个 https://github.com/a/b' }, 2).length === 1);
+
+      check('  skipForwarded 默认开着', cfg.policy.linkParse.skipForwarded === true);
+      check('  类型判断用 Number() 强转（字段可能是字符串 "102"）',
+        lp.findLinks({ message_type: '102', content: 'x https://github.com/a/b' }, 2).length === 0);
     }
 
   }
