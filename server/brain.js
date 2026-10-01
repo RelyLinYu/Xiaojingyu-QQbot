@@ -954,11 +954,13 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
 //    官方文档写明 `deepseek-flash` 本身就支持图片输入（旧的
 //    `deepseek-v4-flash-vision-exp` 已下线，请求由最新 Flash 承接）。
 //    再配一个名字只会引入"跨服务商误配"的风险 —— 那正是自测第 18 组在防的事。
-async function describeImage(imageDataUrl, maxTokens = 200) {
+// 🆕 `prompt` 可选覆盖（识图用）：动图会换成"这是一个动图的 N 帧…"的说法，
+//    否则模型会把网格图当成"四张拼在一起的图"而不是"一个动作的四个瞬间"。
+async function describeImage(imageDataUrl, maxTokens = 200, prompt = null) {
   const v = cfg.policy.vision || {};
   const r = await callAI(
     v.system || '你是一个看图助手。',
-    v.prompt || '用一句中文描述这张图。',
+    prompt || v.prompt || '用一句中文描述这张图。',
     cfg.ai.replyModel,
     maxTokens,
     false,

@@ -2009,6 +2009,161 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /require\('\.\/budget'\)/.test(srcIdx2));
   }
 
+  console.log('\n=== 23. ⭐ 动图（GIF）：API 只认第一帧 → 采样拼网格 ===');
+  {
+    // 🔴 为什么有这个模块：视觉 API 把动图当静态图，**只取第一帧**。
+    //    实测（手工造"第 1 帧纯红、第 2 帧纯蓝"的 GIF）：
+    //      发单帧纯红   → 「① 红色 ② 静态图」
+    //      发两帧红→蓝  → 「① 红色 ② 静态图」   ← 和单帧一模一样
+    //    而群里 GIF 占比很高（6193 条图片附件里 1633 条疑似 GIF，约 26%）。
+    const gifMod = require('./gif');
+
+    // ── 测试自带的极简 GIF 编码器（这样不需要二进制素材文件）──
+    //    用"每像素前先发 CLEAR"的经典手法，码长恒为 minCodeSize+1，不需要维护字典。
+    const PALETTE = [255, 0, 0, 0, 0, 255, 0, 255, 0, 255, 255, 255,
+      0, 0, 0, 255, 255, 0, 0, 255, 255, 255, 0, 255];
+    const lzwPix = (indices, mcs) => {
+      const clear = 1 << mcs; const eoi = clear + 1; const cs = mcs + 1;
+      const bits = [];
+      const push = (c) => { for (let i = 0; i < cs; i++) bits.push((c >> i) & 1); };
+      for (const ci of indices) { push(clear); push(ci); }
+      push(eoi);
+      const out = [];
+      for (let i = 0; i < bits.length; i += 8) {
+        let b = 0; for (let k = 0; k < 8; k++) if (bits[i + k]) b |= 1 << k;
+        out.push(b);
+      }
+      return Buffer.from(out);
+    };
+    const sub = (data) => {
+      const parts = [];
+      for (let i = 0; i < data.length; i += 255) {
+        const c = data.slice(i, i + 255);
+        parts.push(Buffer.from([c.length]), c);
+      }
+      parts.push(Buffer.from([0]));
+      return Buffer.concat(parts);
+    };
+    const mkGif = (size, frames) => {
+      const head = [Buffer.from('GIF89a', 'latin1')];
+      const lsd = Buffer.alloc(7);
+      lsd.writeUInt16LE(size, 0); lsd.writeUInt16LE(size, 2); lsd[4] = 0x82;
+      head.push(lsd, Buffer.from(PALETTE));
+      head.push(Buffer.from([0x21, 0xFF, 0x0B]), Buffer.from('NETSCAPE2.0', 'latin1'),
+        Buffer.from([0x03, 0x01, 0x00, 0x00, 0x00]));
+      for (const f of frames) {
+        const fw = f.w || size; const fh = f.h || size;
+        head.push(Buffer.from([0x21, 0xF9, 0x04, f.disposal ? (f.disposal << 2) : 0,
+          (f.delay || 50) & 0xFF, ((f.delay || 50) >> 8) & 0xFF, 0x00, 0x00]));
+        const id = Buffer.alloc(9);
+        id.writeUInt16LE(f.left || 0, 0); id.writeUInt16LE(f.top || 0, 2);
+        id.writeUInt16LE(fw, 4); id.writeUInt16LE(fh, 6);
+        id[8] = f.interlace ? 0x40 : 0x00;
+        head.push(Buffer.from([0x2C]), id, Buffer.from([0x03]));
+        const idx = typeof f.pixels === 'number'
+          ? new Uint8Array(fw * fh).fill(f.pixels) : f.pixels;
+        head.push(sub(lzwPix(idx, 3)));
+      }
+      head.push(Buffer.from([0x3B]));
+      return Buffer.concat(head);
+    };
+    const at = (f, x, y, W) => {
+      const o = (y * W + x) * 4;
+      return [f.rgba[o], f.rgba[o + 1], f.rgba[o + 2], f.rgba[o + 3]];
+    };
+
+    // ── ① 块解析（不解 LZW，用来判断"要不要做网格图"）──
+    const one = mkGif(8, [{ pixels: 0 }]);
+    const two = mkGif(8, [{ pixels: 0 }, { pixels: 1 }]);
+    check('★ info：单帧 → animated=false', gifMod.info(one).animated === false);
+    check('★ info：两帧 → animated=true, frames=2',
+      gifMod.info(two).animated === true && gifMod.info(two).frames === 2, gifMod.info(two));
+    check('  尺寸解析正确', gifMod.info(two).w === 8 && gifMod.info(two).h === 8);
+    check('  非 GIF → null', gifMod.info(Buffer.from('hello world!!')) === null);
+    check('  7 帧也能数对',
+      gifMod.info(mkGif(8, Array.from({ length: 7 }, () => ({ pixels: 0 })))).frames === 7);
+
+    // ── ② LZW 解码（和编码器对答案）──
+    const seq = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 0, 1, 2]);
+    const dec = gifMod.lzwDecode(lzwPix(seq, 3), 3, seq.length);
+    check('★ LZW 解压逐像素和输入一致', Buffer.from(dec).equals(Buffer.from(seq)), [...dec]);
+
+    // ── ③ 逐帧渲染 ──
+    const r2 = gifMod.renderFrames(two, [0, 1]);
+    check('★ 两帧都渲染出来', r2.frames.length === 2, r2.frames.length);
+    check('  第 1 帧是红、第 2 帧是蓝',
+      at(r2.frames[0], 4, 4, 8)[0] === 255 && at(r2.frames[1], 4, 4, 8)[2] === 255,
+      [at(r2.frames[0], 4, 4, 8), at(r2.frames[1], 4, 4, 8)]);
+
+    // ── ④ 🔴 最要紧的一条：局部帧必须"叠"在前一帧上 ──
+    //    GIF 帧常常只存"变化的部分"，单独解一帧会得到一张残缺的图。
+    const diff = mkGif(8, [
+      { pixels: new Uint8Array(64).fill(0) },
+      { pixels: new Uint8Array(16).fill(1), left: 4, top: 4, w: 4, h: 4 },
+    ]);
+    const rdiff = gifMod.renderFrames(diff, [1]);
+    check('★★ 局部帧会叠在前一帧上（左上角仍是上一帧的红，不是空洞）',
+      at(rdiff.frames[0], 1, 1, 8)[0] === 255, at(rdiff.frames[0], 1, 1, 8));
+    check('  新画的部分是蓝的', at(rdiff.frames[0], 5, 5, 8)[2] === 255);
+
+    // ── ⑤ disposal=2（画完清回背景）──
+    const disp = mkGif(8, [
+      { pixels: 0, disposal: 2, w: 4, h: 4 },
+      { pixels: 1, left: 4, top: 4, w: 4, h: 4 },
+    ]);
+    const rdisp = gifMod.renderFrames(disp, [1]);
+    check('★ disposal=2 的上一帧被清掉了（透明）', at(rdisp.frames[0], 1, 1, 8)[3] === 0);
+
+    // ── ⑥ 交错行序 ──
+    const order = [];
+    for (const [s0, st] of [[0, 8], [4, 8], [2, 4], [1, 2]]) for (let y = s0; y < 8; y += st) order.push(y);
+    const ilPix = new Uint8Array(64);
+    order.forEach((row, k) => { for (let x = 0; x < 8; x++) ilPix[k * 8 + x] = row; });
+    const ril = gifMod.renderFrames(mkGif(8, [{ pixels: ilPix, interlace: true }]), [0]);
+    check('★ 交错图行序还原正确（第 0 行红、第 1 行蓝）',
+      at(ril.frames[0], 2, 0, 8)[0] === 255 && at(ril.frames[0], 2, 1, 8)[2] === 255,
+      [at(ril.frames[0], 2, 0, 8), at(ril.frames[0], 2, 1, 8)]);
+
+    // ── ⑦ PNG 编码 ──
+    const zlib = require('node:zlib');
+    const png = gifMod.pngEncode(4, 4, new Uint8Array(64).fill(128));
+    check('★ PNG 魔数正确',
+      png.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])));
+    check('  含 IHDR / IDAT / IEND',
+      /IHDR/.test(png.toString('latin1')) && /IDAT/.test(png.toString('latin1'))
+      && /IEND/.test(png.toString('latin1')));
+    check('  IHDR 宽高对', png.readUInt32BE(16) === 4 && png.readUInt32BE(20) === 4);
+    const idatAt = png.indexOf('IDAT');
+    const raw = zlib.inflateSync(png.slice(idatAt + 4, idatAt + 4 + png.readUInt32BE(idatAt - 4)));
+    check('  IDAT 解压后是 (宽*4+1)*高 的原始像素', raw.length === (4 * 4 + 1) * 4, raw.length);
+    check('  每行 filter 字节为 0', raw[0] === 0 && raw[17] === 0);
+
+    // ── ⑧ 网格图几何 ──
+    const five = mkGif(8, [0, 1, 2, 3, 4].map((c) => ({ pixels: c })));
+    const m = gifMod.montage(five, { maxFrames: 4 });
+    check('★ 动图能出网格图', !!m && !!m.png);
+    check('★ 尺寸正好 512×512 —— 卡在 detail:low 的预算上，token 和单帧一样',
+      m.w === 512 && m.h === 512, [m.w, m.h]);
+    check('★ 采样 4 帧、覆盖首尾', m.frames.length === 4 && m.frames[0] === 0
+      && m.frames[m.frames.length - 1] === 4, m.frames);
+    check('  静态图不生成网格（返回 null，走原路）', gifMod.montage(one) === null);
+    check('  采样表：7 帧取 4 → 0,2,4,6',
+      JSON.stringify(gifMod.sampleIndices(7, 4)) === '[0,2,4,6]', gifMod.sampleIndices(7, 4));
+    check('  帧数不够就全要', JSON.stringify(gifMod.sampleIndices(2, 4)) === '[0,1]');
+
+    // ── ⑨ 接线检查（防"写了模块但没接上"）──
+    const vsrc = require('fs').readFileSync(__dirname + '/vision.js', 'utf8');
+    check('★★ vision.js 真的 require 了 gif 并在 GIF 分支里用 montage',
+      /require\('\.\/gif'\)/.test(vsrc) && /gif\.montage\(/.test(vsrc));
+    check('★ 只在动图（frames>=2）时才走网格',
+      /animated && gi\.frames >= 2/.test(vsrc));
+    check('★ 会告诉模型"这是按时间顺序的 N 帧"（否则它当成四张拼图）',
+      /按时间顺序抽取的 \{n\} 帧/.test(require('fs').readFileSync(__dirname + '/config.js', 'utf8')));
+    check('★ brain.describeImage 支持提示词覆盖（动图要用不同问法）',
+      /describeImage\(imageDataUrl, maxTokens = 200, prompt = null\)/.test(
+        require('fs').readFileSync(__dirname + '/brain.js', 'utf8')));
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();

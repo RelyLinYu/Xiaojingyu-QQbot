@@ -40,6 +40,7 @@
 const cfg = require('./config');
 const qqmedia = require('./qqmedia');
 const brain = require('./brain');
+const gif = require('./gif');       // 动图采样拼网格（API 只认第一帧）
 
 // ---------- 格式嗅探（按字节，不信 filename）----------
 function sniffMime(buf) {
@@ -276,13 +277,55 @@ async function describe(img, log = () => {}) {
     return { desc: hit.desc, cached: true };
   }
 
+  // 🆕 动图处理（2026-10-01）：**视觉 API 只取动图的第一帧**，所以要自己把
+  //    几帧采样出来拼成一张网格图再发（这样模型才看得到"动作"）。
+  //
+  //    实测证据（我手工造了一张"第 1 帧纯红、第 2 帧纯蓝"的 GIF）：
+  //      发「单帧纯红」   → 「① 红色 ② 静态图」
+  //      发「两帧红→蓝」  → 「① 红色 ② 静态图」   ← 和单帧**一模一样**
+  //
+  //    实际效果（线上真实素材，250×250 / 15 帧）：
+  //      修复前 →「正**趴在地上**用呆萌的表情喊着…」        （静态）
+  //      修复后 →「**正在通过左右摆动身体和尾巴**，反复呼唤…」（有动作）
+  //
+  //    💰 而且几乎不花钱：网格图做成了 **512×512 正好卡在 `detail: 'low'`
+  //       的预算上**，实测 token 和"只发一帧"一样（197）。
+  //       （做到 514 就会多花一个 tile：221。）
+  let sendBuf = buf;
+  let sendMime = mime;
+  let prompt = v.prompt || '用一句中文描述这张图。';
+  let gifNote = '';
+  if (mime === 'image/gif') {
+    const gi = gif.info(buf);
+    if (gi && gi.animated && gi.frames >= 2) {
+      const m = gif.montage(buf, { maxFrames: v.gifFrames || 4 });
+      if (m) {
+        sendBuf = m.png;
+        sendMime = 'image/png';
+        // ⚠️ 必须**告诉模型这是按时间排序的几帧** —— 否则它会当成
+        //    "四张拼在一起的图"来描述，而不是"一个动作的四个瞬间"。
+        prompt = String(v.gifPrompt
+          || '这张图是一个动图按时间顺序抽取的 {n} 帧（从左到右、从上到下排列）。'
+          + '用一句中文描述这个动图在做什么。').replace('{n}', String(m.frames.length));
+        gifNote = ` · 动图 ${gi.frames} 帧 → 采样 ${m.frames.length} 帧拼成一张`;
+        log(`动图：共 ${gi.frames} 帧 → 取第 ${m.frames.join('/')} 帧拼成 ${m.w}×${m.h}`
+          + '（API 原本只认第一帧）');
+      } else {
+        gifNote = ` · 动图 ${gi.frames} 帧（采样失败，退回原图）`;
+        log(`动图采样失败，退回原图（可能尺寸/格式太怪）`);
+      }
+    } else if (gi) {
+      gifNote = ` · GIF ${gi.frames} 帧（静态）`;
+    }
+  }
+
   log(`下载 OK ${(buf.length / 1024).toFixed(0)}KB · ${mime}`
-    + (img.width && img.height ? ` · ${img.width}×${img.height}` : ''));
+    + (img.width && img.height ? ` · ${img.width}×${img.height}` : '') + gifNote);
 
   // ④ 交给模型（复用 brain 的重试 / 预算 / 记账 / 超时那一整套）
-  const dataUrl = `data:${mime};base64,${buf.toString('base64')}`;
+  const dataUrl = `data:${sendMime};base64,${sendBuf.toString('base64')}`;
   const t0 = Date.now();
-  const desc = await brain.describeImage(dataUrl, v.maxTokens || 200);
+  const desc = await brain.describeImage(dataUrl, v.maxTokens || 200, prompt);
   log(`模型返回（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
 
   const out = String(desc || '').trim();
