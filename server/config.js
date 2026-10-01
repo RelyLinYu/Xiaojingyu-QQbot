@@ -28,7 +28,13 @@ module.exports = {
     // 每天上限：防"某天被人刷爆"
     dailyLimitYuan: Number(process.env.BUDGET_DAILY_YUAN) || 3,
     // 总计上限：防"慢慢漏光"（= 你充的钱花完就永久停）
-    totalLimitYuan: Number(process.env.BUDGET_TOTAL_YUAN) || 10,
+    //
+    // 🆕 2026-10-01：从 10 提到 20。原因：¥10 在 09-26 左右就被撞满了，
+    //    机器人哑了好几天（`blocked` 累计 205 次，还在群里刷了 285 次「没钱了」），
+    //    最后用户要求「把总线额调到20」。
+    //    ⚠️ `.env` 里的 `BUDGET_TOTAL_YUAN` **优先于**这里的默认值 ——
+    //       改这里只影响"没有 .env 配置"的场景（新装 / 本地自测）。
+    totalLimitYuan: Number(process.env.BUDGET_TOTAL_YUAN) || 20,
     // 剩余低于这个数就告警一次（不刷屏）
     warnAtYuan: Number(process.env.BUDGET_WARN_YUAN) || 1,
 

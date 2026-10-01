@@ -1960,6 +1960,55 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /开关状态/.test(srcIdx));
   }
 
+  console.log('\n=== 22. ⭐ 预算：「没钱了」每个群每天只说一次 ===');
+  {
+    // 🔴 真实事故（2026-10-01 发现）：总额 ¥10 被撞满之后，
+    //    **每来一条触发消息就发一次「没钱了」** —— 24 小时内发了 285 次，
+    //    把群刷了（群友开始回「没钱了（）」），`blocked` 累计 205 次。
+    //    原因是 index.js 里"预算用尽 → 告知群里"那段**完全没有节流**。
+    const budget = require('./budget');
+
+    check('★ shouldAnnounceStop 是导出的函数（index.js 要用它）',
+      typeof budget.shouldAnnounceStop === 'function');
+
+    const S1 = 'group:BUDGET_TEST_A';
+    const S2 = 'group:BUDGET_TEST_B';
+
+    check('★ 同一个群：第一次说「是」，之后都说「不」',
+      budget.shouldAnnounceStop(S1) === true && budget.shouldAnnounceStop(S1) === false
+      && budget.shouldAnnounceStop(S1) === false,
+      '修之前这里会一直返回 true → 刷屏');
+
+    check('★ 不同群互不影响（那个群的人需要知道它为什么哑了）',
+      budget.shouldAnnounceStop(S2) === true && budget.shouldAnnounceStop(S2) === false);
+
+    check('★★ 这条状态**会落盘**（否则每次 deploy 重启都会再说一遍）', (() => {
+      const fs = require('fs');
+      const path = require('path');
+      // NO_PERSIST 模式下不落盘，那就不该断言文件
+      if (process.env.XLJ_NO_PERSIST === '1') return true;
+      const f = path.join(__dirname, 'data', 'budget.json');
+      if (!fs.existsSync(f)) return false;
+      const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+      return !!(j.stopAnnounced && j.stopAnnounced[S1] === j.day);
+    })());
+
+    // 🔴 上限改了：默认 20（用户 2026-10-01 要求）
+    check('★★ 总计上限默认是 20（用户要求「把总线额调到20」）',
+      cfg.budget.totalLimitYuan === 20, String(cfg.budget.totalLimitYuan));
+    check('  今日上限仍是 3（没被顺带改掉）',
+      cfg.budget.dailyLimitYuan === 3, String(cfg.budget.dailyLimitYuan));
+
+    // 🔴 顺序保护：两条"预算用尽"路径都必须过同一套节流
+    const srcIdx2 = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
+    const nThrottle = (srcIdx2.match(/budget\.shouldAnnounceStop/g) || []).length;
+    const nBudgetStop = (srcIdx2.match(/budgetStop\)/g) || []).length;
+    check('★★ index.js 里**两条**预算用尽路径都挂了节流（少一条就有第二条刷屏路径）',
+      nThrottle >= 2 && nBudgetStop >= 2, JSON.stringify({ nThrottle, nBudgetStop }));
+    check('★ index.js 确实 require 了 budget（不然 .shouldAnnounceStop 会 undefined 崩掉）',
+      /require\('\.\/budget'\)/.test(srcIdx2));
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();

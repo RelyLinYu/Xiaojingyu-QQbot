@@ -170,7 +170,7 @@ AI_REPLY_MODEL=${in_model}
 AI_JUDGE_MODEL=${in_model}
 LOG_PASSWORD=${in_logpw}
 BUDGET_DAILY_YUAN=3
-BUDGET_TOTAL_YUAN=10
+BUDGET_TOTAL_YUAN=20
 EOF
   chmod 600 "$APP_DIR/.env"
   echo "  ✅ 已写入并设为 600（只有 root 能读）"

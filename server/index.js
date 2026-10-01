@@ -13,6 +13,7 @@ const brain = require('./brain');
 const linkparse = require('./linkparse');
 const vision = require('./vision');
 const power = require('./power');
+const budget = require('./budget');   // 只为"没钱了"的节流（shouldAnnounceStop）
 const qqmedia = require('./qqmedia');
 const {
   sendGroupMessage, sendPrivateMessage,
@@ -270,8 +271,17 @@ async function handleEvent(type, d) {
 
   // 6.2 预算用尽：不只是沉默，要让群里知道原因
   //     注意判断发生在 callAI 内部，所以这里要把理由捞出来发出去。
+  //
+  // 🔴 2026-10-01 修：原来这里**没有节流** —— 上限撞到 ¥10 之后，
+  //    每来一条触发消息就发一次「没钱了」，24 小时内发了 **285 次**，
+  //    把群刷了（群友开始回「没钱了（）」）。
+  //    现在改成**每个群每天最多说一次**，其余那条静默（日志照记 blocked）。
   if (l1.budgetStop) {
-    console.log(`  └ 预算已用尽，告知群里`);
+    if (!budget.shouldAnnounceStop(scope)) {
+      console.log('  └ 预算已用尽（本群今天已经告知过，静默）');
+      return;
+    }
+    console.log(`  └ 预算已用尽，告知群里（本群今天第一次）`);
     const msg = l1.reason === '预算已用尽' ? '没钱了，等充值吧' : l1.reason;
     const sent = isGroup
       ? await sendGroupMessage(openid, msg, d.id)
@@ -295,9 +305,13 @@ async function handleEvent(type, d) {
   // 7. L2 生成
   const gen = await brain.generateReply(scope, d);
 
-  // 7.5 生成阶段才发现预算用尽 —— 同样把理由发出去
+  // 7.5 生成阶段才发现预算用尽 —— 同样把理由发出去（**同一套节流**，否则这里有第二条刷屏路径）
   if (gen && gen.budgetStop) {
-    console.log('  └ 预算已用尽，告知群里');
+    if (!budget.shouldAnnounceStop(scope)) {
+      console.log('  └ 预算已用尽（本群今天已经告知过，静默）');
+      return;
+    }
+    console.log('  └ 预算已用尽，告知群里（本群今天第一次）');
     const sent = isGroup
       ? await sendGroupMessage(openid, gen.text, d.id)
       : await sendPrivateMessage(openid, gen.text, d.id);

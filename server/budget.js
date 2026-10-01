@@ -49,6 +49,9 @@ function freshState() {
     blocked: 0,
     byModel: {},
     warned: false,
+    // 🆕 "没钱了"在每个群**每天最多说一次**（scope → 日期）
+    //    见 shouldAnnounceStop() 的注释
+    stopAnnounced: {},
   };
 }
 
@@ -165,6 +168,29 @@ function canSpend() {
   return { ok: true, reason: '' };
 }
 
+// ---------- "没钱了"要不要发到群里？（2026-10-01 修）----------
+//
+// 🔴 真实事故：上限撞到 ¥10 之后，**每来一条触发消息就发一次「没钱了」** ——
+//    实测 24 小时内发了 **285 次**，把群刷了，群友都开始回「没钱了（）」。
+//
+// 为什么会这样：index.js 里"预算用尽 → 告知群里"那段**完全没有节流**，
+// 而 `blocked` 每次都 +1（那次 205 次），说明每条触发消息都走了这条路。
+//
+// 修法：**每个群、每天最多说一次**。
+//   · 按群隔离：那个群的人需要知道"它为什么哑了"，别的群不用被牵连
+//   · 按天限制：跨天额度会重置，新的一天重新告知是合理的
+//   · 落盘（state.stopAnnounced）：否则每次 deploy 重启都会再说一遍
+//
+// ⚠️ 没说出口的那次也不影响别的 —— 机器人照样沉默，日志里照记 blocked。
+function shouldAnnounceStop(scope) {
+  const today = todayKey();
+  if (!state.stopAnnounced || typeof state.stopAnnounced !== 'object') state.stopAnnounced = {};
+  if (state.stopAnnounced[scope] === today) return false;
+  state.stopAnnounced[scope] = today;
+  save();
+  return true;
+}
+
 // ---------- 调用后：记账 ----------
 function record(model, usage) {
   if (!usage) return;
@@ -279,4 +305,4 @@ function markBlocked() {
 
 load();
 
-module.exports = { canSpend, record, status, persistedStatus, priceOf, isFreeModel, markBlocked };
+module.exports = { canSpend, shouldAnnounceStop, record, status, persistedStatus, priceOf, isFreeModel, markBlocked };
