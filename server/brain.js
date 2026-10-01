@@ -20,7 +20,8 @@ const replyLog = [];            // {scope, ts}  用于 maxConsecutive
 
 // @ 专属限流用的状态（2026-10-01，见 passHardRules 里的注释）
 const atHits = new Map();       // key -> [ts]  滑动窗口内的"被 @ 回复"时间戳
-const atNoticeAt = new Map();   // key -> ts    "你 @ 得太密了"这句提示上次发的时间
+const atNoticeAt = new Map();   // key -> ts    "被限流了"这句提示上次发的时间
+const atSigs = new Map();       // key -> [{sig, ts}]  内容指纹（判"同一内容反复发"）
 
 let callCount = 0;
 let callDay = todayKey();
@@ -388,50 +389,87 @@ function consecutiveOk(scope) {
 
 // ---------- L0：硬规则 ----------
 // eventType / botOpenid 由 index.js 透传；isAt 的判断见 isAtRobot
-// ---------- @ 专属限流（2026-10-01 新增）----------
+// ---------- @ 专属限流（2026-10-01；判据当天改过一版）----------
 //
-// 为什么需要一个**单独**的闸，而不是复用普通的冷却：
-//   普通冷却（同人 60 秒）对 @ 太狠了 —— @ 是明确点名，装死 60 秒会显得"坏了"。
-//   所以给 @ 一条**自己的**、松得多的闸：
-//     · `cooldownMs`    两次 @ 回复之间的最小间隔（默认 10 秒）
-//     · `maxPerWindow`  + `windowMs`  滚动窗口内同一人最多几次（默认 60 秒内 3 次）
-//   正常一来一回（问 → 答 → 读完再问）几乎不可能撞到；
-//   而"按着 @ 不放"会在第 4 次以后被挡住。
+// 为什么需要一个**单独**的闸：原来 `bypass = at || owner` —— @ 把「同人 60 秒冷却」
+// 和「同群连续上限」两道闸**全绕过了**，等于"只要一直 @ 就有无限次回复"。
+// 但也不能简单把那两道闸套到 @ 上（@ 是明确点名，装死 60 秒会显得"坏了"）。
 //
-// ⚠️ 提示语（"你 @ 得太密了"）**自己也必须节流**，否则它会变成新的刷屏源
-//    （被挡的人只会更用力地 @）。所以 `noticeCooldownMs` 默认 3 分钟/人。
+// 🔴🔴 第一版用**纯频率**当判据（10 秒 / 每分钟 3 次）—— **做错了**。
+//    用户当天就指出：「正常交流话密也会触发，我想要的不是这个，
+//    只是在无意义@刷屏才限制」。拿线上日志一量：
+//      被挡的 9 条里 **8 条是内容各不相同的正常聊天**（误伤率 89%）。
+//    ⇒ **判据应该是"无意义"（同一内容反复发），不是"频繁"。**
+//      **频繁恰恰是正常聊天该有的样子。**
 //
+// 所以两层：
+//   ① 重复闸（主）：同一人把**同样的内容**在窗口内发到第 N 次 → 挡
+//   ② 频率兜底：设得很宽松（2 秒 / 每分钟 10 次），只防"真的被刷爆"
+
+// 内容指纹：用来判断"是不是同一句话/同一张图又发了一遍"
+//
+// · 文本：剥掉 <@...>、压掉空白后比对
+// · 图片：**优先用识图描述** —— 同一张图会命中 vision 的 md5 缓存，
+//   描述**一字不差**，所以它天然就是一个稳定指纹 ✅
+//   （识图被限额跳过时描述为空 → 退回附件的 size/宽高兜底）
+function contentSig(msg) {
+  let t = String(msg?.content || '');
+  // 引用消息的正文里会带「（引用了一条消息：…）」，那部分也参与比对没问题
+  t = t.replace(/<@[^>]*>/g, '').replace(/\s+/g, '').trim();
+  const v = msg?.__vision ? String(msg.__vision).replace(/\s+/g, '').trim() : '';
+  const parts = [t || v || ''];
+  for (const a of (Array.isArray(msg?.attachments) ? msg.attachments : [])) {
+    if (!a) continue;
+    parts.push(`img:${Number(a.size) || 0}:${Number(a.width) || 0}x${Number(a.height) || 0}`);
+  }
+  return parts.join('#').slice(0, 300);
+}
+
 // 返回 { ok, why, notice }。`notice` 只在"该发提示"时才有值。
-function atRateGate(key, al) {
+function atRateGate(key, sig, al) {
   const now = Date.now();
   const windowMs = Number(al.windowMs) > 0 ? al.windowMs : 60000;
-  const cooldownMs = Number(al.cooldownMs) > 0 ? al.cooldownMs : 10000;
-  const maxPerWindow = Number(al.maxPerWindow) > 0 ? al.maxPerWindow : 3;
+  const cooldownMs = Number(al.cooldownMs) > 0 ? al.cooldownMs : 2000;
+  const maxPerWindow = Number(al.maxPerWindow) > 0 ? al.maxPerWindow : 10;
+  const repWindow = Number(al.repeatWindowMs) > 0 ? al.repeatWindowMs : 120000;
+  const repThreshold = Number(al.repeatThreshold) > 0 ? al.repeatThreshold : 3;
 
-  // 滚动窗口：先把过期的剔掉
+  // ---- ① 重复闸（主判据）----
+  const sigs = (atSigs.get(key) || []).filter((s) => now - s.ts < repWindow);
+  atSigs.set(key, sigs);
+  const sameCount = sigs.filter((s) => s.sig === sig).length;
+  if (sig && sameCount + 1 >= repThreshold) {
+    // 记下这一次（这样"第 4 遍、第 5 遍"也都在计数里，不会因为被挡就漏掉）
+    sigs.push({ sig, ts: now });
+    return atBlocked(key, `同一内容已发 ${sameCount + 1} 次`
+      + `（${Math.round(repWindow / 1000)} 秒内，上限 ${repThreshold - 1} 次）`, al.noticeRepeat, al);
+  }
+  sigs.push({ sig, ts: now });
+
+  // ---- ② 频率兜底（宽松，只防被刷爆）----
   const hits = (atHits.get(key) || []).filter((t) => now - t < windowMs);
   atHits.set(key, hits);
-
-  let why = '';
   const last = hits.length ? hits[hits.length - 1] : 0;
   if (last && now - last < cooldownMs) {
-    why = `@得太密（${Math.ceil((cooldownMs - (now - last)) / 1000)} 秒后才能再 @）`;
-  } else if (hits.length >= maxPerWindow) {
-    why = `@得太频繁（${Math.round(windowMs / 1000)} 秒内已 ${hits.length} 次，上限 ${maxPerWindow}）`;
+    return atBlocked(key, `@得太快（${Math.ceil((cooldownMs - (now - last)) / 1000)} 秒后才能再 @）`, al.noticeFlood, al);
   }
-
-  if (!why) {
-    hits.push(now);
-    atHits.set(key, hits);
-    return { ok: true };
+  if (hits.length >= maxPerWindow) {
+    return atBlocked(key, `@得太频繁（${Math.round(windowMs / 1000)} 秒内已 ${hits.length} 次，`
+      + `上限 ${maxPerWindow}）`, al.noticeFlood, al);
   }
+  hits.push(now);
+  return { ok: true };
+}
 
-  // 被挡下来了 —— 要不要说一句话告诉对方"不是坏了，是故意的"？
+// 被挡下来了 —— 要不要说一句话告诉对方"不是坏了，是故意的"？
+// ⚠️ 提示语**自己也必须节流**，否则被挡的人只会更用力 @ → 提示成了新的刷屏源。
+function atBlocked(key, why, noticeText, al) {
+  const now = Date.now();
   const noticeCd = Number(al.noticeCooldownMs) >= 0 ? al.noticeCooldownMs : 180000;
   const lastNotice = atNoticeAt.get(key) || 0;
-  if (al.notice && now - lastNotice >= noticeCd) {
+  if (noticeText && now - lastNotice >= noticeCd) {
     atNoticeAt.set(key, now);
-    return { ok: false, why, notice: String(al.notice) };
+    return { ok: false, why, notice: String(noticeText) };
   }
   return { ok: false, why };
 }
@@ -439,13 +477,18 @@ function atRateGate(key, al) {
 // 定期清理，防内存涨（key 是"群|人"，长期跑会有很多）
 setInterval(() => {
   const now = Date.now();
-  const keep = Math.max(Number((cfg.policy.atLimits || {}).windowMs) || 60000,
-    Number((cfg.policy.atLimits || {}).cooldownMs) || 10000) * 2;
+  const alCfg = cfg.policy.atLimits || {};
+  const keep = Math.max(Number(alCfg.windowMs) || 60000, Number(alCfg.cooldownMs) || 2000) * 2;
   for (const [k, arr] of atHits) {
     const kept = arr.filter((t) => now - t < keep);
     if (kept.length) atHits.set(k, kept); else atHits.delete(k);
   }
-  const noticeKeep = Number((cfg.policy.atLimits || {}).noticeCooldownMs) || 180000;
+  const sigKeep = (Number(alCfg.repeatWindowMs) || 120000) * 2;
+  for (const [k, arr] of atSigs) {
+    const kept = arr.filter((s) => now - s.ts < sigKeep);
+    if (kept.length) atSigs.set(k, kept); else atSigs.delete(k);
+  }
+  const noticeKeep = Number(alCfg.noticeCooldownMs) || 180000;
   for (const [k, t] of atNoticeAt) if (now - t > noticeKeep * 2) atNoticeAt.delete(k);
 }, 5 * 60 * 1000).unref();
 
@@ -453,9 +496,11 @@ setInterval(() => {
 function _resetAtLimits() {
   atHits.clear();
   atNoticeAt.clear();
+  atSigs.clear();
 }
 
-function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {  const p = cfg.policy;
+function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
+  const p = cfg.policy;
   const text = extractText(msg);
   const key = `${scope}|${msg.author?.user_openid || msg.author?.member_openid || 'unknown'}`;
 
@@ -546,7 +591,7 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {  const p =
   const al = p.atLimits || {};
 
   if (at && !ownerFree && al.enabled !== false) {
-    const gate = atRateGate(key, al);
+    const gate = atRateGate(key, contentSig(msg), al);
     if (!gate.ok) return { ok: false, why: gate.why, rateNotice: gate.notice || null };
   }
 
@@ -1068,6 +1113,7 @@ module.exports = {
   recordReply,
   // 🆕 @ 专属限流（2026-10-01）：给自测用，线上不用直接调
   _atRateGate: atRateGate,
+  _contentSig: contentSig,
   _resetAtLimits,
   recentReplyTexts,
   passHardRules,
