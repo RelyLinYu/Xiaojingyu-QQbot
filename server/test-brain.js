@@ -17,6 +17,16 @@ Math.random = () => FIXED_RANDOM_MISS;
 const brain = require('./brain');
 const cfg = require('./config');
 
+// ⚠️ 第三条确定性保障：**默认关掉 @ 专属限流**（2026-10-01 新增）
+//
+// 为什么：旧的那些测试会**连续**用"同一个人 @ 机器人"的方式验证别的规则
+// （@ 跳过 minLength、@ 覆盖冷却…）。而新的 @ 限流是有状态的
+// （同一人 10 秒内只放行一次）→ 于是**第二条 @ 测试必然被自己的限流挡掉**。
+// 这不是 bug，是"新规则把旧测试打红了"（坑 93 的同类）。
+// 处理办法：旧测试统一关掉它（它们测的是**别的**规则），
+// 新闸由第 24 组**显式打开**来专门测（含边界：冷却 / 窗口配额 / 主人免闸 / 不 @ 不受影响）。
+if (cfg.policy.atLimits) cfg.policy.atLimits.enabled = false;
+
 let pass = 0, fail = 0;
 function check(name, cond, extra = '') {
   if (cond) { pass++; console.log(`  ✅ ${name}`); }
@@ -2162,6 +2172,143 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★ brain.describeImage 支持提示词覆盖（动图要用不同问法）',
       /describeImage\(imageDataUrl, maxTokens = 200, prompt = null\)/.test(
         require('fs').readFileSync(__dirname + '/brain.js', 'utf8')));
+  }
+
+  console.log('\n=== 24. ⭐ @ 专属限流（治"频繁 @ 导致刷屏回复"）===');
+  {
+    // 🔴 真实事故（用户 2026-10-01：「看日志，有人频繁@导致刷屏回复，针对此类情况限制」）：
+    //    群友「狗狗」在 17:13:30～17:14:19 的 **30 秒内 @ 了 6 次**（都是同一张图），
+    //    机器人**每次都回**，自己都在数"第三遍…第六遍"。
+    //    那 24 小时里他一个人触发 **138 次回复（占全部的 40%）**，最忙一分钟 **19 条**。
+    //    根因：`bypass = at || owner` —— @ 把「同人 60 秒冷却」和「同群连续上限」全绕过了。
+
+    const al = cfg.policy.atLimits;
+    check('★ config.js 里的默认值是 `enabled: true`（线上真的生效）',
+      /atLimits:\s*\{[\s\S]{0,200}?enabled:\s*true/.test(
+        require('fs').readFileSync(__dirname + '/config.js', 'utf8')),
+      '（注意：自测开头把它关掉了，下面手动打开来测）');
+
+    // 显式打开 + 清状态（各条之间互不干扰）
+    const realEnabled = al.enabled;
+    al.enabled = true;
+    brain._resetAtLimits();
+
+    const BOT = 'BOT0PEN1D000000000000000000000000';
+    const mkAt = (uid, text = '在吗', scopeTag = 'ATM') => ({
+      message_type: 0,
+      content: `<@${BOT}> ${text}`,
+      mentions: [{ is_you: true, bot: true, id: BOT }],
+      author: { bot: false, username: '甲', member_openid: uid },
+    });
+    const scope = 'group:' + 'ATM';
+    const U1 = 'USER_ONE_0001';
+
+    check('★ 前提：@ 消息本身是能通过的（不是被别的规则拦掉）', (() => {
+      brain._resetAtLimits();
+      const r = brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+      return r.ok === true && r.isAt === true;
+    })(), brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false));
+
+    // ① 冷却：同一人连续 @ 立刻被挡
+    brain._resetAtLimits();
+    const first = brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+    const second = brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+    check('★★ 同一人 10 秒内第二次 @ 会被挡（原来无限放行）',
+      first.ok === true && second.ok === false && /@得太密/.test(second.why), second.why);
+    check('★ 被挡时**带提示语**（告诉对方"不是坏了，是故意的"）',
+      typeof second.rateNotice === 'string' && second.rateNotice.length > 0, second.rateNotice);
+    check('★ 提示语自己也节流：紧接着再被挡时**不再重复发**',
+      brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false).rateNotice == null);
+
+    // ② 窗口配额：冷却过了也不能无限刷
+    brain._resetAtLimits();
+    const t = al.cooldownMs;
+    const realNow = Date.now;
+    let fake = realNow();
+    Date.now = () => fake;
+    try {
+      brain._resetAtLimits();
+      const codes = [];
+      for (let i = 0; i < 6; i++) {
+        const r = brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+        codes.push(r.ok ? '过' : '挡');
+        fake += t + 50;      // 每次都比冷却多一点点 → 只受窗口配额限制
+      }
+      check(`★★ 窗口配额：每分钟最多 ${al.maxPerWindow} 次（6 次里只放行 ${al.maxPerWindow} 次）`,
+        codes.filter((c) => c === '过').length === al.maxPerWindow, codes.join(''));
+    } finally { Date.now = realNow; }
+
+    // ③ 窗口滑走之后恢复
+    brain._resetAtLimits();
+    const realNow2 = Date.now;
+    let base = realNow2();
+    Date.now = () => base;
+    try {
+      brain._resetAtLimits();
+      for (let i = 0; i < al.maxPerWindow; i++) {
+        brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+        base += al.cooldownMs + 50;
+      }
+      const blocked = brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+      base += al.windowMs + 1000;            // 窗口整体滑走
+      const recovered = brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+      check('★★ 窗口滑走后恢复（不是永久封）', blocked.ok === false && recovered.ok === true,
+        `blocked=${blocked.ok} recovered=${recovered.ok}`);
+    } finally { Date.now = realNow2; }
+
+    // ④ 按人隔离：别人不受影响
+    brain._resetAtLimits();
+    brain.passHardRules(scope, mkAt(U1), 'GROUP_MESSAGE_CREATE', false);
+    check('★ 另一个人 @ 不受影响（不是"群里有人被限就全体静音"）',
+      brain.passHardRules(scope, mkAt('USER_TWO_0002'), 'GROUP_MESSAGE_CREATE', false).ok === true);
+
+    // ⑤ 按群隔离
+    check('★ 同一个群之外不受影响',
+      brain.passHardRules('group:OTHER', mkAt(U1), 'GROUP_MESSAGE_CREATE', false).ok === true);
+
+    // ⑥ 🔴 主人免闸（调试要方便）
+    brain._resetAtLimits();
+    const ownerId = cfg.ownerOpenid || 'OWNER_X';
+    const savedOwner = cfg.ownerOpenid;
+    try {
+      cfg.ownerOpenid = ownerId;
+      brain._resetAtLimits();
+      let allOk = true;
+      for (let i = 0; i < 8; i++) {
+        const r = brain.passHardRules(scope, mkAt(ownerId), 'GROUP_MESSAGE_CREATE', false);
+        if (!r.ok) allOk = false;
+      }
+      check('★★ 主人连续 @ 8 次**全部放行**（调试不能被自己的闸挡住）', allOk);
+    } finally { cfg.ownerOpenid = savedOwner; }
+
+    // ⑦ 不 @ 的消息走原来的两道闸，不受新闸影响
+    brain._resetAtLimits();
+    const plain = {
+      message_type: 0, content: '这是一句普通的话', mentions: [],
+      author: { bot: false, username: '乙', member_openid: 'USER_PLAIN_9' },
+    };
+    check('  新闸只对 @ 生效：连发 5 条普通消息不会被"@得太密"挡',
+      (() => {
+        brain._resetAtLimits();
+        for (let i = 0; i < 5; i++) {
+          const r = brain.passHardRules('group:PLAIN2', plain, 'GROUP_MESSAGE_CREATE', false);
+          if (/@得太/.test(String(r.why))) return false;
+        }
+        return true;
+      })());
+
+    // ⑧ 接线检查
+    const bsrc = require('fs').readFileSync(__dirname + '/brain.js', 'utf8');
+    const isrc = require('fs').readFileSync(__dirname + '/index.js', 'utf8');
+    check('★★ brain.js 里 `bypass` 不再是无条件的 `at || owner`',
+      !/const bypass = at \|\| \(owner && p\.ownerBypassLimits\)/.test(bsrc)
+      && /atRateGate\(key, al\)/.test(bsrc));
+    check('★ index.js 会把 rateNotice 发出去（否则对方只看到"装死"）',
+      /l0\.rateNotice/.test(isrc) && /sendGroupMessage\(openid, l0\.rateNotice/.test(isrc));
+    check('★ 那句提示**计入本群连发上限**（否则提示语自己会绕开防刷屏）',
+      /if \(sent\) brain\.markScopeReplied\(scope\)/.test(isrc));
+
+    al.enabled = realEnabled;
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

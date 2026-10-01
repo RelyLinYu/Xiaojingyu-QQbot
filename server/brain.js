@@ -18,6 +18,10 @@ const contexts = new Map();     // gid -> [{name, content}]
 const lastReply = new Map();    // "scope|openid" -> ts
 const replyLog = [];            // {scope, ts}  用于 maxConsecutive
 
+// @ 专属限流用的状态（2026-10-01，见 passHardRules 里的注释）
+const atHits = new Map();       // key -> [ts]  滑动窗口内的"被 @ 回复"时间戳
+const atNoticeAt = new Map();   // key -> ts    "你 @ 得太密了"这句提示上次发的时间
+
 let callCount = 0;
 let callDay = todayKey();
 
@@ -384,8 +388,74 @@ function consecutiveOk(scope) {
 
 // ---------- L0：硬规则 ----------
 // eventType / botOpenid 由 index.js 透传；isAt 的判断见 isAtRobot
-function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
-  const p = cfg.policy;
+// ---------- @ 专属限流（2026-10-01 新增）----------
+//
+// 为什么需要一个**单独**的闸，而不是复用普通的冷却：
+//   普通冷却（同人 60 秒）对 @ 太狠了 —— @ 是明确点名，装死 60 秒会显得"坏了"。
+//   所以给 @ 一条**自己的**、松得多的闸：
+//     · `cooldownMs`    两次 @ 回复之间的最小间隔（默认 10 秒）
+//     · `maxPerWindow`  + `windowMs`  滚动窗口内同一人最多几次（默认 60 秒内 3 次）
+//   正常一来一回（问 → 答 → 读完再问）几乎不可能撞到；
+//   而"按着 @ 不放"会在第 4 次以后被挡住。
+//
+// ⚠️ 提示语（"你 @ 得太密了"）**自己也必须节流**，否则它会变成新的刷屏源
+//    （被挡的人只会更用力地 @）。所以 `noticeCooldownMs` 默认 3 分钟/人。
+//
+// 返回 { ok, why, notice }。`notice` 只在"该发提示"时才有值。
+function atRateGate(key, al) {
+  const now = Date.now();
+  const windowMs = Number(al.windowMs) > 0 ? al.windowMs : 60000;
+  const cooldownMs = Number(al.cooldownMs) > 0 ? al.cooldownMs : 10000;
+  const maxPerWindow = Number(al.maxPerWindow) > 0 ? al.maxPerWindow : 3;
+
+  // 滚动窗口：先把过期的剔掉
+  const hits = (atHits.get(key) || []).filter((t) => now - t < windowMs);
+  atHits.set(key, hits);
+
+  let why = '';
+  const last = hits.length ? hits[hits.length - 1] : 0;
+  if (last && now - last < cooldownMs) {
+    why = `@得太密（${Math.ceil((cooldownMs - (now - last)) / 1000)} 秒后才能再 @）`;
+  } else if (hits.length >= maxPerWindow) {
+    why = `@得太频繁（${Math.round(windowMs / 1000)} 秒内已 ${hits.length} 次，上限 ${maxPerWindow}）`;
+  }
+
+  if (!why) {
+    hits.push(now);
+    atHits.set(key, hits);
+    return { ok: true };
+  }
+
+  // 被挡下来了 —— 要不要说一句话告诉对方"不是坏了，是故意的"？
+  const noticeCd = Number(al.noticeCooldownMs) >= 0 ? al.noticeCooldownMs : 180000;
+  const lastNotice = atNoticeAt.get(key) || 0;
+  if (al.notice && now - lastNotice >= noticeCd) {
+    atNoticeAt.set(key, now);
+    return { ok: false, why, notice: String(al.notice) };
+  }
+  return { ok: false, why };
+}
+
+// 定期清理，防内存涨（key 是"群|人"，长期跑会有很多）
+setInterval(() => {
+  const now = Date.now();
+  const keep = Math.max(Number((cfg.policy.atLimits || {}).windowMs) || 60000,
+    Number((cfg.policy.atLimits || {}).cooldownMs) || 10000) * 2;
+  for (const [k, arr] of atHits) {
+    const kept = arr.filter((t) => now - t < keep);
+    if (kept.length) atHits.set(k, kept); else atHits.delete(k);
+  }
+  const noticeKeep = Number((cfg.policy.atLimits || {}).noticeCooldownMs) || 180000;
+  for (const [k, t] of atNoticeAt) if (now - t > noticeKeep * 2) atNoticeAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
+// 测试用：清掉 @ 限流的状态（自测之间互不干扰）
+function _resetAtLimits() {
+  atHits.clear();
+  atNoticeAt.clear();
+}
+
+function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {  const p = cfg.policy;
   const text = extractText(msg);
   const key = `${scope}|${msg.author?.user_openid || msg.author?.member_openid || 'unknown'}`;
 
@@ -457,14 +527,30 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
 
   if (inQuietHours()) return { ok: false, why: '静默时段' };
 
-  // ⭐ 被 @ = 有人专门叫它 → 冷却和连续上限都必须让路。
+  // ⭐ 被 @ = 有人专门叫它 → 不走"普通消息"那两道闸（同人 60 秒冷却 / 同群连续上限）。
   //
-  // 为什么：这两道闸的目的是防"群里有人对着它刷屏"（主动插话），
-  // 但被 @ 是明确的点名，跟上一条回没回无关。
-  // 老逻辑的后果：@ 它一次 → 回 → 之后 60 秒内再 @ 一律装死，调试时几乎无法验证。
-  // 主人的消息随叫随到：不受冷却和连续上限约束
+  // 🔴 但 2026-10-01 发现：**完全不给闸会被人刷屏。**
+  //    实测日志：群友「狗狗」在 17:13:30～17:14:19 的 **30 秒内 @ 了 6 次**
+  //    （而且都是同一张图），机器人**每次都回**，自己都在数"第三遍…第六遍"。
+  //    那 24 小时里他一个人触发 **138 次回复（占全部 347 条的 40%）**，
+  //    最忙的一分钟回了 **19 条**。
+  //
+  //    原因就是原来这行写成 `bypass = at || owner` —— **@ 把两道闸全绕过了**。
+  //
+  // ⇒ 现在给 @ **一条自己的闸**（`policy.atLimits`）：比普通消息松得多，
+  //    正常一来一回完全不受影响（真人读完回话再 @ 通常 >10 秒），
+  //    但"按着 @ 不放"会被挡住。
+  //    ⚠️ 主人的消息**仍然完全免闸**（`ownerBypassLimits`）—— 调试要方便。
   const owner = isOwner(msg);
-  const bypass = at || (owner && p.ownerBypassLimits);
+  const ownerFree = owner && p.ownerBypassLimits;
+  const al = p.atLimits || {};
+
+  if (at && !ownerFree && al.enabled !== false) {
+    const gate = atRateGate(key, al);
+    if (!gate.ok) return { ok: false, why: gate.why, rateNotice: gate.notice || null };
+  }
+
+  const bypass = at || ownerFree;
   if (!bypass) {
     if (Date.now() - (lastReply.get(key) || 0) < p.cooldownMs) {
       return { ok: false, why: '该成员冷却中' };
@@ -980,6 +1066,9 @@ module.exports = {
   pushContext,
   recentContext,
   recordReply,
+  // 🆕 @ 专属限流（2026-10-01）：给自测用，线上不用直接调
+  _atRateGate: atRateGate,
+  _resetAtLimits,
   recentReplyTexts,
   passHardRules,
   shouldReply,

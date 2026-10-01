@@ -236,6 +236,17 @@ async function handleEvent(type, d) {
   // 5. L0 硬规则
   const l0 = brain.passHardRules(scope, d, type, isPrivate);
   if (!l0.ok) {
+    // 🆕 @ 得太频繁被挡时，说一句话告诉对方"不是坏了，是故意的"
+    //    （这句话自己也有节流，见 policy.atLimits.noticeCooldownMs —— 默认 3 分钟/人）
+    if (l0.rateNotice) {
+      console.log(`  └ 不回（${l0.why}）→ 发一句提示`);
+      const sent = isGroup
+        ? await sendGroupMessage(openid, l0.rateNotice, d.id)
+        : await sendPrivateMessage(openid, l0.rateNotice, d.id);
+      // ⚠️ 说话要计入"本群连发上限"，否则这句提示本身会绕开防刷屏
+      if (sent) brain.markScopeReplied(scope);
+      return;
+    }
     console.log('  └ 不回（' + l0.why + '）');
     return;
   }
