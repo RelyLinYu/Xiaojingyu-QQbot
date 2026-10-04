@@ -2435,6 +2435,23 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
 
     // 触发率：正则判定直接影响花钱，实测只占全部群消息的 2.9%
     check('  触发率不高（真实 37746 条里 1088 条 = 2.9%）', yes.length === 7 && no.length === 7);
+
+    // 🔴🔴 真实 bug（2026-10-04，**上线当天就踩了**）：
+    //    thinking 的判据一开始喂的是**整段 prompt**，而它里面带着「群里最近的对话」上下文 ——
+    //    只要上下文里有人问过一句「什么是琴生不等式」，后面**每一条**消息（连「你好」「你个春鱼」）
+    //    都会被判成"事实问题" → 思考全开、**输出 token 5 倍**。日志里表现为"每条都是 思考=开"。
+    //    修法：判据改成只吃 callAI 传进来的 `thinkText`（当前这一条消息），漏传时默认不开。
+    const bsrc = require('fs').readFileSync(__dirname + '/brain.js', 'utf8');
+    const ctx = '安^: 什么是琴生不等式\n安^: 高中常用';
+    const assembled = `群里最近的对话：\n${ctx}\n\n现在，【群友】千金. 说：你好\n\n你要接一句：`;
+    check('★★ 复现那个坑：整段 prompt（含上下文）会被误判成事实问题',
+      lf('你好') === false && lf(assembled) === true);
+    check('★★ thinking 判据吃的是独立的 thinkText，不是整段 user',
+      /function callAIOnce\([^)]*thinkText\)/.test(bsrc) && /thinkText != null \? thinkText : ''/.test(bsrc));
+    check('★ 没传 thinkText 时默认**不开**（fail-cheap，别再退化成"整段都算"）',
+      /thinkText != null \? thinkText : ''/.test(bsrc));
+    check('★ generateReply 把"当前这条消息"单独传进去',
+      /cfg\.persona\.examples,\s*null,\s*extractText\(msg\)/.test(bsrc));
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

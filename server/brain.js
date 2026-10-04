@@ -849,7 +849,7 @@ async function generateReply(scope, msg) {
   const user = `【当前时间】${timeStr}\n`
     + `（有人问时间/日期/星期，直接照这个答。别编造，也别说"我又不是时钟"——你知道现在几点。）\n\n`
     + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + tail;
-  const r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples);
+  const r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples, null, extractText(msg));
   // 预算用光时，把"没钱了"的理由原样带回去，由 index.js 发到群里
   if (r.budgetStop) return r;
 
@@ -900,7 +900,7 @@ async function respectMinGap() {
 //
 // 为什么不是"同一个模型重试多次"：实测小模型在高峰会**持续** 429，
 // 死等它半天不如立刻换一个模型 —— 换过去通常一次就成功。
-async function callAI(system, user, preferredModel, maxTokens, forceJson, examples, imageDataUrl) {
+async function callAI(system, user, preferredModel, maxTokens, forceJson, examples, imageDataUrl, thinkText) {
   const chain = modelChain(preferredModel);
   const attempts = Math.max(1, cfg.ai.maxAttempts);
   let lastErr = null;
@@ -924,7 +924,7 @@ async function callAI(system, user, preferredModel, maxTokens, forceJson, exampl
         //    踩过的坑：写成 `return { text: out }` 就变成 { text: { text: "..." } } 双层嵌套，
         //    于是 index.js 取的 gen.text 还是对象，QQ 收到非法内容报 40011000「请求数据异常」，
         //    而那个错误码官方文档查不到，极难定位。
-        const out = await callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl);
+        const out = await callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText);
         if (mi > 0) console.log(`[ai] ↳ 已降级到 ${model}`);
         return out;
       } catch (e) {
@@ -961,7 +961,7 @@ function looksFactual(t) {
   return /(是谁|是什么|什么是|为什么|为啥|哪年|哪一年|哪个|哪一个|什么时候|多少|区别|有什么不同|介绍|来历|出处|你知道|知道吗|懂吗|什么梗|啥梗|真的假的|对不对)/.test(String(t || ''));
 }
 
-async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl) {
+async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText) {
   callCount++;
 
   // ⭐ 示例对话：作为**真实的多轮消息**拼在 system 和当前用户消息之间。
@@ -1026,11 +1026,20 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
   //
   // ⇒ 策略：**按问题类型切**。判断用（forceJson）永不开；生成时只有"像事实问题"才开。
   //   正则判定 → **零成本**，符合本项目"能不用模型解决的就不用模型"那条铁律。
+  //
+  // 🔴🔴 **判据只能吃 `thinkText`（当前这一条消息），绝不能吃整段 `user`。**
+  //   踩过的坑（2026-10-04，上线当天就踩了）：一开始判的是整段 prompt，而它里面带着
+  //   「群里最近的对话」上下文 —— 只要上下文里有人问过一句「**什么是**琴生不等式」，
+  //   后面**每一条**消息（连「你好」「你个春鱼」）都会被判成"事实问题" → 思考全开、
+  //   **输出 token 5 倍**。日志里表现为"每条都是 思考=开"。
+  //   ⚠️ 所以没显式传 `thinkText` 时**默认不开**（fail-cheap）：宁可少思考，
+  //      也别因为漏传参数又退化成"整段都算"。
+  const thinkSrc = thinkText != null ? thinkText : '';
   const thinkMode = (() => {
     if (cfg.ai.thinking === 'enabled' || cfg.ai.thinking === 'disabled') return cfg.ai.thinking;
     if (cfg.ai.thinking !== 'auto') return null;
     if (forceJson) return 'disabled';                    // L1 只要一个短判断，思考纯属浪费
-    return looksFactual(user) ? 'enabled' : 'disabled';
+    return looksFactual(thinkSrc) ? 'enabled' : 'disabled';
   })();
   if (thinkMode) body.thinking = { type: thinkMode };
 
