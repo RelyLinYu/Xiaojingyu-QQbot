@@ -429,7 +429,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
   // ---- 🆕 记账要区分"缓存命中"（1/50 价），否则账本虚高、优化看不见 ----
   //
   // ⚠️ 这里**直接调 budget.record**，不经过模型 ——
-  //    因为本地默认模型是 glm-4.7-flash（免费），走真实调用会记 ¥0，测不出东西。
+  //    因为走真实调用会受"免费模型不记账""缓存命中率"等因素干扰，测不出确定的东西。
   {
     const budget = require('./budget');
     const b0 = budget.status().spentYuan;
@@ -453,11 +453,19 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★ 没有 cache 字段时退化成旧公式（兼容别的服务商）',
       Math.abs(noCache - (1000e-6 * 2 + 10e-6 * 8)) < 1e-7, noCache.toFixed(6));
 
-    // 免费模型仍然不记钱
-    const b2 = budget.status().spentYuan;
-    budget.record('glm-4.7-flash', { prompt_tokens: 9999, completion_tokens: 999 });
-    check('  免费模型（glm-4.7-flash）依旧不记钱',
-      budget.status().spentYuan === b2, budget.status().spentYuan - b2);
+    // 免费模型的机制仍然要测 —— 生产配置里现在已经没有免费模型了，
+    // 所以**临时往清单里塞一个测试名**：budget 是每次调用时读配置的，改完立即生效，
+    // 并且用 try/finally 还原，既不影响后面的测试，也不会上线。
+    const FREE_TEST = '__free_test_model__';
+    cfg.budget.freeModels.push(FREE_TEST);
+    try {
+      const b2 = budget.status().spentYuan;
+      budget.record(FREE_TEST, { prompt_tokens: 9999, completion_tokens: 999 });
+      check('  免费模型（显式登记过）依旧不记钱',
+        budget.status().spentYuan === b2, budget.status().spentYuan - b2);
+    } finally {
+      cfg.budget.freeModels.pop();
+    }
   }
 
   console.log('\n=== 11. ⭐ 多行回复分段逻辑 ===');
@@ -1013,10 +1021,9 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
   console.log('\n=== 18. ⭐ 模型配置一致性（防跨服务商误配）===');
   {
     // 踩过的坑（2026-09-16 实测）：
-    //   从智谱切到 DeepSeek 后，降级链里**还留着智谱的模型名**。
-    //   于是主模型一过载，代码就去请求 glm-4.7-flash，而 DeepSeek 接口直接报：
-    //     HTTP 400 The supported API model names are deepseek-flash, deepseek-v4-pro,
-    //              but you passed glm-4.7-flash
+    //   换服务商后，降级链里**还留着上一家的模型名**。
+    //   于是主模型一过载，代码就去请求它，而新服务商直接报：
+    //     HTTP 400 The supported API model names are ..., but you passed ...
     //   **降级不但没救场，反而变成了故障点。**
     const fb = cfg.ai.fallbackModels;
     const baseUrl = String(cfg.ai.baseUrl);
@@ -1028,12 +1035,15 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('退避基数不为 0', cfg.ai.retryBaseMs > 0, cfg.ai.retryBaseMs);
 
     if (fb.length) {
-      const allGLM = fb.every((m) => /^glm-/.test(m));
-      const allDS = fb.every((m) => /^deepseek-/.test(m));
-      const baseGLM = /bigmodel\.cn/.test(baseUrl);
-      const baseDS = /deepseek\.com/.test(baseUrl);
-      check('★ 降级链模型与 baseUrl 同服务商',
-        (allGLM && baseGLM) || (allDS && baseDS),
+      // 判据：baseUrl 指向的服务商，必须能"认领"降级链里的每一个模型名。
+      // 以后接新服务商，只要往这张表里加一行即可。
+      const host = (baseUrl.match(/https?:\/\/([^/]+)/) || [, ''])[1];
+      const known = [
+        { host: /deepseek\.com/, prefix: /^deepseek-/ },
+      ].find((k) => k.host.test(host));
+      if (!known) console.log('  ⚠️ baseUrl 不是已知服务商，这条只做了弱校验');
+      check('★ 降级链模型与 baseUrl 同服务商（跨服务商会 400，降级反成故障点）',
+        !known || fb.every((m) => known.prefix.test(m)),
         { fb, baseUrl });
     } else {
       check('★ 降级链为空 → 天然不会跨服务商', true);
@@ -2404,9 +2414,9 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★ thinking 默认是 auto（按问题类型切，别退化成常开）',
       cfg.ai.thinking === 'auto', String(cfg.ai.thinking));
 
-    // ⚠️ 这个断言防的是一个**埋着的雷**：默认值曾长期写着被弃用的智谱，
+    // ⚠️ 这个断言防的是一个**埋着的雷**：默认值曾长期写着**早就换掉的服务商**，
     //    线上全靠 .env 覆盖；一旦 .env 丢了就会静默打到错的服务商。
-    check('★ 默认 baseUrl 是 DeepSeek（不再是被弃用的智谱 open.bigmodel.cn）',
+    check('★ 默认 baseUrl 是 DeepSeek（不再残留已弃用服务商）',
       /deepseek/.test(cfg.ai.baseUrl), cfg.ai.baseUrl);
     check('★ 默认模型名和 .env.example 一致（deepseek-*）',
       /^deepseek/.test(cfg.ai.replyModel) && /^deepseek/.test(cfg.ai.judgeModel),

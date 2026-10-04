@@ -39,11 +39,11 @@ module.exports = {
     warnAtYuan: Number(process.env.BUDGET_WARN_YUAN) || 1,
 
     // ⭐ 免费模型清单（**必须显式登记**）
-    // 不能靠"查不到单价就当免费"—— 只要 priceTable 里有它的前缀（如 glm-4.7），
-    // 前缀匹配就会把免费的 glm-4.7-flash 误认成收费的 glm-4.7，白记一笔钱。
-    freeModels: [
-      'glm-4.7-flash', 'glm-4.5-flash', 'glm-4-flash', 'glm-4-flash-250414',
-    ],
+    // 不能靠"查不到单价就当免费"—— 只要 priceTable 里有它的前缀，
+    // 前缀匹配就会把免费的那个误认成收费的，白记一笔钱（曾经吃过这个亏）。
+    // ⚠️ 2026-10-04：项目**全面转 DeepSeek** 后已经没有免费模型，所以这里是空的。
+    //    机制保留：以后接免费型号时把名字加进来即可（自测会临时塞一个名字验证机制）。
+    freeModels: [],
 
     // 单价表（元 / 百万 tokens）= [输入价, 输出价]
     // 来源：DeepSeek 官方文档 api-docs.deepseek.com/zh-cn/quick_start/pricing（2026-09 核对）
@@ -52,10 +52,6 @@ module.exports = {
     priceTable: {
       'deepseek-flash': [2, 8],       // 高峰：未命中输入2元 / 输出8元（空闲减半）
       'deepseek-v4-pro': [9, 27],     // 高峰
-      // 智谱（第三方报价，仅作参考；官方价格请自行到 bigmodel.cn/pricing 核对）
-      'glm-4.7': [4, 16],
-      'glm-4.7-flashx': [0.5, 3],
-      'glm-4.5-air': [1.2, 8],
     },
   },
 
@@ -119,10 +115,9 @@ module.exports = {
 
   // ===== AI（OpenAI 兼容格式）=====
   ai: {
-    // ⚠️ 2026-10-04 修正：这两个默认值原来还写着**智谱**（`open.bigmodel.cn` / `glm-4.7-flash`），
-    //    而线上早就是 DeepSeek 了（靠 `.env` 覆盖才对）。这是个**埋着的雷** ——
-    //    万一 `.env` 丢了，代码会静默去请求智谱（还没有对应的 key），而且本地裸跑也会打到错的服务商。
-    //    默认值必须和 `.env.example` 一致。
+    // 🔴 默认值**必须和 `.env.example` 一致**。曾经这里的默认值还留着早就换掉的服务商，
+    //    线上全靠 `.env` 覆盖才对 —— 那是个埋着的雷：`.env` 一丢就会静默打到错的服务商。
+    //    （自测里有一条断言专门防它复发。）
     baseUrl: process.env.AI_BASE_URL || 'https://api.deepseek.com',
     apiKey: process.env.AI_API_KEY,
     // 判断用（便宜/免费）
@@ -137,16 +132,13 @@ module.exports = {
     // ===== 降级链：主模型过载时自动换下一个 =====
     //
     // ⚠️⚠️ 铁律：**降级链里的模型必须和主模型来自同一个服务商**。
-    //    踩过的坑（2026-09-16 实测）：从智谱切到 DeepSeek 后，
-    //    这里还留着智谱的模型名，于是主模型一过载，代码就去请求
-    //    `glm-4.7-flash` ——而 DeepSeek 接口直接报：
-    //      HTTP 400 The supported API model names are deepseek-flash, deepseek-v4-pro,
-    //               but you passed glm-4.7-flash
+    //    踩过的坑（2026-09-16 实测）：换服务商后，这里还留着**上一家**的模型名，
+    //    于是主模型一过载，代码就去请求它，而新服务商直接报：
+    //      HTTP 400 The supported API model names are ..., but you passed ...
     //    结果**降级不但没救场，反而变成了故障点**。
     //
     // 所以默认留空：**只用主模型 + 重试**。
-    //   · 用 DeepSeek → 可设 deepseek-v4-pro 兜底（但贵得多，按需开）
-    //   · 切回智谱   → 设 glm-4-flash-250414,glm-4-flash
+    //   · 现在用 DeepSeek → 可按需设 deepseek-v4-pro 兜底（贵得多，按需开）
     // 通过 .env 配置：AI_FALLBACK_MODELS=xxx,yyy
     fallbackModels: (process.env.AI_FALLBACK_MODELS || '')
       .split(',')
@@ -158,13 +150,13 @@ module.exports = {
 
     // ===== 请求间隔（应对账号级限速）=====
     // 错误码 1302 = "您的账户已达到速率限制"，这跟 1305（模型过载）不是一回事：
-    // 1305 是智谱的模型堵了，1302 是**我们请求太密**。
+    // 1305 是"上游模型堵了"、1302 是**我们请求太密**（1305 是历史服务商的错误码，保留兼容）。
     // 一次回复要调两次模型（判断 + 生成），连着 @ 几次就会撞上。
     // 这里强制两次模型调用之间至少隔这么久，正常群聊完全无感。
     minGapMs: Number(process.env.AI_MIN_GAP_MS) || 1500,
 
     // ===== 重试（应对瞬时过载 / 限流）=====
-    // 智谱 1305、DeepSeek 429，语义都是"**请稍后再试**" —— 不是额度用完，也不是封号。
+    // 上游过载（429 / 1305）的语义都是"**请稍后再试**" —— 不是额度用完，也不是封号。
     //
     // ⚠️ 默认从 1 提到 **3**：
     //    之前是 1，因为那时有跨服务商的降级链可以"换模型"。

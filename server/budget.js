@@ -105,9 +105,9 @@ function rollover(quiet) {
 
 // ---------- 单价 ----------
 // ⚠️ 这个函数连续改错三次，教训写在这里：
-//    错法1: key.startsWith(model)  → 'glm-4.7-flash'(免费) 命中 'glm-4.7-flashx'
-//    错法2: model.startsWith(key)  → 'glm-4.7-flash'(免费) 命中 'glm-4.7'
-//    错法3: 边界判断+最长匹配      → 仍然命中 'glm-4.7'（自己没登记，前缀恰好合法）
+//    错法1: key.startsWith(model)  → 免费的那个 命中 '同名前缀-x' 这个收费的
+//    错法2: model.startsWith(key)  → 免费的那个 命中 '同名前缀' 这个收费的
+//    错法3: 边界判断+最长匹配      → 仍然命中（自己没登记，前缀恰好合法）
 //    ✅ 正解：免费模型**显式登记**，不靠"查不到就是免费"这种推断。
 const FREE = [0, 0];
 

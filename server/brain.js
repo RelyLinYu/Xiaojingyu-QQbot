@@ -868,7 +868,7 @@ async function generateReply(scope, msg) {
 
 // ---------- AI 调用（OpenAI 兼容）----------
 // 判断这个错误是不是"过载/可重试"。
-// 智谱 1305 = 该模型当前访问量过大（官方语义是"稍后再试"，不是额度用尽）
+// 1305 = 该模型当前访问量过大（历史服务商的错误码，保留兼容；语义是"稍后再试"，不是额度用尽）
 function isOverloaded(err) {
   const m = String(err?.message || '');
   return m.includes('1305')
@@ -898,8 +898,8 @@ async function respectMinGap() {
 
 // 主入口：先试首选模型，过载就依次换降级链里的下一个。
 //
-// 为什么不是"同一个模型重试多次"：实测 glm-4.7-flash 高峰会**持续** 429，
-// 死等它半天不如立刻换 glm-4-flash —— 换过去通常一次就成功。
+// 为什么不是"同一个模型重试多次"：实测小模型在高峰会**持续** 429，
+// 死等它半天不如立刻换一个模型 —— 换过去通常一次就成功。
 async function callAI(system, user, preferredModel, maxTokens, forceJson, examples, imageDataUrl) {
   const chain = modelChain(preferredModel);
   const attempts = Math.max(1, cfg.ai.maxAttempts);

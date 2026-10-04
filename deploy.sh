@@ -157,9 +157,9 @@ else
   read -rp "  AI 模型 [deepseek-flash] : " in_model
   in_model="${in_model:-deepseek-flash}"
 
-  # ⚠️ 这里必须和线上实际在用的服务商一致。
-  #    早期模板写的是智谱（open.bigmodel.cn / glm-4.7-flash），
-  #    而项目早已切到 DeepSeek —— 照着旧模板填会配出一个跑不起来的机器人。
+  # ⚠️ 这里必须和线上实际在用的服务商一致（项目只用 DeepSeek）。
+  #    ⚠️ 换服务商时**连默认值一起改**（config.js 的 ai.baseUrl / 模型名），
+  #       别只改这里 —— 默认值不一致会在 .env 丢失时静默打到错的服务商。
   cat > "$APP_DIR/.env" <<EOF
 QQ_BOT_APPID=${in_appid}
 QQ_BOT_SECRET=${in_secret}
