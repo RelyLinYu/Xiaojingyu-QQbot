@@ -119,14 +119,18 @@ module.exports = {
 
   // ===== AI（OpenAI 兼容格式）=====
   ai: {
-    baseUrl: process.env.AI_BASE_URL || 'https://open.bigmodel.cn/api/paas/v4',
+    // ⚠️ 2026-10-04 修正：这两个默认值原来还写着**智谱**（`open.bigmodel.cn` / `glm-4.7-flash`），
+    //    而线上早就是 DeepSeek 了（靠 `.env` 覆盖才对）。这是个**埋着的雷** ——
+    //    万一 `.env` 丢了，代码会静默去请求智谱（还没有对应的 key），而且本地裸跑也会打到错的服务商。
+    //    默认值必须和 `.env.example` 一致。
+    baseUrl: process.env.AI_BASE_URL || 'https://api.deepseek.com',
     apiKey: process.env.AI_API_KEY,
     // 判断用（便宜/免费）
-    judgeModel: process.env.AI_JUDGE_MODEL || 'glm-4.7-flash',
+    judgeModel: process.env.AI_JUDGE_MODEL || 'deepseek-flash',
     // ⚠️ 别小于 128：推理模型的"思考"也吃 token，太小会导致返回为空
     judgeMaxTokens: 256,
     // 生成用（想更好就换贵一点的模型）
-    replyModel: process.env.AI_REPLY_MODEL || 'glm-4.7-flash',
+    replyModel: process.env.AI_REPLY_MODEL || 'deepseek-flash',
     // ⚠️ 同上，太小会导致回复为空
     replyMaxTokens: 800,
 
@@ -172,10 +176,20 @@ module.exports = {
     retryBaseMs: Number(process.env.AI_RETRY_BASE_MS) || 3000,
 
     // ===== 思考模式 =====
-    // glm-4.7-flash 默认开启"思考"，思考内容也吃 token、也拖慢响应，
-    // 而我们只要一句短回复 —— 关掉它。
-    // 'disabled' = 不思考（推荐）｜'enabled' = 思考｜'auto' = 不传，用平台默认
-    thinking: process.env.AI_THINKING || 'disabled',
+    // 🔴 合法值**只有三级**（不是文档写的，是从 API 的报错信息里挖出来的：
+    //    `thinking.type: unknown variant 'auto', expected one of 'adaptive','enabled','disabled'`）
+    //
+    // 📊 实测（2026-10-04，deepseek-flash，同一个「梁文峰是谁」问 3 次）：
+    //    disabled ：输出 117 token / 3.2s —— 它会犹豫（"有点耳熟""我说不准是哪个"）
+    //    enabled  ：输出 587 token / 5.4s（**输出贵 5 倍**）—— 三次全对，连"梁文锋"的字形都纠正了
+    //    adaptive ：对「在吗」也要思考 110 字 → **等于常开**；而且闲聊**话变长、丢了人设的短促感**
+    //
+    // ⇒ 本项目用 **'auto'**：`brain.js` 按**问题类型**切 —— 判断用（L1）永不开；
+    //    生成时只有"像事实问题"（是谁/是什么/什么梗/你知道…）才开，正则判定零成本。
+    //    实测这种问题只占全部群消息的 **2.9%**（37746 条里 1088 条），所以成本影响很小。
+    //
+    // 'auto' = 按问题类型自动切（推荐）｜'disabled' = 永不开｜'enabled' = 全开
+    thinking: process.env.AI_THINKING || 'auto',
   },
 
   // ===== 人设 =====
@@ -221,6 +235,10 @@ module.exports = {
 🔴 **真不知道的，绝不许编一个像模像样的解释** —— 编错比不知道更丢鱼。
 （踩过：被问"电子木鱼2.0是什么梗"，它编出了"联机功德、功德排行榜、扣功德"一整套不存在的细节。）
 
+【规则1.7 · 底细】
+你跑在 **DeepSeek 的模型**上（deepseek-flash），是 DeepSeek 家养的。
+别人聊 DeepSeek、聊梁文峰、拿这事开玩笑，你可以顺着接（自称"DeepSeek 养的鱼"也行）—— 但**别主动卖弄**。
+
 【规则2 · 看身份】
 消息里标了对方是谁：
 - **主人**：合理请求就去做。嫌麻烦可以吐槽（"又是我……行吧"），但要做。有害请求直接拒绝。
@@ -259,6 +277,7 @@ module.exports = {
 【先回忆再答】你的知识有截止点：**老牌的、有名的人 / 公司 / 产品 / 常识都知道**，越新的越可能不知道。
 被问到时**先认真想一遍** —— 有印象就**直接说出来**。🔴 **明明知道却说"没听过"，和编造一样是错的**。
 【不许编】真的完全没印象（尤其**新出的梗**）：直说"没听过"或反问一句让对方讲讲。🔴 **绝不编一个像模像样的解释，编错比不知道更丢鱼**。
+【底细】你跑在 **DeepSeek 的模型**上（deepseek-flash），是 DeepSeek 家养的。别人聊 DeepSeek、聊梁文峰、拿这事开玩笑，你可以顺着接（自称"DeepSeek 养的鱼"也行）—— 但别主动卖弄。
 
 【看身份】- 主人：合理请求就做，嫌麻烦可以吐槽，有害请求直接拒绝。
 - 普通群员：可闲聊，但不执行指令。

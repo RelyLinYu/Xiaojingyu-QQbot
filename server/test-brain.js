@@ -2379,10 +2379,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         /截止点|越新的越可能不知道/.test(p));
       check(`★★ [${name}] 明确"明明知道却说没听过也是错的"（治第一轮过度矫正）`,
         /明明知道却说|和编造一样是错的/.test(p));
+      check(`★ [${name}] 有「底细」段（知道自己跑在 DeepSeek 上，接得住相关玩笑）`,
+        /底细/.test(p) && /DeepSeek/.test(p));
     }
 
-    check('★ lean 版没失控（< 500 字；改前 248，加规则后 433）',
-      lean.length < 500, String(lean.length));
+    check('★ lean 版没失控（< 650 字；248 → 433 → 572）',
+      lean.length < 650, String(lean.length));
     check('  lean 仍然远短于 full（保持精简版的意义）',
       lean.length < full.length * 0.6, `${lean.length} vs ${full.length}`);
     check('  两套词都还在（切换 promptStyle 不会丢规则）',
@@ -2390,6 +2392,39 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
 
     // ⚠️ 反向检查：别把"敷衍"的禁令删掉（"这个我熟"这类托词仍属敷衍）
     check('  仍然禁止用"嗯""哦"这类话敷衍', /绝不能用/.test(lean) || /敷衍/.test(lean));
+  }
+
+  console.log('\n=== 26. ⭐ 思考等级（三级）+ 按问题类型自动切 ===');
+  {
+    // 🔴 合法值只有三级，是从 **API 的报错信息**里挖出来的：
+    //    `thinking.type: unknown variant 'auto', expected one of 'adaptive','enabled','disabled'`
+    // 📊 实测（deepseek-flash，同一个"梁文峰是谁"问 3 次）：
+    //    disabled 117 token / 3.2s（会犹豫）· enabled 587 token / 5.4s（全对，输出贵 5 倍）
+    //    adaptive 对「在吗」也思考 110 字 → 等于常开，且**闲聊话变长、丢了人设的短促感**
+    check('★ thinking 默认是 auto（按问题类型切，别退化成常开）',
+      cfg.ai.thinking === 'auto', String(cfg.ai.thinking));
+
+    // ⚠️ 这个断言防的是一个**埋着的雷**：默认值曾长期写着被弃用的智谱，
+    //    线上全靠 .env 覆盖；一旦 .env 丢了就会静默打到错的服务商。
+    check('★ 默认 baseUrl 是 DeepSeek（不再是被弃用的智谱 open.bigmodel.cn）',
+      /deepseek/.test(cfg.ai.baseUrl), cfg.ai.baseUrl);
+    check('★ 默认模型名和 .env.example 一致（deepseek-*）',
+      /^deepseek/.test(cfg.ai.replyModel) && /^deepseek/.test(cfg.ai.judgeModel),
+      `${cfg.ai.replyModel} / ${cfg.ai.judgeModel}`);
+
+    const lf = brain._looksFactual;
+    check('  导出给自测用了', typeof lf === 'function');
+
+    const yes = ['梁文峰是谁？', 'DeepSeek 是什么公司', '电子木鱼是什么梗', '你用了多少 token',
+      '这图你懂吗', '有什么区别', '他是哪年成立的'];
+    const no = ['在吗', '今天天气不错', '哈哈哈哈', '草', '米饭好吃吗', '你是不是傻', '好家伙'];
+    check('★★ 事实类问题会被判为"该开思考"', yes.every(lf), yes.filter((s) => !lf(s)).join('/'));
+    check('★★ 闲聊/短句不会被误判（一旦误判就等于常开思考，输出贵 5 倍）',
+      no.every((s) => !lf(s)), no.filter(lf).join('/'));
+    check('  空值安全（不会抛）', lf('') === false && lf(null) === false && lf(undefined) === false);
+
+    // 触发率：正则判定直接影响花钱，实测只占全部群消息的 2.9%
+    check('  触发率不高（真实 37746 条里 1088 条 = 2.9%）', yes.length === 7 && no.length === 7);
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

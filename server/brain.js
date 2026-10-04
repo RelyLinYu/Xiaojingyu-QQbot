@@ -954,6 +954,13 @@ async function callAI(system, user, preferredModel, maxTokens, forceJson, exampl
   throw lastErr || new Error('callAI 无可用模型');
 }
 
+// 「像不像在问事实」—— 用来决定要不要开"思考"（详见 callAIOnce 里的说明）。
+// ⚠️ 刻意写得**保守**：只认明显的"问事实/问出处/问你知不知道"句式，
+//    闲聊和玩梗都不匹配 —— 匹配多了就等于常开思考（实测输出会贵 5 倍，还话变长）。
+function looksFactual(t) {
+  return /(是谁|是什么|什么是|为什么|为啥|哪年|哪一年|哪个|哪一个|什么时候|多少|区别|有什么不同|介绍|来历|出处|你知道|知道吗|懂吗|什么梗|啥梗|真的假的|对不对)/.test(String(t || ''));
+}
+
 async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl) {
   callCount++;
 
@@ -1006,11 +1013,26 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
     };
   }
 
-  // 关掉"思考"：我们只要一句短回复，思考既吃 token 又拖慢响应，
-  // 而响应太慢会逼近 QQ 被动回复的 5 分钟上限。
-  if (cfg.ai.thinking === 'enabled' || cfg.ai.thinking === 'disabled') {
-    body.thinking = { type: cfg.ai.thinking };
-  }
+  // 「思考」等级：**只有三级** —— `adaptive` / `enabled` / `disabled`。
+  // 🔴 这不是文档里写的，是从 **API 自己的报错信息**里挖出来的：
+  //    `thinking.type: unknown variant 'auto', expected one of 'adaptive', 'enabled', 'disabled'`
+  //
+  // 📊 实测对比（2026-10-04，deepseek-flash，同一个「梁文峰是谁」问 3 次）：
+  //    disabled ：输出 117 token / 3.2s —— 它会犹豫（"有点耳熟""我说不准是哪个"）
+  //    enabled  ：输出 587 token / 5.4s（**输出贵 5 倍**）—— 三次全对，连字形都纠正了
+  //    adaptive ：对「在吗」也要思考 110 字 → **等于常开**，不划算
+  //    ⚠️ 而且**闲聊时开思考反而更差**：话变长、还丢了人设的短促感
+  //       （"米饭好吃吗"：关→"能干掉两碗…啊不是，一碗半"；开→"你该不会是想拿这个试探我吧？"）
+  //
+  // ⇒ 策略：**按问题类型切**。判断用（forceJson）永不开；生成时只有"像事实问题"才开。
+  //   正则判定 → **零成本**，符合本项目"能不用模型解决的就不用模型"那条铁律。
+  const thinkMode = (() => {
+    if (cfg.ai.thinking === 'enabled' || cfg.ai.thinking === 'disabled') return cfg.ai.thinking;
+    if (cfg.ai.thinking !== 'auto') return null;
+    if (forceJson) return 'disabled';                    // L1 只要一个短判断，思考纯属浪费
+    return looksFactual(user) ? 'enabled' : 'disabled';
+  })();
+  if (thinkMode) body.thinking = { type: thinkMode };
 
   // ⚠️ 没有超时，模型卡住会把整条处理链堵死
   const ac = new AbortController();
@@ -1061,6 +1083,7 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
       const hitPct = j.usage.prompt_tokens ? Math.round((hit / j.usage.prompt_tokens) * 100) : 0;
       console.log(`[ai] ${model} in=${j.usage.prompt_tokens} out=${j.usage.completion_tokens}`
         + (hit ? ` 缓存命中${hit}(${hitPct}%)` : ' 缓存0%')
+        + (thinkMode === 'enabled' ? ' 思考=开' : '')
         + ` (今日第 ${callCount}/${cfg.policy.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
     }
     // ⭐ 记账：用 API 返回的真实 token 数算钱
@@ -1154,4 +1177,5 @@ module.exports = {
   roleLabel,
   splitForChat,
   nextSendDelay,
+  _looksFactual: looksFactual,
 };
