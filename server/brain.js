@@ -307,6 +307,20 @@ function isAtRobot(eventType, msg, botOpenid) {
   const selfIds = [botOpenid, selfMention?.member_openid, selfMention?.id].filter(Boolean);
   if (selfIds.some((id) => raw.includes(id))) return true;
 
+  // 证据 4（2026-10-05 加）：**手打的 `@机器人名`**
+  //
+  // 实测（群里真事）：群友手打「@蓝色大肥鱼 大笨鱼」时，QQ 推过来的 content 就是
+  // **字面文本**、`mentions` 是 **undefined**、里面也没有 `<@openid>` 占位符 ——
+  // 也就是**在协议层面它压根不是一次 @**（点击选的 @ 会是 `<@openid>` + `is_you:true`）。
+  // 而客户端**会把它渲染成蓝色高亮**，看起来和真 @ 一模一样 →
+  // 用户以为 @ 了、机器人却没反应（用户报"为什么群友艾特不回复"就是这一条）。
+  //
+  // ⇒ 名字被明确点到（`@` + 自己的显示名）就算被 @。
+  // ⚠️ 只认"@ + **自己的名字**"，绝不能放宽成"只要有 @" —— 那会把"群友互相 @"
+  //    也判进来（见下面那段注释，实测导致机器人到处乱插话）。
+  const selfName = String(cfg.persona?.name || '');
+  if (selfName && raw.includes('@' + selfName)) return true;
+
   // ⚠️ 这里**故意不再有"只要有 <@...> 就算被 @"的兜底**。
   //    踩过的坑：那条兜底把"群友之间互相 @"也判成了 @ 机器人 ——
   //    而群里 @ 别人是**最常见**的操作，结果机器人到处乱插话。

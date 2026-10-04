@@ -2513,6 +2513,39 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         require('fs').readFileSync(__dirname + '/index.js', 'utf8')));
   }
 
+  console.log('\n=== 28. ⭐ @ 判定的第四条证据：手打的「@机器人名」 ===');
+  {
+    // 🔴 真实场景（2026-10-05 用户报"为什么群友艾特不回复"）：
+    //    群友手打「@蓝色大肥鱼 大笨鱼」时，QQ 推过来的 content 是**字面文本**、
+    //    `mentions` 是 **undefined**、也没有 `<@openid>` 占位符 ——
+    //    **协议层面它压根不是一次 @**。而客户端会把它渲染成**蓝色高亮**，
+    //    看起来和真 @ 一模一样 → 用户以为 @ 了，机器人却按普通消息处理
+    //    （于是第 2、3 次撞上 60 秒冷却，表现为"艾特不回复"）。
+    const at = brain.isAtRobot;
+    const BOTID = 'BOT_OPENID_TEST';   // ⚠️ 用假 id，不把真实 openid 写进仓库
+    const mk = (content, mentions) => ({ content, mentions, author: { username: '群友' } });
+
+    check('  证据1：事件名是 GROUP_AT_MESSAGE_CREATE',
+      at('GROUP_AT_MESSAGE_CREATE', mk('随便', undefined), BOTID) === true);
+    check('★★ 证据2：mentions 里有 is_you（点击选的 @ 走这条）',
+      at('GROUP_MESSAGE_CREATE', mk('大笨鱼', [{ is_you: true, member_openid: BOTID }]), BOTID) === true);
+    check('  证据3：content 里带 <@自己的openid>',
+      at('GROUP_MESSAGE_CREATE', mk(`<@${BOTID}> 大笨鱼`, undefined), BOTID) === true);
+
+    check('★★ 证据4（本轮新增）：手打的「@机器人名」也算被 @',
+      at('GROUP_MESSAGE_CREATE', mk('@蓝色大肥鱼 大笨鱼', undefined), BOTID) === true);
+    check('★★ 但**@别人**绝不能被误判（这是老坑：机器人到处乱插话）',
+      at('GROUP_MESSAGE_CREATE', mk('@张三 吃饭了吗', undefined), BOTID) === false
+      && at('GROUP_MESSAGE_CREATE', mk('@群主 求带', [{ is_you: false }]), BOTID) === false);
+    check('★ 只是提到名字、没有 @ 的不算被 @（该走关键词那条路）',
+      at('GROUP_MESSAGE_CREATE', mk('大肥鱼你话怎么这么多', undefined), BOTID) === false);
+    check('  只认自己的**完整显示名**（别名/简称故意放宽不了 —— 判不准宁可沉默）',
+      at('GROUP_MESSAGE_CREATE', mk('@小蓝鲸 你好', undefined), BOTID) === false);
+    check('  空 content / 缺字段不抛异常',
+      at('GROUP_MESSAGE_CREATE', {}, BOTID) === false
+      && at('GROUP_MESSAGE_CREATE', mk('', undefined), BOTID) === false);
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();
