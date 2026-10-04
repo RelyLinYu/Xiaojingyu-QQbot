@@ -767,13 +767,81 @@ function cut(s, n) {
 //    要拿到只有一条路：**逆向 `a_bogus` 签名 + 采集 `msToken`/`ttwid` cookie** ——
 //    那是正面硬刚字节的反爬（Argus），会随平台改版不断失效，
 //    还容易让服务器 IP 被标记。**决定不做**，抖音只发卡片。
-async function fetchDouyin(url) {
+// 🆕 从**分享文案**里提标题和作者（零请求）。
+//
+// 为什么需要它：抖音有两种内容 —— 视频（`/video/`）和**图文**（`/note/`），
+// 而**图文页抖音不给数据**（详见 fetchDouyin 里的实测），只能退回用分享文案。
+//
+// 文案长这样（就是群友粘贴的那段）：
+//   「6.43 复制打开抖音，看看【小张不吃香菜.的图文作品】喜欢来聊 https://v.douyin.com/xxx/ WMw:/ 02/15」
+//      → 作者「小张不吃香菜.」· 正文「喜欢来聊」
+// ⚠️ 正文取「】之后、第一个链接之前」——链接后面那截（`WMw:/ 02/15`）是抖音加的分享码，不要。
+function parseDouyinShareText(text) {
+  const s = String(text || '');
+  const m = /【([^】]{1,60})】/.exec(s);
+  if (!m) return { author: '', caption: '', kind: '' };
+  const inside = m[1];
+  const kind = /图文/.test(inside) ? 'note' : (/视频/.test(inside) ? 'video' : '');
+  const author = inside.replace(/的(图文|视频)?作品$/, '').trim();
+  const rest = s.slice(m.index + m[0].length);
+  const urlAt = rest.search(/https?:\/\//);
+  const caption = (urlAt >= 0 ? rest.slice(0, urlAt) : rest).replace(/\s+/g, ' ').trim();
+  return { author, caption, kind };
+}
+
+// 🆕 判断一个（已展开的）抖音地址是**视频**还是**图文**，并取出 id。
+//    抽成纯函数是为了能单测 —— 这个判断错了会静默跳过，测试是唯一的防线。
+function douyinTargetOf(target) {
+  const t = String(target || '');
+  const noteId = (t.match(/\/note\/(\d{6,})/) || [])[1]
+    || (t.match(/\/share\/note\/(\d{6,})/) || [])[1];
+  if (noteId) return { kind: 'note', id: noteId };
+  const videoId = (t.match(/\/video\/(\d{6,})/) || [])[1]
+    || (t.match(/\/share\/video\/(\d{6,})/) || [])[1]
+    || (t.match(/[?&]modal_id=(\d{6,})/) || [])[1];
+  if (videoId) return { kind: 'video', id: videoId };
+  return null;
+}
+
+async function fetchDouyin(url, shareText) {
   let target = url;
   if (/^v\.douyin\.com$/i.test(hostOf(url))) target = await resolveShort(url);
 
-  const id = (target.match(/\/video\/(\d{6,})/) || [])[1]
-    || (target.match(/\/share\/video\/(\d{6,})/) || [])[1]
-    || (target.match(/[?&]modal_id=(\d{6,})/) || [])[1];
+  const t = douyinTargetOf(target);
+
+  // 🔴🔴 图文（note）：抖音**不给数据**，所以**连请求都不发**。
+  //
+  // 实测（2026-10-04）：
+  //   · 视频页 `www.douyin.com/video/{id}` → **62KB**，带 `VideoObject`（标题/作者/时长/封面全有）
+  //   · 图文页 `www.douyin.com/note/{id}` → **2KB 空壳，0 个 ld+json**
+  //   · 试遍 4 种入口 × 3 种 UA = 12 组合（www/note、iesdouyin/share/note、m/share/note、
+  //     discover?modal_id × Googlebot / iPhone / Baiduspider），最好的也只有"有壳无内容"的 33KB
+  //     ——`_ROUTER_DATA` 在，但 `desc` / `nickname` / `url_list` 全是 0 次。
+  //   ⇒ 这是抖音对不同类型内容的区别对待，不是我们的 bug。
+  //
+  // 出路：**用分享文案**（消息里本来就带着「【作者.的图文作品】正文」）—— 零请求、零成本。
+  // ⚠️ 只对图文这么做。**视频抓不到时仍然安静跳过** ——
+  //    否则私有/已删除/翻车的链接会一张接一张冒卡（参考"没钱了刷屏 285 次"那类事故）。
+  if (t && t.kind === 'note') {
+    const st = parseDouyinShareText(shareText);
+    if (!st.author && !st.caption) {
+      console.log('  │  └ 抖音图文（note）：平台不给数据，分享文案里也提取不到 → 安静跳过');
+      return null;
+    }
+    console.log(`  │  └ 抖音图文（note）：平台不给数据 → 改用分享文案`
+      + `（作者「${st.author || '?'}」· 正文 ${st.caption ? st.caption.length + ' 字' : '无'}）`);
+    return {
+      platform: 'douyin',
+      kind: 'note',
+      id: t.id,
+      title: st.caption || st.author || '抖音图文',
+      author: st.author,
+      partial: true,      // 标记"这是分享文案拼的，不是抓来的"（卡片会如实说明）
+      htmlUrl: `https://www.iesdouyin.com/share/note/${t.id}/`,
+    };
+  }
+
+  const id = t && t.id;
   if (!id) return null;
 
   const html = await getText(`https://www.douyin.com/video/${id}`, { 'User-Agent': BOT_UA });
@@ -932,6 +1000,15 @@ function renderShortVideo(v, brand, siteName) {
 }
 
 function renderDouyin(v) {
+  // 🆕 图文（note）：平台不提供封面/时长/点赞，卡片只能给"作者 + 分享文案里的正文"，
+  //    并且**如实说明**这不是抓来的内容（不装成完整预览）。
+  if (v.kind === 'note') {
+    const lines = [`# ${mdEsc(cut(v.title, 40))}`];
+    if (v.author) lines.push(`**作者**：${mdEsc(v.author)}　**类型**：图文`);
+    lines.push('📷 图文作品（抖音不提供图文页数据，标题取自分享文案）');
+    lines.push(`[🔗 在 抖音 打开](${v.htmlUrl})`);
+    return lines.join(ZWSP + '\n');
+  }
   return renderShortVideo(v, '抖音', '抖音');
 }
 
@@ -1028,11 +1105,12 @@ async function getBilibiliVideoUrl(info, maxBytes) {
 
 // ---------- 对外主流程 ----------
 // 返回 { platform, info, card } 或 null
-async function parse(link) {
+// `msgText` = 这条消息的原文（只有抖音图文用得到：它要靠分享文案兜底，见 fetchDouyin）
+async function parse(link, msgText) {
   let info = null;
   if (link.platform === 'github') info = await fetchGithub(link.url);
   else if (link.platform === 'bilibili') info = await fetchBilibili(link.url);
-  else if (link.platform === 'douyin') info = await fetchDouyin(link.url);
+  else if (link.platform === 'douyin') info = await fetchDouyin(link.url, msgText);
   else if (link.platform === 'kuaishou') info = await fetchKuaishou(link.url);
   if (!info) return null;
 
@@ -1087,4 +1165,7 @@ module.exports = {
   _imageSize: imageSize,
   _fixIso: fixIso,
   _fmtDate: fmtDate,
+  // 🆕 抖音图文（note）那套：分享文案解析 + 视频/图文判定
+  _parseDouyinShareText: parseDouyinShareText,
+  _douyinTargetOf: douyinTargetOf,
 };

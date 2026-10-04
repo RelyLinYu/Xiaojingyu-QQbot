@@ -2454,6 +2454,65 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /cfg\.persona\.examples,\s*null,\s*extractText\(msg\)/.test(bsrc));
   }
 
+  console.log('\n=== 27. ⭐ 抖音图文（note）：平台不给数据时的降级 ===');
+  {
+    // 🔴 真实场景（2026-10-04 用户报"为什么不解析抖音链接"）：
+    //    抖音有两种内容 —— 视频(/video/) 和 **图文(/note/)**，而代码只认 /video/。
+    //    深挖发现**图文页抖音根本不给数据**：视频页 62KB 带 VideoObject，
+    //    图文页只有 2KB 空壳、0 个 ld+json（试遍 4 入口 × 3 UA = 12 组合都不行）。
+    //    ⇒ 出路是用**分享文案**（消息里本来就带「【作者.的图文作品】正文」），零请求。
+    const lp = require('./linkparse');
+    const P = lp._parseDouyinShareText;
+    const T = lp._douyinTargetOf;
+
+    // ① 分享文案解析（用**真实**文案，不是编的）
+    const note = P('6.43 复制打开抖音，看看【小张不吃香菜.的图文作品】喜欢来聊 '
+      + 'https://v.douyin.com/VILhw0T4pf0/ WMw:/ 02/15');
+    check('★★ 从分享文案里提出作者', note.author === '小张不吃香菜.', note.author);
+    check('★★ 提出正文（且不把链接后面的分享码吃进来）', note.caption === '喜欢来聊', note.caption);
+    check('★ 认出这是"图文"', note.kind === 'note', note.kind);
+
+    const vid = P('9.48 复制打开抖音，看看【阮佐儿的作品】# 排序 # 计算机 '
+      + 'https://v.douyin.com/bz4zFiqO43k/ 05/15 l@c.At :6p');
+    check('★ 视频文案也能提作者/正文（作者名不含"的作品"）', vid.author === '阮佐儿', vid.author);
+    check('  视频文案不会被误判成图文', vid.kind !== 'note');
+
+    const junk = P('没有括号的普通文本 https://v.douyin.com/xyz/');
+    check('  没有【】时安全返回空（不会编）',
+      junk.author === '' && junk.caption === '' && P('') .author === '' && P(null).author === '');
+
+    // ② 视频 / 图文判定 —— 判断错了会静默跳过，所以这是唯一防线
+    check('★★ /note/ 判为图文',
+      T('https://www.douyin.com/note/7692802194072122688')?.kind === 'note');
+    check('★★ /share/note/ 也判为图文',
+      T('https://www.iesdouyin.com/share/note/123456789/')?.kind === 'note');
+    check('★ /video/ 仍判为视频（别把原来的路改坏）',
+      T('https://www.douyin.com/video/7626310352875534321')?.kind === 'video');
+    check('★ modal_id 仍判为视频', T('https://www.douyin.com/discover?modal_id=123456789')?.kind === 'video');
+    check('  认不出时返回 null（不瞎猜）', T('https://www.douyin.com/user/xxx') === null);
+
+    // ③ 图文卡片：如实说明"内容不是抓来的"，别装成完整预览
+    const card = lp.renderCard({
+      platform: 'douyin', kind: 'note', id: '7692802194072122688',
+      title: '喜欢来聊', author: '小张不吃香菜.',
+      htmlUrl: 'https://www.iesdouyin.com/share/note/7692802194072122688/',
+    });
+    check('★ 图文卡片有标题和作者', /喜欢来聊/.test(card) && /小张不吃香菜\./.test(card));
+    check('★★ 图文卡片**如实说明**数据来源（不装成抓来的）',
+      /抖音不提供图文页数据/.test(card));
+    check('  图文卡片没有封面图（平台不给，不能瞎造）', !/!\[封面/.test(card));
+    check('  图文卡片给了能点开的链接', /iesdouyin\.com\/share\/note\//.test(card));
+
+    // ④ ⚠️ 关键约束：这套降级**只对图文**，视频抓不到时仍然安静跳过
+    const lsrc = require('fs').readFileSync(__dirname + '/linkparse.js', 'utf8');
+    check('★★ 降级只在"判定为图文"时走（视频失败仍 return null，避免失败链接刷屏）',
+      /if \(t && t\.kind === 'note'\)/.test(lsrc));
+    check('★ parse 把消息原文传下去了（图文要用它兜底）',
+      /fetchDouyin\(link\.url, msgText\)/.test(lsrc)
+      && /linkparse\.parse\(link, String\(d\.content/.test(
+        require('fs').readFileSync(__dirname + '/index.js', 'utf8')));
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();

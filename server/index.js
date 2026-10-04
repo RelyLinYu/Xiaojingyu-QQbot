@@ -403,7 +403,9 @@ async function handleLink(d, links, scope, isGroup, openid) {
   for (const link of links) {
     console.log(`  ├ 🔗 ${link.platform} 链接: ${String(link.url).slice(0, 90)}`);
     try {
-      const p = await linkparse.parse(link);
+      // ⚠️ 第二个参数（消息原文）只有抖音图文用得到：它平台不给数据，
+      //    要靠分享文案里的「【作者.的图文作品】正文」兜底（见 linkparse.fetchDouyin）
+      const p = await linkparse.parse(link, String(d.content || ''));
       if (!p || !p.card) { console.log('  │  └ 这条解析不出内容，跳过'); continue; }
 
       // 🔴 解析之后**再**去一次重 —— 按"解析出来的身份"，不是按 URL。
