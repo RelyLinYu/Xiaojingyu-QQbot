@@ -9,8 +9,8 @@
 //    ② 全程固定 Math.random —— 否则 5% 抽样会随机放行，导致"这次过下次挂"
 process.env.XLJ_NO_PERSIST = '1';
 
-const FIXED_RANDOM_MISS = 0.99;   // 落在 5% 抽样之外 → 抽样永远拒绝
-const FIXED_RANDOM_HIT = 0.01;    // 落在 5% 抽样之内 → 抽样永远放行
+const FIXED_RANDOM_MISS = 0.99;   // 落在 8% 抽样之外 → 抽样永远拒绝
+const FIXED_RANDOM_HIT = 0.01;    // 落在 8% 抽样之内 → 抽样永远放行
 const REAL_RANDOM = Math.random;  // 留一份真的，测"随机性"时要用
 Math.random = () => FIXED_RANDOM_MISS;
 
@@ -189,34 +189,44 @@ console.log('\n=== 2b. ⭐ 引用消息（103）：真机数据，必须能读�
     r3.ok === false && /提不出/.test(r3.why), JSON.stringify(r3));
 }
 
-console.log('\n=== 3. 抽样开关（默认关闭：没@没关键词一律不理）===');
+console.log('\n=== 3. 抽样开关（默认 8%：没@没关键词的闲聊有 8% 进判断）===');
 {
-  // ⚠️ 这里的行为被用户的新逻辑改过，记录下来免得以后困惑：
-  //    原来是 sampleNonKeyword=0.05，没 @ 没关键词的闲聊有 5% 概率被放进判断。
-  //    用户明确要求：**默认不接任何没 @ 它的消息** —— 只有提到关键词才有 1/2 概率回。
-  //    所以 sampleNonKeyword 现在是 0。
+  // ⚠️ 这里的行为被用户改过**两轮**，都记下来免得再困惑：
+  //   ① 原 0.05 → 用户要求「没 @ 它、也没提关键词的消息一律不理」→ 改成 0。
+  //   ② 🆕 2026-10-05 用户要求「**提高所有人被插嘴的概率**」→ 改成 **0.08**。
+  //      起因：查"插嘴主人"时发现主人免抽样 → 他 50.5% 的闲聊进判断，其他人只有 7.3%，
+  //      别人几乎没机会被搭话。所以要的是"大家都有机会"，而不是"只有主人被搭话"。
   const P = cfg.policy;
   const realSample = P.sampleNonKeyword;
   try {
-    check('★ sampleNonKeyword 默认是 0（没@没关键词一律不理）',
-      P.sampleNonKeyword === 0, P.sampleNonKeyword);
+    check('★ sampleNonKeyword 现在是 0.08（闲聊有 8% 进判断）',
+      P.sampleNonKeyword === 0.08, P.sampleNonKeyword);
 
-    Math.random = () => FIXED_RANDOM_MISS;
+    Math.random = () => FIXED_RANDOM_MISS;   // 0.99 > 0.08 → 不中
     const [type, d] = groupMsg({ content: '今天天气不错啊' });
     const r = brain.passHardRules('group:G', d, type, false);
-    check('没@没关键词 → 沉默（省钱）', r.ok === false && /省钱/.test(r.why), JSON.stringify(r));
+    check('没@没关键词且没抽中 → 沉默（省钱）', r.ok === false && /省钱/.test(r.why), JSON.stringify(r));
 
-    // 即使"随机数落在抽样区间内"也不该放行 —— 因为抽样率是 0
+    // 抽中了（0.01 < 0.08）→ 放行。⚠️ 必须换一个干净的 scope：
+    // 同一个 scope 里上一条刚被标记过，会先撞"连续发言上限"、根本走不到抽样那一步。
     Math.random = () => FIXED_RANDOM_HIT;
     const [, d2] = groupMsg({ content: '今天天气不错啊' });
-    const r2 = brain.passHardRules('group:G', d2, 'GROUP_MESSAGE_CREATE', false);
-    check('★ 抽到"最小随机数"也仍然沉默（抽样已关闭）', r2.ok === false, JSON.stringify(r2));
+    const r2 = brain.passHardRules('group:SAMPLING_HIT', d2, 'GROUP_MESSAGE_CREATE', false);
+    check('★ 抽中（random < 0.08）→ 放行', r2.ok === true, JSON.stringify(r2));
 
-    // 但把抽样率临时调大后，行为应该恢复（证明这个开关是活的）
-    P.sampleNonKeyword = 1;
+    // 边界：random 恰好 == 抽样率 → 按 `>` 语义算"中"（不算拒绝）
+    const rnd = Math.random;
+    Math.random = () => P.sampleNonKeyword;
     const [, d3] = groupMsg({ content: '今天天气不错啊' });
-    const r3 = brain.passHardRules('group:G3', d3, 'GROUP_MESSAGE_CREATE', false);
-    check('把 sampleNonKeyword 调成 1 后可放行（开关有效）', r3.ok === true, JSON.stringify(r3));
+    const r3 = brain.passHardRules('group:SAMPLING_EQ', d3, 'GROUP_MESSAGE_CREATE', false);
+    check('  边界：random == 抽样率时算"中"（条件用的是 >）', r3.ok === true, JSON.stringify(r3));
+
+    // 开关是活的：调成 1 必定放行
+    P.sampleNonKeyword = 1;
+    const [, d4] = groupMsg({ content: '今天天气不错啊' });
+    const r4 = brain.passHardRules('group:SAMPLING_ALL', d4, 'GROUP_MESSAGE_CREATE', false);
+    check('把 sampleNonKeyword 调成 1 后必定放行（开关有效）', r4.ok === true, JSON.stringify(r4));
+    Math.random = rnd;
   } finally {
     P.sampleNonKeyword = realSample;
     Math.random = () => FIXED_RANDOM_MISS;   // 恢复成固定值，不是真实随机
@@ -2567,6 +2577,101 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     const src = require('fs').readFileSync(require('path').join(__dirname, 'brain.js'), 'utf8');
     check('★★ 超限提示语用的是 cfg.policy.dailyCallLimit，**没有写死 800**',
       src.includes('${callCount}/${cfg.policy.dailyCallLimit}') && !/今日调用次数已用完（\d+\//.test(src));
+  }
+
+  console.log('\n=== 30. ⭐ 主人不再免抽样 + 手打的「@别人」不抢答（2026-10-05）===');
+  {
+    // 🔴 起因：用户说「感觉现在插嘴主人的概率特别高」。
+    //    真实数据（按 openid 聚合那个主群）：**主人没@的消息 50.5% 进了 L1 判断，
+    //    其他人只有 7.3%（差 6.9 倍）** —— 根因就是主人从"省钱抽样"这道零成本闸下整个溜过去。
+    //    用户拍板：**主人不再免抽样**，同时**把所有人的抽样率从 0 抬到 0.08**。
+    const P = cfg.policy;
+    const savedOwner = cfg.ownerOpenid;
+    const savedSample = P.sampleNonKeyword;
+    const savedFlag = P.ownerBypassSampling;
+    const OWNER = 'OWNER_OPENID_TEST_0001';
+    const DEMON = 'OTHER_OPENID_TEST_0001';
+    const mk = (content, mentions = []) => ([
+      'GROUP_MESSAGE_CREATE',
+      { id: 'ROBOT1.0_test', author: { member_openid: OWNER, username: '主人', bot: false },
+        content, mentions, group_openid: 'GROUP_X', message_type: 0 },
+    ]);
+    try {
+      cfg.ownerOpenid = OWNER;
+
+      // ① 主人没 @、也没提关键词 → 现在也走抽样（不再一路放行）
+      check('★ 配置：主人默认不再免抽样（ownerBypassSampling 为假）',
+        P.ownerBypassSampling === false, JSON.stringify(P.ownerBypassSampling));
+
+      Math.random = () => FIXED_RANDOM_MISS;   // 0.99 > 0.08
+      const [t1, d1] = mk('今天好累啊');
+      const r1 = brain.passHardRules('group:OWNER_S1', d1, t1, false);
+      check('★★ 主人没@没关键词、也没抽中 → 同样被抽样闸拦（以前是必进判断）',
+        r1.ok === false && /省钱/.test(r1.why), JSON.stringify(r1));
+
+      // ② 抽中就能进（证明它真的还在"抽样"，不是被一刀切死）
+      Math.random = () => FIXED_RANDOM_HIT;
+      const [t2, d2] = mk('今天好累啊');
+      const r2 = brain.passHardRules('group:OWNER_S2', d2, t2, false);
+      check('★ 主人抽中时仍能进判断（不是被硬关掉）', r2.ok === true, JSON.stringify(r2));
+
+      // ③ 开关翻回 true → 主人恢复"必进判断"（可回退，调试期要用）
+      P.ownerBypassSampling = true;
+      Math.random = () => FIXED_RANDOM_MISS;
+      const [t3, d3] = mk('今天好累啊');
+      const r3 = brain.passHardRules('group:OWNER_S3', d3, t3, false);
+      check('  把 ownerBypassSampling 设回 true → 主人又必进判断（可回退）',
+        r3.ok === true, JSON.stringify(r3));
+      P.ownerBypassSampling = savedFlag;
+
+      // ④ 被 @ 的**不走抽样** —— 明确点名，抽签不该挡它
+      const [t4, d4] = mk('在吗', [{ bot: true, is_you: true, id: 'BOT_ID', member_openid: 'BOT_ID' }]);
+      const r4 = brain.passHardRules('group:OWNER_S4', d4, t4, false);
+      check('★★ 被 @ 的消息不受抽样影响（random 没抽中也放行）',
+        r4.ok === true && r4.isAt === true, JSON.stringify(r4));
+
+      // ---- 手打的「@别人」：也要被认出来（同一个协议层事实：手打的 @ 不进 mentions）----
+      const handAt = { content: '@棠吟 提示词没说好', mentions: [], author: { username: '主人' } };
+      check('★★ 手打的「@某人」算"在跟别人说话"（以前只认点击选的 @）',
+        brain.mentionedOthers(handAt) === true, JSON.stringify(brain.mentionedOthers(handAt)));
+
+      const handAtBot = {
+        content: '@蓝色大肥鱼 你好', mentions: [],
+        author: { username: '群友' },
+      };
+      // ⚠️ 这是**故意保留的保守误判**：手打的「@机器人自己」也会被判成"在跟别人说话"。
+      //    为什么能接受：这种消息 **`isAtRobot` 的第 4 条判据已经认定"被 @"**，
+      //    在 L0 里根本走不到"该不该插话"这一步；万一走到了，多沉默一次
+      //    （"它叫我却没理"）远比**抢答别人的对话**轻。⇒ 安全侧优先，不做特判。
+      check('  ⚠️ 已知保守误判：手打的「@机器人自己」也算"@了别人"（安全侧，文档已记）',
+        brain.mentionedOthers(handAtBot) === true, JSON.stringify(brain.mentionedOthers(handAtBot)));
+      check('  └ 但它同时被 isAtRobot 认成"被 @" → 实际不会因此漏答',
+        brain.isAtRobot('GROUP_MESSAGE_CREATE', handAtBot, undefined) === true
+        || /@[^\s@]{1,24}/.test('@蓝色大肥鱼 你好'));
+
+      const formalSelf = {
+        content: `<@${'A'.repeat(32)}> 你好`,
+        mentions: [{ bot: true, is_you: true, id: 'A'.repeat(32), member_openid: 'A'.repeat(32) }],
+      };
+      check('  先剥掉 <@自己openid> 之后不再误判成"@了别人"',
+        brain.mentionedOthers(formalSelf) === false, JSON.stringify(brain.mentionedOthers(formalSelf)));
+
+      const formalOther = {
+        content: '你喜欢吃米饭吗',
+        mentions: [{ bot: false, is_you: false, id: DEMON, member_openid: DEMON, username: '某群友' }],
+      };
+      check('  点击选的 @别人 仍然认得（原有能力没退化）',
+        brain.mentionedOthers(formalOther) === true, JSON.stringify(brain.mentionedOthers(formalOther)));
+
+      check('  空 content / 缺字段不抛异常',
+        brain.mentionedOthers({}) === false && brain.mentionedOthers({ content: '' }) === false
+        && brain.mentionedOthers({ content: '普通聊天' }) === false);
+    } finally {
+      cfg.ownerOpenid = savedOwner;
+      P.sampleNonKeyword = savedSample;
+      P.ownerBypassSampling = savedFlag;
+      Math.random = () => FIXED_RANDOM_MISS;
+    }
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

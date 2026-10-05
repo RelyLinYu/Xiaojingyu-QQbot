@@ -609,7 +609,7 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
     if (!gate.ok) return { ok: false, why: gate.why, rateNotice: gate.notice || null };
   }
 
-  const bypass = at || ownerFree;
+  const bypass = at || ownerFree;   // 免"冷却 / 同群连发上限"
   if (!bypass) {
     if (Date.now() - (lastReply.get(key) || 0) < p.cooldownMs) {
       return { ok: false, why: '该成员冷却中' };
@@ -623,8 +623,16 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
 
   const hitKeyword = p.keywords.some((k) => text.includes(k));
 
-  // ⭐ 省钱：没被 @ 也没命中关键词 → 只按概率抽样（主人和 @ 都不抽样）
-  if (!bypass && !hitKeyword && Math.random() > p.sampleNonKeyword) {
+  // ⭐ 省钱抽样：**没被 @、也没命中关键词**的闲聊，只有 `sampleNonKeyword` 概率进判断。
+  //
+  // 🔴 2026-10-05 改（两处）：
+  //   ① 主人**不再免**这道闸（见 config 的 ownerBypassSampling）。
+  //      实测代价：不改的话主人 50.5% 的闲聊会进判断，其他人只有 7.3% —— 差 6.9 倍，
+  //      而用户要的是"**所有人**都有机会被搭话"，不是只有主人被搭话。
+  //   ② 抽样率 0 → 0.08（用户要求"提高所有人被插嘴的概率"）。
+  // ⚠️ 条件里必须显式排除 `at`：被 @ 是明确点名，不该被抽签挡掉（否则 @ 了却沉默）。
+  const sampleFree = owner && p.ownerBypassSampling;
+  if (!at && !hitKeyword && !sampleFree && Math.random() > p.sampleNonKeyword) {
     return { ok: false, why: '未命中关键词且未抽样中（省钱）' };
   }
 
@@ -694,9 +702,25 @@ function detectAssistantMode(msg) {
 // 用途：**@ 了别人 = 在跟那个人说话**，机器人不该抢答。
 // 实测案例：问「@某群友A 你喜欢吃米饭吗」→ 机器人抢答"米饭我能吃三碗"，
 //          因为判断器只看到"这话题我能接"，不知道这句话是问别人的。
+//
+// 🔴 2026-10-05 补第二种形态（和 `isAtRobot` 的第 4 条判据是**同一个协议层事实**）：
+//    `mentions` 只对**点击选的 @** 有值；**手打的「@某人」不会进 mentions**
+//    （它是字面文本），于是"<@别人openid> 提示词没说好"这种话会被判成"没在跟别人说话"
+//    → 机器人插进去回「那是你家那条的锅」。线上实测（主人 @ 别人两次都被插话）。
+// ⚠️ 判据要**窄**：只认「@ + 一个不带空格的连续词」，且**先剥掉 @ 机器人自己**的
+//    那段（否则"@机器人 你好"会被误判成在跟别人说话）。宁可不判，也别乱判。
+// 📌 机器人自己的 id 直接从 `mentions` 里 `is_you === true` 的那条取 —— 不用外部传参。
 function mentionedOthers(msg) {
   const mentions = Array.isArray(msg?.mentions) ? msg.mentions : [];
-  return mentions.some((m) => m && m.is_you !== true);
+  if (mentions.some((m) => m && m.is_you !== true)) return true;   // 点击 @ 了别人
+  let text = String(msg?.content || '');
+  for (const m of mentions) {                                      // 先剥掉"@自己"的占位符
+    if (!m || m.is_you !== true) continue;
+    for (const id of [m.member_openid, m.id]) {
+      if (id) text = text.split(`<@${id}>`).join(' ');
+    }
+  }
+  return /@[^\s@]{1,24}/.test(text);                               // 手打的「@某人」
 }
 
 // ---------- L1：便宜模型判断 ----------
@@ -733,7 +757,12 @@ score：10=非常适合接话，6=可以接，3=勉强，0=完全不相关。`;
     // ⚠️ 双保险：即使判断器给了高分，只要"@ 了别人且没提机器人"，**直接否决**。
     //    判断器是概率性的，这种明确场景不该交给它自由发挥。
     //    实测它会把"问别人的问题"当成"能接的话题"，所以这里硬拦一道。
-    if (toOther && verdict.reply && verdict.score < 10) {
+    //
+    // 🔴 2026-10-05：原来的条件是 `toOther && verdict.reply && verdict.score < 10`
+    //    （不区分是谁说的）—— 但**主人免闸**那条路在 L1 里是靠 `score < 10` 兜的，
+    //    实测主人 @ 别人时判断器照样给了 10 分 → 否决失效 → 插话（线上发生了 2 次）。
+    //    改成：**只给"这次确实 @ 了机器人自己"开绿灯**（那是叫它，不是在叫别人）。
+    if (toOther && !at && verdict.reply && verdict.score < 10) {
       return { reply: false, score: 0, reason: '消息 @ 了别人，不抢答' };
     }
     return verdict;
