@@ -2546,6 +2546,29 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       && at('GROUP_MESSAGE_CREATE', mk('', undefined), BOTID) === false);
   }
 
+  console.log('\n=== 29. ⭐ 每日调用次数上限（800 → 1600）===');
+  {
+    // 🔴 真实背景（2026-10-05 用户要求「把每日 800 次上线改到 1600 次」）：
+    //    每日调用数已经涨上来了 —— 09 月均值 ≈410、10 月均值 ≈695、**10-04 峰值 995**，
+    //    800 离峰值只剩 195 次余量，开始变成"无谓的刹车"。
+    //    提到 1600 后，**次数闸不再是先撞到的那道**，真正的约束回到钱（¥3/天 + ¥20 总额）。
+    const P2 = cfg.policy;
+    const realLimit = P2.dailyCallLimit;
+
+    check('★★ 日额度提到 1600（原 800）', P2.dailyCallLimit === 1600, P2.dailyCallLimit);
+    check('★★ 且**高于历史峰值**（10-04 实测 995 次）—— 否则它还会继续当那道"无谓的刹车"',
+      P2.dailyCallLimit > 995, `${P2.dailyCallLimit} vs 995`);
+    check('  识图仍是**独立**限流，没被这次改动带上（300 张/天）',
+      cfg.policy.vision.dailyLimit === 300 && cfg.policy.vision.dailyLimit !== P2.dailyCallLimit);
+
+    // ⚠️ 别在测试里改 P2.dailyCallLimit —— budget.js 的 callCount 会跨用例累加，
+    //    改完再断言会依赖执行顺序（这类"依赖顺序的测试"最容易变成假绿）。
+    //    所以只锁"配置值"和"文案用的是配置值、不是写死的 800"。
+    const src = require('fs').readFileSync(require('path').join(__dirname, 'brain.js'), 'utf8');
+    check('★★ 超限提示语用的是 cfg.policy.dailyCallLimit，**没有写死 800**',
+      src.includes('${callCount}/${cfg.policy.dailyCallLimit}') && !/今日调用次数已用完（\d+\//.test(src));
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();
