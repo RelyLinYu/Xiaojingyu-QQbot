@@ -109,7 +109,9 @@ function budgetState() {
       spentYuan,
       totalLimit: tl,
       totalLeft: Math.max(0, tl - spentYuan),
-      calls: Number(j.calls) || 0,
+      calls: Number(j.calls) || 0,            // 终身累计
+      dayCalls: Number(j.dayCalls) || 0,      // 🆕 今日（跨天清零）—— 页面显示的是它
+      dailyCallLimit: Number(j.dailyCallLimit) || 1600,   // 🆕 上限，用来显示"今日 N / 上限"
       blocked: Number(j.blocked) || 0,
       byModel: j.byModel || {},
     };
@@ -254,7 +256,11 @@ async function load(manual){
     document.getElementById('budget').innerHTML = b ? (
       '<div class="card"><b>' + yuan(b.daySpent) + '</b><span>今日已花 / 上限 ¥' + b.dailyLimit + '</span></div>' +
       '<div class="card"><b>' + yuan(b.spentYuan) + '</b><span>累计已花 / 上限 ¥' + b.totalLimit + '</span></div>' +
-      '<div class="card"><b>' + (b.calls||0) + '</b><span>今日调用次数</span></div>' +
+      // 🔴 2026-10-05 修：这里原来显示 b.calls（终身累计）却标着"今日调用次数" ——
+      //    实测误导（横幅/网页显示 10752，而当天真实只有 1247 次）。现在改显示 dayCalls。
+      //    ⚠️ 注意：这整个页面是**一个模板字符串**，注释里**不能出现反引号**，
+      //       否则会提前把字符串截断 → 整文件语法错误 → 服务起不来（我踩过，见坑 113）。
+      '<div class="card"><b>' + (b.dayCalls||0) + ' / ' + (b.dailyCallLimit||'?') + '</b><span>今日调用次数 / 上限</span></div>' +
       '<div class="card"><b class="' + ((b.dayLeft!=null&&b.dayLeft<1)?'warn':'') + '">' + (b.dayLeft==null?'—':yuan(b.dayLeft)) + '</b><span>今日剩余</span></div>'
     ) : '<div class="card"><span>暂无花费数据</span></div>';
 
@@ -330,7 +336,7 @@ const server = http.createServer(async (req, res) => {
         + (p.on ? '' : `（${p.by ? `由 ${p.by} ` : ''}设置 · 恢复：群里 @我说「开机」）`),
       `今日花费 : ¥${(b?.daySpent ?? 0).toFixed(4)} / ¥${b?.dailyLimit ?? '?'}   （剩 ¥${(b?.dayLeft ?? 0).toFixed(4)}）`,
       `累计花费 : ¥${(b?.spentYuan ?? 0).toFixed(4)} / ¥${b?.totalLimit ?? '?'}   （剩 ¥${(b?.totalLeft ?? 0).toFixed(4)}）`,
-      `调用次数 : ${b?.calls ?? 0}`,
+      `调用次数 : 今日 ${b?.dayCalls ?? 0} / ${b?.dailyCallLimit ?? '?'}　（终身累计 ${b?.calls ?? 0}）`,
       `最近事件 : ${events.length} 条`,
       last ? `最新一条 : ${last.time} ${last.who} -> ${(last.text || '').slice(0, 40)}` : '最新一条 : （无）',
       `日志行数 : ${log.split('\n').length}`,

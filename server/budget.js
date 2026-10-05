@@ -40,12 +40,20 @@ function todayKey() {
   return `${bj.getFullYear()}-${bj.getMonth() + 1}-${bj.getDate()}`;
 }
 
+// 🆕 跨天清的"今日调用次数"（2026-10-05 新增）
+//
+// 🔴 为什么必须单独有这个字段：`state.calls` 是**终身累计**（只增不清），
+//    但启动横幅和日志网页一直把它当"调用次数"显示在"今日"旁边 ——
+//    实测误导：横幅在 18 分钟内显示 10712 → 10735，而当天真实只有 1,247 次调用。
+//    用户就是这么发现问题的（「调用咋可能上万次，有点误导」）。
+// ⇒ 分工定死：**`dayCalls` 给人和闸门看（跨天清零）；`calls` 只当终身统计，别拿去显示"今日"**。
 function freshState() {
   return {
     day: todayKey(),
     daySpent: 0,      // 今天花了多少
+    dayCalls: 0,      // 🆕 今天调用了几次模型（跨天清零）
     spentYuan: 0,     // 累计花了多少（不随跨天清零）
-    calls: 0,
+    calls: 0,         // 终身累计调用次数（不随跨天清零，别当"今日"用）
     blocked: 0,
     byModel: {},
     warned: false,
@@ -64,10 +72,13 @@ function load() {
     const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     if (!raw || typeof raw !== 'object') return;
     state = Object.assign(freshState(), raw);
+    // 旧版 budget.json 没有 dayCalls 字段 → 兜底成 0（别让横幅显示 undefined）
+    if (!Number.isFinite(Number(state.dayCalls))) state.dayCalls = 0;
     // 跨天：只清零"今日"，累计保留
     rollover(true);
     console.log(`[budget] 今日 ¥${state.daySpent.toFixed(4)} / ¥${cfg.budget.dailyLimitYuan}　`
-      + `累计 ¥${state.spentYuan.toFixed(4)} / ¥${cfg.budget.totalLimitYuan}（${state.calls} 次调用）`);
+      + `累计 ¥${state.spentYuan.toFixed(4)} / ¥${cfg.budget.totalLimitYuan}　`
+      + `今日 ${state.dayCalls}/${cfg.policy.dailyCallLimit} 次调用（终身累计 ${state.calls} 次）`);
   } catch (e) {
     console.warn('[budget] 读取失败，从零开始:', e.message);
   }
@@ -94,10 +105,12 @@ function rollover(quiet) {
   const today = todayKey();
   if (state.day !== today) {
     if (!quiet) {
-      console.log(`[budget] 跨天重置今日额度（${state.day} → ${today}，昨天花了 ¥${state.daySpent.toFixed(4)}）`);
+      console.log(`[budget] 跨天重置今日额度（${state.day} → ${today}，昨天花了 ¥${state.daySpent.toFixed(4)}`
+        + ` · 昨天 ${state.dayCalls || 0} 次调用）`);
     }
     state.day = today;
     state.daySpent = 0;
+    state.dayCalls = 0;   // 🆕 今日次数也必须跨天清（否则横幅又变回"终身累计"那个 bug）
     state.warned = false;
     if (!quiet) save();
   }
@@ -209,6 +222,7 @@ function record(model, usage) {
   const guessed = !free && !known;
 
   state.calls++;
+  state.dayCalls++;      // 🆕 今日次数（跨天清零）—— 横幅/日志网页显示的是它
   state.byModel[model] = state.byModel[model] || { calls: 0, yuan: 0 };
   state.byModel[model].calls++;
 
@@ -272,7 +286,9 @@ function status() {
     spentYuan: Number(state.spentYuan.toFixed(6)),
     totalLimit: tl,
     totalLeft: tl > 0 ? Number(Math.max(0, tl - state.spentYuan).toFixed(6)) : null,
-    calls: state.calls,
+    calls: state.calls,          // 终身累计（⚠️ 别拿去显示"今日"）
+    dayCalls: state.dayCalls || 0,   // 🆕 今日（跨天清零）
+    dailyCallLimit: cfg.policy.dailyCallLimit,   // 🆕 让调用方能显示"今日 N / 1600"
     blocked: state.blocked,
     byModel: state.byModel,
   };
@@ -292,7 +308,9 @@ function persistedStatus() {
     spentYuan,
     totalLimit: tl,
     totalLeft: tl > 0 ? Math.max(0, tl - spentYuan) : null,
-    calls: state.calls || 0,
+    calls: state.calls || 0,          // 终身累计
+    dayCalls: state.dayCalls || 0,    // 🆕 今日（跨天清零）
+    dailyCallLimit: cfg.policy.dailyCallLimit,   // 🆕 供日志网页显示"今日 N / 上限"
     blocked: state.blocked || 0,
     byModel: state.byModel || {},
   };
@@ -305,4 +323,9 @@ function markBlocked() {
 
 load();
 
-module.exports = { canSpend, shouldAnnounceStop, record, status, persistedStatus, priceOf, isFreeModel, markBlocked };
+module.exports = {
+  canSpend, shouldAnnounceStop, record, status, persistedStatus, priceOf, isFreeModel, markBlocked,
+  // 🆕 只给自测用：把"今天"改成指定日期，用来验证"跨天到底清了哪些字段"。
+  //    ⚠️ 生产代码不要调它。NO_PERSIST 模式下它也不会写任何文件。
+  setDayForTest: (d) => { state.day = String(d); },
+};

@@ -2674,6 +2674,67 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     }
   }
 
+  console.log('\n=== 31. ⭐ 「今日调用次数」显示口径（终身累计 → 今日）===');
+  {
+    // 🔴 起因（2026-10-05 用户质疑）：「日志里那个调用次数到底是啥，是消息数吧，
+    //    调用咋可能上万次，有点误导」—— 他猜对了，这是**显示层的真 bug**：
+    //    `budget.state.calls` 是**终身累计**（`rollover()` 从来没清过它），
+    //    却被显示在"今日 ¥X / ¥3"旁边 ⇒ 谁看都会读成"今天调了一万次"。
+    //    实测：横幅 18 分钟内 10712 → 10735，而当天真实只有 896 文本 + 351 识图。
+    const budget = require('./budget');
+    const fs = require('fs');
+    const path = require('path');
+
+    const USAGE = { prompt_tokens: 100, completion_tokens: 10, prompt_cache_hit_tokens: 0 };
+    const realDay = budget.status().day;
+
+    // ① 每记一次账，今日次数就该 +1（账本口径：**含识图**，因为识图也走 record()）
+    const d0 = budget.status().dayCalls || 0;
+    budget.record('deepseek-flash', USAGE);
+    check('★ 记一次账 → dayCalls +1', (budget.status().dayCalls || 0) === d0 + 1,
+      `${d0} → ${budget.status().dayCalls}`);
+
+    budget.record('deepseek-flash', USAGE);
+    check('  再记一次 → 再 +1', (budget.status().dayCalls || 0) === d0 + 2,
+      budget.status().dayCalls);
+
+    const st = budget.status();
+    check('★ status() 同时给出"今日"和"终身累计"两个数（不再混用）',
+      typeof st.dayCalls === 'number' && typeof st.calls === 'number'
+      && st.calls >= st.dayCalls && st.dailyCallLimit === cfg.policy.dailyCallLimit,
+      JSON.stringify({ dayCalls: st.dayCalls, calls: st.calls, limit: st.dailyCallLimit }));
+
+    check('★ 落盘对象里也带上 dayCalls（日志网页是**另一个进程**，只能靠文件）',
+      'dayCalls' in budget.persistedStatus() && 'dailyCallLimit' in budget.persistedStatus(),
+      JSON.stringify(Object.keys(budget.persistedStatus())));
+
+    // ② 跨天只清"今日"那部分
+    budget.setDayForTest('1999-1-1');
+    const after = budget.status();   // status() 内部会调 rollover()
+    check('★★ 跨天 → dayCalls 归零、当天花费归零，但**终身累计 calls 与 spentYuan 保留**',
+      after.dayCalls === 0 && after.daySpent === 0
+      && after.calls === st.calls && after.spentYuan === st.spentYuan,
+      JSON.stringify({ dayCalls: after.dayCalls, calls: after.calls, daySpent: after.daySpent }));
+    budget.setDayForTest(realDay);
+    budget.status();                 // 再滚一次，回到今天（不影响后面用例）
+
+    // ③ 三处显示都必须用 dayCalls、不能再用 calls
+    const read = (p) => fs.readFileSync(path.join(__dirname, p), 'utf8');
+    const bsrc = read('budget.js');
+    const isrc = read('brain.js');
+    const lsrc = read('tools/logweb.js');
+    check('★ budget.js 的启动横幅显示"今日 N/上限 次调用（终身累计 M 次）"',
+      /今日 \$\{state\.dayCalls\}\/\$\{cfg\.policy\.dailyCallLimit\} 次调用（终身累计 \$\{state\.calls\} 次）/.test(bsrc));
+    check('★ `[ai]` 日志行用的是账本口径 dayCalls（不是本文件的 callCount）',
+      /今日第 \$\{st\.dayCalls\}\/\$\{cfg\.policy\.dailyCallLimit\} 次/.test(isrc));
+    check('★ 日志网页卡片改成 dayCalls / 上限（原来显示终身累计却标"今日"）',
+      /b\.dayCalls\|\|0\) \+ ' \/ ' \+ \(b\.dailyCallLimit/.test(lsrc));
+    check('  日志网页纯文本端点也标清"今日 … （终身累计 …）"',
+      /调用次数 : 今日 \$\{b\?\.dayCalls/.test(lsrc));
+    check('  ⚠️ 别把 `calls` 当成"今日"再显示回去（守住这次的修复）',
+      !/今日调用次数<\/span>/.test(lsrc) || !/b\.calls\|\|0\) \+ '<\/b><span>今日/.test(lsrc));
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();

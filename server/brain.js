@@ -1125,6 +1125,10 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
       if (!m) throw new Error('没返回 JSON: ' + out.slice(0, 80));
       out = m[0];
     }
+    // ⭐ 记账：用 API 返回的真实 token 数算钱
+    //    ⚠️ 顺序很关键（2026-10-05）：**先记账再打日志** ——
+    //    这样下面 `st.dayCalls` 里已经包含"这一次"，横幅/网页/日志三处口径才一致。
+    budget.record(model, j.usage);
     if (j.usage) {
       const st = budget.status();
       const day = st.dayLeft === null ? '不限' : `剩¥${st.dayLeft.toFixed(3)}`;
@@ -1136,10 +1140,11 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
       console.log(`[ai] ${model} in=${j.usage.prompt_tokens} out=${j.usage.completion_tokens}`
         + (hit ? ` 缓存命中${hit}(${hitPct}%)` : ' 缓存0%')
         + (thinkMode === 'enabled' ? ' 思考=开' : '')
-        + ` (今日第 ${callCount}/${cfg.policy.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
+        // 🔴 这里用 `st.dayCalls`（账本口径：**跨天清零、含识图**），不用本文件的 `callCount`
+        //    —— 后者只在"过闸时"自增、**不含识图**，两个数会差一截（2026-10-05 发现）。
+        //    显示口径统一到账本，人看到的数字就和"那道闸消耗了多少"是同一个。
+        + ` (今日第 ${st.dayCalls}/${cfg.policy.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
     }
-    // ⭐ 记账：用 API 返回的真实 token 数算钱
-    budget.record(model, j.usage);
     return { text: out };
   } catch (e) {
     callCount--;    // 调用失败不该占额度
