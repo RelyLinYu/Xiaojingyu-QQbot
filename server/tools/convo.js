@@ -93,7 +93,13 @@ function humanizeDecision(body) {
 //     wantReply,        // 决策是不是"要回"
 //   }
 function parseConversations(journalText, opts = {}) {
+  // ⚠️ 两个上限，别混：
+  //   `max`      = **总共**最多解析几条（保底，防日志太长）
+  //   `perScope` = **每个会话**最多留几条（2026-10-06 新增）
+  //     🔴 为什么需要它：原来只有 `max`（40）⇒ 一个活跃群会把额度吃光，
+  //        其它群只剩几条，而且活跃群自己也只见 40 条。
   const max = Number(opts.max) || 30;
+  const perScope = Number(opts.perScope) || 0;   // 0 = 不按会话限制
   const lines = String(journalText || '').split('\n');
   const convos = [];
 
@@ -169,8 +175,25 @@ function parseConversations(journalText, opts = {}) {
   }
   push();
 
-  // 时间倒序（最新在上），并且只留最近 max 条
-  return convos.slice(-max).reverse();
+  // ① 先按会话各留最近 perScope 条（这样"活跃群"不会把额度吃光）
+  //    ⚠️ 会话标识此刻还没有（那是 logweb 里反查群号才知道的），所以这里按
+  //       **同行分组**：`kind + 昵称连续段` 是 convo 层能拿到的最细粒度。
+  //       真正的"每群"，由调用方（logweb.buildConvos）在反查出群号后再做一次。
+  let list = convos;
+  if (perScope > 0) {
+    const buckets = new Map();
+    const order = [];
+    for (const c of convos) {
+      const key = `${c.kind}|${c.who}`;
+      if (!buckets.has(key)) { buckets.set(key, []); order.push(key); }
+      buckets.get(key).push(c);
+    }
+    list = [];
+    for (const key of order) list.push(...buckets.get(key).slice(-perScope));
+  }
+
+  // ② 总量保底 + 时间倒序（**最新在上**）
+  return list.slice(-max).reverse();
 }
 
 module.exports = {

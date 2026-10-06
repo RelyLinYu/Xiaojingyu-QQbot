@@ -3185,6 +3185,48 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /groupNo: al\.no \|\| ''/.test(lsrc37) && /const mReal = \/\^group:/.test(lsrc37));
     check('  读取侧仍兼容历史 `movedTo`（万一旧数据里登记过，别变坏卡）',
       /scopeAlias\.get\(key\)/.test(lsrc37));
+
+    // 🔴 2026-10-06 用户又问了两件事：
+    //    「每个群卡片的收录消息上限是多少」→ 原来只有**总共 40 条**，活跃群把额度吃光
+    //    「卡片内消息排序……每次刷新消息都会出现在卡片最下面了，要去翻，不合理，**排序反一下**」
+    check('★★ 每个会话有自己的条数上限（不再是"总共 40 条"被一个活跃群吃光）',
+      /perScope: 60/.test(lsrc37) && /const cap = Math\.max\(1, Number\(opts\.perScope\) \|\| 60\)/.test(lsrc37));
+    check('★★ convo.js 支持按会话限流（perScope，作者级第一道闸）',
+      (() => {
+        const csrc = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'convo.js'), 'utf8');
+        return /const perScope = Number\(opts\.perScope\)/.test(csrc)
+          && /buckets\.get\(key\)\.slice\(-perScope\)/.test(csrc);
+      })());
+    check('★★ 群级限流在**反查出群号之后**做（作者级限流挡不住"一个群几十个人"）',
+      /const byScope = new Map\(\)/.test(lsrc37) && /byScope\.get\(k\)\.slice\(0, cap\)/.test(lsrc37));
+    check('★★ 组内**显式按时间倒序**（不能依赖上游顺序 —— 跨群交错后会乱）',
+      /const tsec = \(t\) =>/.test(lsrc37)
+      && /arr\.sort\(\(a, b\) => tsec\(b\.time\) - tsec\(a\.time\)\)/.test(lsrc37));
+    check('★★ 卡内排序**最新在上**（用户要求反过来，别让他往下翻）',
+      !/g\.msgs\.slice\(\)\.reverse\(\)/.test(lsrc37)
+      && /const msgs = g\.msgs\.map/.test(lsrc37),
+      '卡内还在反向排序');
+    check('★ 卡片条数标出上限（"N 条（每群最多 60）"）',
+      /条（每群最多 60）/.test(lsrc37));
+
+    // 功能性验证：perScope 真的按会话各留 N 条
+    const conv2 = require('./tools/convo');
+    const mk = (who, n) => {
+      const out = [];
+      for (let i = 1; i <= n; i++) out.push(`2026-10-06T10:0${i % 10}:0${i % 10}+08:00 host node[1]: [群] GROUP_MESSAGE_CREATE | ${who}: 消息${i}`);
+      return out;
+    };
+    const j2 = [...mk('A', 5), ...mk('B', 3)].join('\n');
+    const all = conv2.parseConversations(j2, { max: 100, perScope: 60 });
+    const capped = conv2.parseConversations(j2, { max: 100, perScope: 2 });
+    const aCapped = capped.filter((c) => c.who === 'A').length;
+    const bCapped = capped.filter((c) => c.who === 'B').length;
+    check('★ perScope=2 时，A（5 条）留 2 条、B（3 条）也留 2 条（各会话独立）',
+      aCapped === 2 && bCapped === 2, `A=${aCapped} B=${bCapped}`);
+    check('★ 不限流时都在（A=5 B=3）', all.length === 8, String(all.length));
+    check('★ 解析结果**最新在上**（两条以上时第一条比第二条新）',
+      conv2.parseConversations(j2, { max: 100 })[0].text === '消息3',
+      conv2.parseConversations(j2, { max: 100 })[0].text);
   }
 
   console.log('\n=== 38. ⭐ 同群发送排队（两个人同时问 → 8 条交叉刷出来）===');

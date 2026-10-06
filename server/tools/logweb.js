@@ -280,7 +280,15 @@ function groupsSave(aliases) {
 //       （用户发现："这些是在另外一个群说的，为什么也在第一个群的卡片里？"）
 //    ⇒ 现在按**群号**归组，群号用"作者 + 秒级时间"去原始事件里反查。
 function buildConvos(journalText, opts = {}) {
-  const list = convo.parseConversations(journalText, { max: opts.max || 40 });
+  // 🔴 2026-10-06 按用户要求调整上限：
+  //    原来是"**总共** 40 条"（`max: 40`）⇒ 一个活跃群就把额度吃光，其它群只剩几条。
+  //    现在给**每个会话**留 60 条（`perScope`），总量上限放到 400 兜底。
+  const list = convo.parseConversations(journalText, {
+    max: opts.max || 400,
+    // ⚠️ 这里的 perScope 只能按"作者"分组（此时还不知道群号）⇒ 给**宽**一点当第一道闸；
+    //    **真正的"每群 60 条"在下面反查出群号之后再裁**（见 `cap`）。
+    perScope: opts.perAuthor || 200,
+  });
   const aliases = groupsLoad();
   // 🆕 群号反查：先按"作者+时间"精确匹配，再退回"作者"
   const map = authorTimeMap();
@@ -304,7 +312,7 @@ function buildConvos(journalText, opts = {}) {
   }
 
   const runs = [];                       // 反查不到时的退回方案（按昵称分段）
-  return list.map((c) => {
+  const tagged = list.map((c) => {
     const isPriv = c.kind === 'private';
     let key;
     let groupId = '';
@@ -368,6 +376,40 @@ function buildConvos(journalText, opts = {}) {
       guess: how === 'time' ? 'ok' : (how === 'author' ? 'weak' : 'none'),
     };
   });
+
+  // 🔴 2026-10-06：**按真实会话裁剪**（每群/私聊最多 perScope 条）。
+  //
+  //    为什么必须在这里做：`convo.parseConversations` 的 perScope 只能按"作者"分组
+  //    （那时还不知道群号），而一个活跃群有几十个人说话 ⇒ 每人各留几条 ⇒ 加起来几百条
+  //    （实测一个群拿了 323 条，用户问的"上限是多少"完全对不上）。
+  //
+  //    ⚠️ 写法说明（重要）：前面一版我写成"边遍历边数、`if (n <= cap) kept.push`"，
+  //       实测**没有生效**（同一作者 5 条 + perScope=2 仍返回 5 条），排查很久没定位到根因。
+  //       ⇒ 现在改成**先分组、再每组显式截断**：任何一步都看得见、也能被自测锁住。
+  const cap = Math.max(1, Number(opts.perScope) || 60);
+  const byScope = new Map();
+  for (const c of tagged) {
+    if (!byScope.has(c.scope)) byScope.set(c.scope, []);
+    byScope.get(c.scope).push(c);
+  }
+  // ⚠️ 组内**显式按时间倒序**：别依赖上游顺序。
+  //    踩过：`byScope` 是"按群收集"的，单看每个群像是新→旧，
+  //    但**跨群元素交错**后整体不再是严格时间序（实测第 6/16/26/42/50 处出现"旧的在新的前面"）
+  //    ⇒ 用户看到的就是"最上面那条不是最新的"。
+  const tsec = (t) => {
+    const m = /^(\d{1,2}):(\d{2}):(\d{2})$/.exec(String(t || ''));
+    return m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : -1;
+  };
+  for (const arr of byScope.values()) arr.sort((a, b) => tsec(b.time) - tsec(a.time));
+
+  // 会话之间：**最近有动静的排最前**
+  const scopesByNewest = [...byScope.keys()].sort(
+    (a, b) => tsec(byScope.get(b)[0].time) - tsec(byScope.get(a)[0].time)
+  );
+  // 逐会话取出前 cap 条（组内已是"最新在前"）
+  const capped = [];
+  for (const k of scopesByNewest) capped.push(...byScope.get(k).slice(0, cap));
+  return capped;
 }
 
 // 🆕 读请求体（改参数/开关机用）。有上限，防止被塞爆。
@@ -737,7 +779,7 @@ function renderGroups(list){
     const sum = '<summary>' +
         '<span class="gtitle">' + esc(g.name || '未命名') + '</span>' +
         '<span class="tag">' + (isPriv ? '私聊' : '群') + '</span>' +
-        '<span class="cnt">' + g.msgs.length + ' 条</span>' +
+        '<span class="cnt">' + g.msgs.length + ' 条（每群最多 60）</span>' +
       '</summary>';
     // ⚠️ 编辑框放在 summary **外面** —— 否则点输入框会连带收起卡片
     // ① 群内码：**只读**（用户说"那串乱码对我没啥用，非要写就固定在群昵称旁边或下面独占一行"）
@@ -749,8 +791,11 @@ function renderGroups(list){
       '</div>' +
       (isPriv ? '' : '<div class="gcode">群内码 ' + esc(g.realId || '（认不出）') + '</div>');
 
-    // 卡内按时间正序（先发生的在上），读起来像聊天记录
-    const msgs = g.msgs.slice().reverse().map((c) => {
+    // 🔴 卡内排序（2026-10-06 用户要求反过来）：
+    //    原话「**卡片内消息排序方式从上到下是从早到晚，但是这样每次刷新消息都会出现在卡片最下面了，
+    //    要去翻，不合理，排序反一下**」⇒ 现在**最新在上**（后端已按此顺序给，直接用不 reverse）。
+    //    ⚠️ 每会话 60 条的上限已在**后端按真实群号裁好**，这里不再截断（避免"上面写 60、实际 40"）。
+    const msgs = g.msgs.map((c) => {
       const q = '<div class="mtop"><span class="who">' + esc(c.who) + '</span>' +
         '<span class="tm">' + esc(c.time || '') + '</span></div>' +
         '<div class="txt">' + (esc(c.text) || '<span style="color:var(--dim)">（非文字消息）</span>') + '</div>';
@@ -852,7 +897,9 @@ const server = http.createServer(async (req, res) => {
     const budget = budgetState();
     const power = powerState();
     const events = recentEvents(30);
-    const convos = buildConvos(await journalLines(400), { max: 40 });   // 🆕 人话版对话卡片
+    // 🆕 对话卡片：日志窗口放大到 1500 行、**每个会话最多 60 条**（2026-10-06 按用户要求提高）
+    //    原来只取 400 行 + 总共 40 条 ⇒ 活跃群把额度吃光，别的群只剩几条。
+    const convos = buildConvos(await journalLines(1500), { max: 400, perScope: 60 });
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       log, service, budget, power, events, convos,
