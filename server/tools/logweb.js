@@ -177,7 +177,10 @@ function recentEvents(n) {
           text: typeof d.content === 'string' ? d.content.trim() : '',
           type: d.message_type,
           // 🆕 群/用户 id：日志里只有角色，**id 只在这里有** ⇒ 拼卡片时要用
-          scopeId: d.group_openid || d.group_id || d.author?.member_openid || '',
+          //    ⚠️ 私聊（C2C）事件里**没有群号**、昵称还是空的，身份在 `author.user_openid`
+          scopeId: d.group_openid || d.group_id || d.author?.member_openid || d.author?.user_openid || '',
+          // 🆕 事件类型（C2C=私聊 / GROUP=群）—— 用来纠正卡片上的"群/私聊"标记
+          kind: String(e.t || d.message_type || '').includes('C2C') ? 'private' : 'group',
           quoted: (d.msg_elements || []).map((x) => (x.content || '').trim()).filter(Boolean).join(' '),
         };
       } catch { return null; }
@@ -204,47 +207,60 @@ function toSec(t) {
   return m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : null;
 }
 
+// 🔴 昵称归一化（2026-10-06 踩过）：事件里的昵称可能带**前导/内嵌空格**，
+//    实测某群友的昵称是 `'　　　　　没有名字的海'`（5 个全角空格），而日志里已被 trim 成
+//    `'没有名字的海'` ⇒ **两边不一致 ⇒ 群号反查失败 ⇒ 卡片退化成"群 N（未命名）"、群内码显示"（认不出）"**。
+//    ⇒ 比较时一律**去掉所有空白字符**（含全角空格 \u3000）。
+function whoKey(w) {
+  return String(w || '').replace(/[\s\u3000]+/g, '');
+}
+
 function authorTimeMap() {
-  const byTime = new Map();     // `${who}@${HH:MM:SS}` -> scopeId
+  const byTime = new Map();     // `${whoKey}@${HH:MM:SS}` -> { scopeId, kind }
   const byAuthor = new Map();
   for (const e of recentEvents(3000)) {
     if (!e.who || !e.scopeId) continue;
-    if (e.time) byTime.set(`${e.who}@${e.time}`, e.scopeId);
-    byAuthor.set(e.who, e.scopeId);      // 后来者覆盖 = 最近优先（仅作兜底）
+    const w = whoKey(e.who);
+    if (!w) continue;
+    if (e.time) byTime.set(`${w}@${e.time}`, { scopeId: e.scopeId, kind: e.kind || '' });
+    byAuthor.set(w, e.scopeId);      // 后来者覆盖 = 最近优先（仅作兜底）
   }
   // 每个作者的时间键：排序 + 带秒数，供"容差查找"用
   const sorted = new Map();
-  for (const [key, scopeId] of byTime) {
+  for (const [key, info] of byTime) {
     const at = key.lastIndexOf('@');
-    const who = key.slice(0, at);
+    const who = key.slice(0, at);          // 已经是 whoKey 形式
     const sec = toSec(key.slice(at + 1));
     if (sec === null) continue;
     if (!sorted.has(who)) sorted.set(who, []);
-    sorted.get(who).push({ sec, scopeId });
+    sorted.get(who).push({ sec, scopeId: info.scopeId, kind: info.kind });
   }
   for (const arr of sorted.values()) arr.sort((a, b) => a.sec - b.sec);
 
   return {
     byTime,
     byAuthor,
-    /** 容差查找：这个作者、这个时间 ±N 秒 的群号；找不到返回 '' */
+    /**
+     * 容差查找：这个作者、这个时间 ±N 秒 的 **群号 + 事件类型**；找不到返回 null。
+     * ⚠️ 作者名一律走 `whoKey()` 归一化（去所有空白）—— 事件里的昵称可能带前导空格。
+     */
     lookup(who, time) {
       const sec = toSec(time);
-      if (sec === null) return '';
-      const arr = sorted.get(who);
-      if (!arr || !arr.length) return '';
+      if (sec === null) return null;
+      const arr = sorted.get(whoKey(who));
+      if (!arr || !arr.length) return null;
       // 二分定位到 <= sec 的最后一项，再左右扫一小段
       let lo = 0; let hi = arr.length - 1; let pos = -1;
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
         if (arr[mid].sec <= sec) { pos = mid; lo = mid + 1; } else hi = mid - 1;
       }
-      let best = ''; let bestGap = 1e9;
+      let best = null; let bestGap = 1e9;
       for (let i = Math.max(0, pos - 6); i < Math.min(arr.length, pos + 7); i++) {
         const gap = Math.abs(arr[i].sec - sec);
-        if (gap <= TIME_TOLERANCE_SEC && gap < bestGap) { bestGap = gap; best = arr[i].scopeId; }
+        if (gap <= TIME_TOLERANCE_SEC && gap < bestGap) { bestGap = gap; best = arr[i]; }
       }
-      return best;
+      return best;      // { sec, scopeId, kind } 或 null
     },
   };
 }
@@ -307,7 +323,7 @@ function buildConvos(journalText, opts = {}) {
   //    ⚠️ 判据要窄：只在"一个群号都没认出"时才吸附，而且按作者（作者在哪说过话最有信息量）。
   const knownIds = order;
   const authorKnown = new Map();
-  for (const [k, v] of map.byAuthor) if (knownIds.includes(v)) authorKnown.set(k, v);
+  for (const [k, v] of map.byAuthor) if (knownIds.includes(v)) authorKnown.set(whoKey(k), v);
 
   // 🆕 历史遗留的"合并"别名表：`group:<旧群号>` 可以指向 `group:<目标群号>`。
   //    ⚠️ 2026-10-06 用户要求**把合并功能删掉**（「没必要，那是修代码才导致出现问题，
@@ -327,17 +343,23 @@ function buildConvos(journalText, opts = {}) {
     let how = '';
 
     if (isPriv) {
-      key = `private:${c.who}`;
+      // ⚠️ 私聊：事件里**昵称是空的**（实测 `username: ""`）、身份只有 `user_openid`，
+      //    而日志里私聊行的昵称是"未知"。⇒ 用**发信人**当键，让同一个人的私聊归到一张卡。
+      key = `private:${whoKey(c.who) || 'unknown'}`;
       how = 'private';
     } else {
       // ① 作者 + 时间（带 ±3 秒容差：日志比平台 timestamp 晚约 1 秒）
-      let found = map.lookup(c.who, c.time);
+      //    🔴 2026-10-06：lookup 现在返回 { scopeId, kind }；**顺带用事件类型纠正"私聊/群"** ——
+      //    日志行是 [群]/[私聊]，但偶有对不上（更可靠的是原始事件里的 C2C_/GROUP_）。
+      const hit = map.lookup(c.who, c.time);
+      let found = hit ? hit.scopeId : '';
       if (found) how = 'time';
+      if (hit && hit.kind) c.kind = hit.kind;
       // ② 退回：只按作者（同一人跨群时会不准）
-      if (!found) { found = map.byAuthor.get(c.who) || ''; if (found) how = 'author'; }
+      if (!found) { found = map.byAuthor.get(whoKey(c.who)) || ''; if (found) how = 'author'; }
       // ③ 🆕 吸附：一个群号都没查到，但这个人**在某个已知群里说过话** ⇒ 归到那个群
       //    （这一条就是"把同一个群分裂出来的两张卡合并"的关键）
-      if (!found) { found = authorKnown.get(c.who) || ''; if (found) how = 'attach'; }
+      if (!found) { found = authorKnown.get(whoKey(c.who)) || ''; if (found) how = 'attach'; }
       if (found) {
         groupId = found;
         key = `group:${found}`;
