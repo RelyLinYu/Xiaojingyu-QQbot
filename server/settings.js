@@ -36,7 +36,6 @@ const SPEC = {
 };
 
 let cache = null;
-let lastMtime = 0;
 
 function readSettings() {
   try {
@@ -47,13 +46,30 @@ function readSettings() {
   }
 }
 
-// 主进程/网页都会调：用 mtime 变化做缓存
+// 主进程/网页都会调。⚠️ 每次都**真读一次文件**（几 KB，代价极小），内容没变就直接复用旧对象。
+//    🔴 曾经按 mtime 变化做缓存，结果**卡住不更新**：实测把"每天回复调用上限"从 1600 改成 3000、
+//       面板显示"已保存"、`settings.snapshot()` 也读到 3000，**但额度区仍显示 1600**。
+//    ⇒ 教训：**这种"必须实时反映"的配置，宁可靠"读内容 + 比对"，别靠 mtime 的相等性**
+//      （同秒写入、别处回写、mtime 精度不够，都会让 mtime 跟踪错位）。
+//    ⚠️ 另一个坑（我第一版修法就踩了）：**不能在"已经解析出对象"之后再挂 `_raw`**，
+//       否则第一次比较时 `_raw` 还不存在，缓存判断直接失效（表现为"永远读不到新值"）。
 function load(force) {
+  // ⚠️ 测试模式（XLJ_NO_PERSIST=1）：**不读文件**，直接用内存里那份
+  //    （否则"只更新内存"会被这次读文件覆盖掉，测试里读回旧值）。
+  if (process.env.XLJ_NO_PERSIST === '1') return cache || (cache = {});
+  let txt;
   try {
-    const st = fs.statSync(FILE);
-    if (!force && st.mtimeMs === lastMtime && cache) return cache;
-    lastMtime = st.mtimeMs;
-    cache = readSettings();
+    txt = fs.readFileSync(FILE, 'utf8');
+  } catch {
+    if (!cache) cache = {};
+    return cache;                       // 文件不存在 ⇒ 用内存里的（或空）
+  }
+  if (!force && cache && cache._raw === txt) return cache;
+  try {
+    const obj = JSON.parse(txt);
+    const next = (obj && typeof obj === 'object') ? obj : {};
+    Object.defineProperty(next, '_raw', { value: txt, enumerable: false });   // 非枚举 ⇒ 不会混进配置项
+    cache = next;
   } catch {
     if (!cache) cache = {};
   }
@@ -61,14 +77,27 @@ function load(force) {
 }
 
 function save(obj) {
+  // 🔴 测试模式：`XLJ_NO_PERSIST=1` 时**只更新内存、不写文件**。
+  //    原因（真踩过）：`test-brain.js` 会调 `settings.update()`，如果它真写 `data/settings.json`，
+  //    就会**污染运行配置** —— 我一次测试把"每天回复调用上限"写成了 1200，之后自测就红了
+  //    （真源被改），差点当成代码 bug。⇒ 和 `budget.js` 的 `XLJ_NO_PERSIST` 一个路子。
+  const noPersist = process.env.XLJ_NO_PERSIST === '1';
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    const tmp = FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
-    fs.renameSync(tmp, FILE);
-    cache = obj;
-    try { lastMtime = fs.statSync(FILE).mtimeMs; } catch { /* ignore */ }
-    return { ok: true };
+    if (!noPersist) {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      const tmp = FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+      fs.renameSync(tmp, FILE);
+    }
+    // ⚠️ 写完直接刷新内存缓存（并用与 load() 一致的方式挂 `_raw`）
+    if (noPersist) {
+      const next = Object.assign({}, obj);
+      Object.defineProperty(next, '_raw', { value: JSON.stringify(obj), enumerable: false });
+      cache = next;
+    } else {
+      load(true);
+    }
+    return { ok: true, persisted: !noPersist };
   } catch (e) {
     return { ok: false, why: e.message };
   }

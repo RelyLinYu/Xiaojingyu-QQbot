@@ -94,12 +94,19 @@ function budgetState() {
     if (!fs.existsSync(f)) return null;
     const j = JSON.parse(fs.readFileSync(f, 'utf8'));
 
-    // 上限优先取文件里保存的；旧文件没有就用 .env / 环境变量兜底，最后给个默认值。
-    // （budget.json 早期版本只存花费不存上限，兼容一下）
+    // 🔴 2026-10-06 修：**"上限"必须直接读动态真源 `settings.json`**。
+    //    这个页面是独立进程，原来只读 `budget.json` 里主进程落盘的旧上限 ⇒
+    //    用户在面板把"每天回复调用上限"改成 3000、页面提示"已保存"，
+    //    **但额度区仍显示 1600**（他立刻发现："保存了之后顶部监控卡片里的 1600 没改"）。
+    let dyn = {};
+    try { dyn = settings.values() || {}; } catch { dyn = {}; }
+
+    // 上限优先取**面板保存的动态值**；再取 budget.json 里落的；最后 .env / 默认值兜底。
     const envDaily = Number(process.env.BUDGET_DAILY_YUAN) || 3;
     const envTotal = Number(process.env.BUDGET_TOTAL_YUAN) || 10;
-    const dl = Number(j.dailyLimit) || envDaily;
-    const tl = Number(j.totalLimit) || envTotal;
+    const dl = Number(dyn.budgetDailyYuan) || Number(j.dailyLimit) || envDaily;
+    const tl = Number(dyn.budgetTotalYuan) || Number(j.totalLimit) || envTotal;
+    const cl = Number(dyn.dailyCallLimit) || Number(j.dailyCallLimit) || 1600;
     const daySpent = Number(j.daySpent) || 0;
     const spentYuan = Number(j.spentYuan) || 0;
 
@@ -113,7 +120,7 @@ function budgetState() {
       totalLeft: Math.max(0, tl - spentYuan),
       calls: Number(j.calls) || 0,            // 终身累计
       dayCalls: Number(j.dayCalls) || 0,      // 🆕 今日（跨天清零）—— 页面显示的是它
-      dailyCallLimit: Number(j.dailyCallLimit) || 1600,   // 🆕 上限，用来显示"今日 N / 上限"
+      dailyCallLimit: cl,                     // 🆕 上限（**动态值优先**，见上面说明）
       // 🆕 2026-10-05：官方口径（余额 + 由锚点反推的"累计已花"）。
       //    ⚠️ 它是**主进程定时查回来、顺手写进 budget.json** 的（budget.js 的 save()），
       //    这个页面是独立进程，读不到主进程的内存，只能靠文件。
