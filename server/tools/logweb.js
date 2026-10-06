@@ -294,9 +294,10 @@ function buildConvos(journalText, opts = {}) {
   const authorKnown = new Map();
   for (const [k, v] of map.byAuthor) if (knownIds.includes(v)) authorKnown.set(k, v);
 
-  // 🆕 "合并"用的别名表：`group:<旧群号>` 可以指向 `group:<目标群号>`。
-  //    场景：同一个群被反查/平台搞出了两个 id（实测「某个群」旁边多出一张「群 3」），
-  //    用户点一次"合并到…"，把旧 id 登记成 `{ movedTo: 'group:<新id>' }` ⇒ 之后自动并卡。
+  // 🆕 历史遗留的"合并"别名表：`group:<旧群号>` 可以指向 `group:<目标群号>`。
+  //    ⚠️ 2026-10-06 用户要求**把合并功能删掉**（「没必要，那是修代码才导致出现问题，
+  //       正常使用应该不会」）⇒ **写入侧已删**，但这里**读取侧保留**：
+  //       万一旧数据里登记过 `movedTo`，别让它变成一张认不出的坏卡。
   const scopeAlias = new Map();
   for (const [k, v] of Object.entries(aliases)) {
     if (v && typeof v.movedTo === 'string' && v.movedTo) scopeAlias.set(k, v.movedTo);
@@ -339,6 +340,15 @@ function buildConvos(journalText, opts = {}) {
     // 🆕 如果这个 scope 被登记过"合并到别处" ⇒ 改写 key（同一个 key = 同一张卡）
     if (scopeAlias.has(key)) key = scopeAlias.get(key);
 
+    // 🆕 真实群内码（那串 32 位）：**只读展示**，不再占输入框。
+    //    用户原话：「还要图中这串乱码，算群内码吧，对我来说没啥用，非要写可以固定在
+    //    卡片群昵称旁边或者下面独占一行给你当日志用，**那个框框默认空缺拿来填群号**」
+    //    ⇒ 输入框留给"你要看的群号"，群内码单独一行只读。
+    //    ⚠️ 优先取 key 里的（合并后要显示目标群，而不是旧 id）；
+    //       认不出来时退回该卡已登记的 id（给"按昵称分段"那种卡兜底）。
+    const mReal = /^group:([0-9A-Fa-f]{16,64})$/.exec(key);
+    const realId = mReal ? mReal[1] : ((aliases[key] && aliases[key].id) || '');
+
     const al = aliases[key] || {};
     const fallbackName = isPriv ? '私聊' : `群 ${n}（未命名）`;
     return {
@@ -350,8 +360,10 @@ function buildConvos(journalText, opts = {}) {
       decision: c.decision,
       replies: c.replies,
       groupName: al.name || fallbackName,   // 读不到真名就是占位符（用户可手改）
-      groupId: al.id || groupId,            // 真实群号（可被用户覆盖）
-      defaultId: groupId,
+      // 卡片顶部那个输入框要填的东西：**用户自己填的可读群号**（默认空）
+      groupNo: al.no || '',
+      // 只读展示的真实群内码（反查/登记得来，用户不用管）
+      realId,
       // 让前端知道"这条的群号有多可信"（weak/none 时提示用户手填）
       guess: how === 'time' ? 'ok' : (how === 'author' ? 'weak' : 'none'),
     };
@@ -429,6 +441,8 @@ const PAGE = (pwd) => `<!doctype html>
   .gedit { display:flex; gap:6px; flex-wrap:wrap; padding:8px 12px; background:#0e1729;
            border-bottom:1px solid var(--line); }
   .gedit input { flex:1; min-width:120px; }
+  .gcode { padding:0 12px 8px; color:var(--dim); font-size:10.5px; word-break:break-all;
+           font-family:ui-monospace,Menlo,Consolas,monospace; }
   .msgs { padding:4px 12px 10px; }
   .msg { padding:8px 0; border-bottom:1px dashed var(--line); }
   .msg:last-child { border-bottom:0; }
@@ -709,7 +723,8 @@ function renderGroups(list){
   for (const c of list) {
     let g = idx.get(c.scope);
     if (!g) {
-      g = { scope:c.scope, kind:c.kind, name:c.groupName, id:c.groupId || c.defaultId || '', msgs:[] };
+      g = { scope:c.scope, kind:c.kind, name:c.groupName,
+            groupNo:c.groupNo || '', realId:c.realId || '', msgs:[] };
       idx.set(c.scope, g); groups.push(g);
     }
     g.msgs.push(c);
@@ -725,16 +740,14 @@ function renderGroups(list){
         '<span class="cnt">' + g.msgs.length + ' 条</span>' +
       '</summary>';
     // ⚠️ 编辑框放在 summary **外面** —— 否则点输入框会连带收起卡片
+    // ① 群内码：**只读**（用户说"那串乱码对我没啥用，非要写就固定在群昵称旁边或下面独占一行"）
+    // ② 输入框：默认空缺，**专门用来填你要看的群号**
     const edit = '<div class="gedit">' +
         '<input type="text" placeholder="' + (isPriv ? '备注名（可手改）' : '群名（可手改）') + '" value="' + esc(nameVal) + '" data-g="' + gi + '" data-f="name">' +
-        '<input type="text" placeholder="群号（可手填）" value="' + esc(g.id || '') + '" data-g="' + gi + '" data-f="id">' +
+        '<input type="text" placeholder="群号（自己填，方便你认）" value="' + esc(g.groupNo || '') + '" data-g="' + gi + '" data-f="no">' +
         '<button class="sm" onclick="saveGroup(' + gi + ')">保存</button>' +
-        (isPriv ? '' :
-          '<select id="mg' + gi + '"><option value="">合并到…</option>' +
-          groups.map((g2, j) => (j === gi || g2.kind === 'private' || !/group:/.test(g2.scope))
-            ? '' : '<option value="' + esc(g2.scope) + '">' + esc(g2.name) + '</option>').join('') +
-          '</select><button class="sm" onclick="mergeGroup(' + gi + ')">合并</button>') +
-      '</div>';
+      '</div>' +
+      (isPriv ? '' : '<div class="gcode">群内码 ' + esc(g.realId || '（认不出）') + '</div>');
 
     // 卡内按时间正序（先发生的在上），读起来像聊天记录
     const msgs = g.msgs.slice().reverse().map((c) => {
@@ -760,33 +773,15 @@ function renderGroups(list){
   window.__groups = groups;
 }
 
-async function mergeGroup(gi){
-  const sel = document.getElementById('mg' + gi);
-  const target = sel ? sel.value : '';
-  if (!target) { toast('先在右边选一个要合并进去的群'); return; }
-  const g = (window.__groups || [])[gi];
-  if (!g) return;
-  if (!confirm('把「' + g.name + '」合并进所选的那个群？合并后这 ' + g.msgs.length + ' 条会显示在那边。')) return;
-  // 关键：让本卡的群号 = 目标群的群号（同一个群号 = 同一张卡），并把本地保存的别名一起搬过去
-  const targetId = (target || '').replace(/^group:/, '');
-  const r = await fetch('/api/groups?p=' + encodeURIComponent(P), {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ aliases: { [target]: { id: targetId } }, move: { from: g.scope, to: target } }),
-  });
-  const j = await r.json();
-  toast(j.ok ? '✅ 已合并' : ('❌ ' + (j.why||'合并失败')));
-  if (j.ok) load(true);
-}
-
 async function saveGroup(gi){
   const g = (window.__groups || [])[gi];
   if (!g) return;
   const wrap = document.querySelectorAll('.gcard')[gi];
   if (!wrap) return;
   const name = (wrap.querySelector('input[data-f=name]').value || '').trim();
-  const id = (wrap.querySelector('input[data-f=id]').value || '').trim();
+  const no = (wrap.querySelector('input[data-f=no]').value || '').trim();
   const aliases = {};
-  aliases[g.scope] = { name, id };
+  aliases[g.scope] = { name, no };
   const r = await fetch('/api/groups?p=' + encodeURIComponent(P), {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({aliases}),
   });
@@ -878,30 +873,24 @@ const server = http.createServer(async (req, res) => {
       for (const [key, v] of Object.entries(patch.aliases || {})) {
         if (!key || key.length > 120) continue;                 // 长度闸
         const name = String(v?.name || '').slice(0, 40);
-        const id = String(v?.id || '').slice(0, 64);
+        // 🆕 `no` = 用户自己填的**可读群号**（不是那串 32 位群内码；群内码只读、不在这里改）
+        const no = String(v?.no || '').slice(0, 32);
         const movedTo = String(v?.movedTo || '').slice(0, 120);
-        // ⚠️ 只在"三项都空"时才删 —— 否则只改群号会把 movedTo 抹掉
-        if (!name && !id && !movedTo) { delete cur[key]; n += 1; continue; }
+        // ⚠️ 旧字段 `id` 仍然接受（历史数据里有），但 UI 已不再提供输入
+        const id = String(v?.id || '').slice(0, 64);
+        // ⚠️ 只在"都空"时才删 —— 否则只改群名会把 movedTo 抹掉
+        if (!name && !no && !id && !movedTo) { delete cur[key]; n += 1; continue; }
         cur[key] = Object.assign({}, cur[key], {
           ...(name ? { name } : {}),
+          ...(no ? { no } : {}),
           ...(id ? { id } : {}),
           ...(movedTo ? { movedTo } : {}),
         });
         n += 1;
       }
-      // 🆕 "合并"：把旧 scope 登记成"指向新 scope"，并把它本地的群名/群号一并带过去
-      const mv = patch.move;
-      if (mv && mv.from && mv.to && mv.from !== mv.to) {
-        const from = String(mv.from).slice(0, 120);
-        const to = String(mv.to).slice(0, 120);
-        const old = cur[from] || {};
-        cur[to] = Object.assign({}, cur[to], {
-          name: (cur[to] && cur[to].name) || old.name || '',
-          id: (cur[to] && cur[to].id) || old.id || to.replace(/^group:/, ''),
-        });
-        cur[from] = Object.assign({}, old, { movedTo: to });
-        n += 1;
-      }
+      // ⚠️ 2026-10-06：`move`（合并）**已按用户要求删掉** —— 他说「把合并群功能删了吧，
+      //    没必要，那是修代码才导致出现问题，正常使用应该不会」。
+      //    ⇒ 但**读取侧的 `movedTo` 仍然保留**：万一历史数据里登记过，别让它变成坏卡。
       const r = groupsSave(cur);
       res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: r.ok, why: r.why, saved: n }));

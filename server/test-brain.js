@@ -3168,6 +3168,23 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★★ 密钥写入前会**备份 .env**（源码里有 .bak- 逻辑）',
       /\.bak-\$\{Date\.now\(\)\}/.test(require('fs').readFileSync(
         require('path').join(__dirname, 'settings.js'), 'utf8')));
+
+    // 🔴 2026-10-06 用户三条调整：
+    //    「把合并群功能删了吧，没必要，那是修代码才导致出现问题，正常使用应该不会」
+    //    「还要图中这串乱码，算群内码吧，对我来说没啥用，非要写可以固定在卡片群昵称旁边
+    //      或者下面独占一行给你当日志用，**那个框框默认空缺拿来填群号**」
+    const lsrc37 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
+    check('★★ 合并群功能**已删**（用户要求：那是修代码引入的补丁）',
+      !/mergeGroup/.test(lsrc37) && !/合并到…/.test(lsrc37) && !/patch\.move/.test(lsrc37),
+      '还残留合并相关代码');
+    check('★★ 群内码是**只读展示**（不再占输入框；输入框改成填群号）',
+      /class="gcode">群内码/.test(lsrc37)
+      && /placeholder="群号（自己填，方便你认）"/.test(lsrc37)
+      && !/data-f="id"/.test(lsrc37));
+    check('★ 群号存进 `no` 字段（不再覆盖群内码），群内码由 scope 推导',
+      /groupNo: al\.no \|\| ''/.test(lsrc37) && /const mReal = \/\^group:/.test(lsrc37));
+    check('  读取侧仍兼容历史 `movedTo`（万一旧数据里登记过，别变坏卡）',
+      /scopeAlias\.get\(key\)/.test(lsrc37));
   }
 
   console.log('\n=== 38. ⭐ 同群发送排队（两个人同时问 → 8 条交叉刷出来）===');
