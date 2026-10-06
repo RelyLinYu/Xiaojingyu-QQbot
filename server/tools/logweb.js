@@ -719,7 +719,13 @@ const server = http.createServer(async (req, res) => {
       'Pragma': 'no-cache',
       'Expires': '0',
     });
-    res.end(PAGE(url.searchParams.get('p') || ''));
+    // 🆕 2026-10-06：分页面（概览/对话/设置/日志）—— 用 ?page= 选，缺省概览
+    const wantPage = String(url.searchParams.get('page') || 'overview');
+    const ALLOWED = ['overview', 'chat', 'settings', 'raw'];
+    res.end(PAGE({
+      pwd: url.searchParams.get('p') || '',
+      page: ALLOWED.includes(wantPage) ? wantPage : 'overview',
+    }));
     return;
   }
 

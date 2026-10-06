@@ -12,7 +12,7 @@
 //
 //  ⚠️ 本文件是**模板字符串**：里面**不能出现裸反引号**（会提前截断字符串）。
 // ============================================================
-const PAGE = (pwd) => `<!doctype html>
+const PAGE = (opts) => `<!doctype html>
 <html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -96,6 +96,18 @@ const PAGE = (pwd) => `<!doctype html>
   .hint { color:var(--dim); font-size:11px; margin:4px 0 0; }
   pre { margin:0; padding:10px; background:#080e1a; border:1px solid var(--line); border-radius:10px;
         overflow:auto; max-height:340px; font-size:11.5px; line-height:1.55; color:#9fb3d1; }
+  nav#tabs { position:fixed; left:0; right:0; bottom:0; z-index:30;
+    display:flex; background:rgba(11,18,32,.97); backdrop-filter:blur(8px);
+    border-top:1px solid var(--line); max-width:900px; margin:0 auto; }
+  nav#tabs a { flex:1; text-align:center; padding:9px 4px 10px; text-decoration:none;
+    color:var(--dim); font-size:12.5px; }
+  nav#tabs a.on { color:#bfdbfe; background:#152039; font-weight:700; }
+  main { padding-bottom:118px !important; }
+  [data-page] { display:none; }
+  body[data-page="overview"] [data-page="overview"],
+  body[data-page="chat"] [data-page="chat"],
+  body[data-page="settings"] [data-page="settings"],
+  body[data-page="raw"] [data-page="raw"] { display:block; }
   footer { position:fixed; left:0; right:0; bottom:0; background:rgba(11,18,32,.95);
            backdrop-filter:blur(8px); border-top:1px solid var(--line); padding:9px 12px;
            display:flex; gap:8px; max-width:900px; margin:0 auto; }
@@ -114,12 +126,12 @@ const PAGE = (pwd) => `<!doctype html>
 <div id="offbar"></div>
 <div id="errbar"></div>
 <main>
-  <section>
+  <section data-page="overview">
     <h2>额度与用量</h2>
     <div class="grid" id="budget"></div>
   </section>
 
-  <section>
+  <section data-page="overview">
     <h2>开关机</h2>
     <div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <b id="pwstate" style="font-size:15px">…</b>
@@ -131,7 +143,7 @@ const PAGE = (pwd) => `<!doctype html>
     <p class="hint">关机后：不回话、不解析链接、不识别图片（一分钱不花）。改完几秒内生效，不用重启。</p>
   </section>
 
-  <details>
+  <details data-page="settings">
     <summary>⚙️ 参数设置（点开修改）</summary>
     <div id="settings"></div>
     <div class="frow" style="margin-top:10px">
@@ -141,7 +153,7 @@ const PAGE = (pwd) => `<!doctype html>
     <p class="hint">额度/次数上限：保存后立即生效。<b>AI 密钥</b>：保存后需要点一次「重启机器人」才生效。密钥不会回显，只显示前后几位。</p>
   </details>
 
-  <section>
+  <section data-page="settings">
     <h2>🧪 试聊（只给看，不发群）</h2>
     <div class="card">
       <div class="sbrow">
@@ -154,25 +166,32 @@ const PAGE = (pwd) => `<!doctype html>
     </div>
   </section>
 
-  <section>
+  <section data-page="chat">
     <h2>对话</h2>
     <div id="convos"></div>
   </section>
 
-  <details>
+  <details data-page="raw">
     <summary>🔍 原始日志（排查用，平时不用看）</summary>
     <div style="margin-top:8px"><pre id="log">加载中…</pre></div>
   </details>
 </main>
+<nav id="tabs">
+  <a href="?p=" + encodeURIComponent(P) + "&page=overview" data-tab="overview">📊 概览</a>
+  <a href="?p=" + encodeURIComponent(P) + "&page=chat" data-tab="chat">💬 对话</a>
+  <a href="?p=" + encodeURIComponent(P) + "&page=settings" data-tab="settings">⚙️ 设置</a>
+  <a href="?p=" + encodeURIComponent(P) + "&page=raw" data-tab="raw">🔍 日志</a>
+</nav>
 <footer>
   <button onclick="load(true)">刷新</button>
   <button id="autoBtn" onclick="toggleAuto()">自动刷新 5s</button>
   <span class="sp"></span>
-  <button onclick="toggleRaw()">原始日志</button>
+  <span id="fnote" class="hint" style="margin:0"></span>
 </footer>
 <div id="toast"></div>
 <script>
-const P = ${JSON.stringify(pwd)};
+const P = ${JSON.stringify(opts && opts.pwd || "")};
+const CUR = ${JSON.stringify(opts && opts.page || "overview")};
 
 // 🔴 最重要的一段（2026-10-06 加）：**任何脚本错误都要看得见**。
 //    之前踩的坑：页面脚本在"发第一个请求之前"就静默崩了 ⇒ 页面只剩一堆空占位，
@@ -465,6 +484,22 @@ try { load(true); } catch (e) {
   var _e2 = document.getElementById('errbar');
   if (_e2) { _e2.style.display = 'block'; _e2.textContent = '⚠️ 启动失败：' + e.message; }
 }
+// 🔴 分页面（2026-10-06 用户要求「做几个分页面，别全挤在一起」）：
+//    同一份 HTML 里给每个区块打了 data-page，这里按 body[data-page] 显隐 + 高亮标签栏。
+//    ⚠️ 用 CSS 显隐而不是"多套模板" —— 保证**只有一份模板**（避免又踩"两份拷贝"的坑）。
+(function initPages(){
+  document.body.setAttribute("data-page", CUR);
+  var tabs = document.querySelectorAll("#tabs a");
+  for (var i = 0; i < tabs.length; i++) {
+    if (tabs[i].getAttribute("data-tab") === CUR) tabs[i].className = "on";
+  }
+  var note = document.getElementById("fnote");
+  if (note) {
+    note.textContent = CUR === "chat" ? "可用下面的搜索框筛消息"
+      : CUR === "settings" ? "改完点它自己的「保存」"
+      : CUR === "raw" ? "技术日志，排查时才看" : "";
+  }
+})();
 </script>
 </body></html>`;
 

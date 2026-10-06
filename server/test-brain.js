@@ -3239,17 +3239,25 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       try {
         const vm = require('vm');
         const TICK = String.fromCharCode(96);
-        const sm = 'const PAGE = (pwd) => ' + TICK;
+        const sm = 'const PAGE = (opts) => ' + TICK;
         const st = lw.indexOf(sm);
         let i = st + sm.length, en = -1;
         while (i < lw.length) { if (lw[i] === TICK && lw[i + 1] === ';') { en = i; break; } i++; }
         const tpl = lw.slice(st + sm.length, en);
-        const js = /<script>([\s\S]*)<\/script>/.exec(tpl)[1].replace(/\$\{JSON\.stringify\(pwd\)\}/g, '"PW"');
+        const js = /<script>([\s\S]*)<\/script>/.exec(tpl)[1].replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"PW"');
         const els = {};
         const getEl = (id) => els[id] || (els[id] = { id, innerHTML: '', textContent: '', style: {}, className: '', dataset: {} });
         const sb = {
           console, JSON, Date, Math, Number, String, Array, Object, RegExp, Error, isNaN, parseInt, parseFloat,
-          document: { getElementById: getEl, querySelector: () => null, querySelectorAll: () => [], cookie: '', addEventListener: () => {} },
+          document: {
+            getElementById: getEl,
+            querySelector: () => null,
+            querySelectorAll: () => [],
+            cookie: '', addEventListener: () => {},
+            // ⚠️ 2026-10-06：页面加了"分页面"逻辑（initPages 会碰 body）
+            //    ⇒ 沙箱必须补这两样，否则脚本在 vm 里抛错、这条断言会假失败
+            body: { setAttribute: () => {}, getAttribute: () => '' },
+          },
           window: { addEventListener: () => {} },
           setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
           fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }),
