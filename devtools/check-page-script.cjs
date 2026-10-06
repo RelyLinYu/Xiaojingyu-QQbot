@@ -39,3 +39,31 @@ try {
   }
   process.exit(1);
 }
+
+// 🔴🔴 2026-10-06 补：**PAGE 必须真的返回一长串 HTML**。
+//    踩过的大坑：模板字符串**内部**的注释里出现了反引号（我写了一个带反引号的行）
+//    ⇒ 模板被**提前截断** ⇒ 后面变成普通 JS 表达式 ⇒ `PAGE()` 返回 **boolean false**
+//    ⇒ `res.end(false)` ⇒ **HTTP 200 但 0 字节** ⇒ **整页白屏**（用户报「白屏了」）。
+//    ⚠️ 上面那道"脚本能解析"**完全看不出**这种错（文件语法合法、脚本也能解析），
+//      所以必须**真调一次函数、检查它返回的东西** —— 这就是"验交付边界"。
+try {
+  const mod = require(file);
+  const html = mod.PAGE({ pwd: 'x', page: 'overview' });
+  if (typeof html !== 'string' || html.length < 5000) {
+    console.log('❌ PAGE 必须返回长字符串，实际是 ' + typeof html +
+      '（长度 ' + (html && html.length) + '）');
+    console.log('   多半是模板字符串被内部的反引号提前截断了');
+    process.exit(1);
+  }
+  // 顺带验一下几个关键标记还在
+  const need = ['<main>', 'id="tabs"', 'data-page="overview"', 'renderSettings'];
+  const missing = need.filter((k) => !html.includes(k));
+  if (missing.length) {
+    console.log('❌ PAGE 返回的 HTML 缺关键标记：' + missing.join(', '));
+    process.exit(1);
+  }
+  console.log('✅ PAGE 返回 HTML 长度 ' + html.length + ' 字符，关键标记齐全');
+} catch (e) {
+  console.log('❌ PAGE 执行失败：' + e.message);
+  process.exit(1);
+}

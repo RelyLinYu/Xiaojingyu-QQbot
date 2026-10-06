@@ -34,6 +34,18 @@ const SPEC = {
   // 🔴 2026-10-06：`budgetAnchor`（累计已花锚点）**已按用户要求删除** —— 他原话：
   //    「不需要那个锚点，我自己看，删掉」。⇒ "累计已花"只用本地账本（页面显示 `spentYuan`）。
   dailyCalls: { type: 'runtime', key: 'dailyCallLimit', env: 'DAILY_CALL_LIMIT', label: '每天回复调用上限（次）', min: 10, max: 100000 },
+  // 🆕 2026-10-06（用户要的"改人设"）：**人设补充** —— 一小段话，追加到 system 人设**末尾**。
+  //    ⚠️ 走 runtime（settings.json）而不是 env ⇒ **改完即时生效、不用重启**（cfg.persona.systemPrompt 是 getter，每次现算）。
+  //    ⚠️ 但它**在 system 里** ⇒ 一改就会让 prompt 前缀缓存失效一次（命中价 1/50 → 全价）。
+  //       所以：**改一次没关系，别频繁改**（面板提示里也写了）。
+  personaExtra: { type: 'runtime', key: 'personaExtra', label: '人设补充（追加到人设末尾，留空=不改）', text: true, max: 1200 },
+
+  // 2026-10-06 用户要的改人设本体：整段人设覆盖。
+  //   他先说 改人设的功能呢，我做成了只能追加的人设补充；他随即说我原本要的人设修改呢
+  //   ==> 补上这个：整段可改（留空 = 用代码里的默认）。
+  //   优先级：personaText（整段覆盖）> 代码默认 + personaExtra（末尾追加）。
+  //   同样在 system 里 ==> 改一次会让 prompt 前缀缓存失效一次（命中价 1/50 变成全价）。
+  personaText: { type: 'runtime', key: 'personaText', label: '人设（整段可改，留空=用默认）', text: true, max: 4000 },
 };
 
 let cache = null;
@@ -111,10 +123,22 @@ function values() {
   const out = {};
   for (const [k, spec] of Object.entries(SPEC)) {
     if (spec.type !== 'runtime') continue;
+    // 🆕 文本类（如"人设补充"）不在 values() 里给 —— 用 text() 单独取
+    if (spec.text) continue;
     const v = Number(s[spec.key]);
     if (Number.isFinite(v)) out[spec.key] = v;
   }
   return out;
+}
+
+// 🆕 取"文本类"设置（2026-10-06 加"人设补充"时要的）
+//    ⚠️ 不能塞进 values()：那个函数是"数字专用"（`Number(...)` 会把字符串变成 NaN 丢掉）
+function text(specKey, fallback) {
+  const spec = SPEC[specKey];
+  if (!spec || !spec.text) return fallback;
+  const v = load()[spec.key];
+  if (typeof v !== 'string' || !v.trim()) return fallback;
+  return v;
 }
 
 // 单个取（带范围兜底）
@@ -171,12 +195,14 @@ function snapshot() {
       out[k] = { label: spec.label, type: spec.type, value: spec.secret ? mask(raw) : raw, secret: !!spec.secret };
     } else {
       const v = s[spec.key];
-      out[k] = {
-        label: spec.label,
-        type: spec.type,
-        value: Number.isFinite(Number(v)) ? Number(v) : null,
-        min: spec.min, max: spec.max,
-      };
+      out[k] = spec.text
+        ? { label: spec.label, type: spec.type, value: typeof v === 'string' ? v : '', text: true, max: spec.max }
+        : {
+          label: spec.label,
+          type: spec.type,
+          value: Number.isFinite(Number(v)) ? Number(v) : null,
+          min: spec.min, max: spec.max,
+        };
     }
   }
   return out;
@@ -207,6 +233,16 @@ function update(patch) {
       continue;
     }
 
+    // 🆕 文本类（`text: true`）：接受字符串，**不能走下面的 Number() 分支**
+    //    （踩过：`personaExtra` 一开始没标 text ⇒ 被当成数字 ⇒ 报"必须是数字"、根本存不进去）
+    if (spec.text) {
+      const v = String(rawVal == null ? '' : rawVal).trim();
+      if (v.length > (spec.max || 1200)) return { ok: false, why: `${spec.label} 太长（≤${spec.max || 1200} 字）` };
+      next[spec.key] = v;          // 允许空串 = 清掉补充
+      applied.push(k);
+      continue;
+    }
+
     const v = Number(rawVal);
     if (!Number.isFinite(v)) return { ok: false, why: `${spec.label} 必须是数字` };
     if (spec.min != null && v < spec.min) return { ok: false, why: `${spec.label} 不能小于 ${spec.min}` };
@@ -215,6 +251,11 @@ function update(patch) {
     applied.push(k);
   }
 
+  // 🆕 2026-10-06 用户：「人设补充为什么要单独做功能，直接在修改里面的末尾加上不就行了？」
+  //    ⇒ 面板已去掉单独的补充框；这里再兜一层：**存了整段人设，就把旧的补充值清掉**
+  //    （内容已经包含在整段里了；否则 config 的优先级会让补充看着像"没生效"）
+  if (typeof next.personaText === 'string' && next.personaText.trim()) next.personaExtra = '';
+
   if (applied.some((k) => SPEC[k].type === 'runtime')) {
     const r = save(next);
     if (!r.ok) return { ok: false, why: `保存失败：${r.why}` };
@@ -222,4 +263,4 @@ function update(patch) {
   return { ok: true, applied, needRestart };
 }
 
-module.exports = { SPEC, snapshot, update, values, num, mask, load, FILE, ENV_FILE };
+module.exports = { SPEC, snapshot, update, values, num, text, mask, load, FILE, ENV_FILE };

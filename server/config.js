@@ -303,7 +303,9 @@ module.exports = {
     //
     // ⚠️ 别无限加：每组都占 context，加太多会挤掉真实群聊。控制在 15 组以内。
     // 想调教语气？**改这里比改提示词有效得多**。
-    examples: [
+    // 🆕 2026-10-06：面板现在**可以改这套示范**了（存 `data/examples.json`，改完即时生效）。
+    //    ⇒ 这段改名为 `examplesBuiltin`（**代码里的默认**），实际生效的看下面的 getter。
+    examplesBuiltin: [
       // --- 日常 ---
       { u: '你好',              a: '在' },
       { u: '在吗',              a: '在呢' },
@@ -329,10 +331,33 @@ module.exports = {
       { u: '你在干嘛',           a: '潜水。别打扰我' },
     ],
 
+    // ⭐ 实际生效的示范：**优先用面板改过的那份**（`data/examples.json`），没有就用上面的默认。
+    //    放成 getter 是为了让 brain.js 继续读 `cfg.persona.examples`，调用方不用改。
+    //    ⚠️ 示范属于 prompt 前缀的一部分 ⇒ **改一次会让缓存失效一次**（命中价 1/50 → 全价）。
+    get examples() {
+      try {
+        const o = require('./examples').current();
+        if (o && o.length) return o;
+      } catch (e) { /* 读不到就回落默认，绝不让机器人起不来 */ }
+      return this.examplesBuiltin;
+    },
+
     // ⭐ 实际生效的提示词：按 promptStyle 从上面两套里选一个
     //    （放在这里是为了让 brain.js 继续读 `cfg.persona.systemPrompt`，不用改调用方）
     get systemPrompt() {
-      return this.promptStyle === 'full' ? this.promptFull : this.promptLean;
+      const base = this.promptStyle === 'full' ? this.promptFull : this.promptLean;
+      // 🆕 2026-10-06：**人设补充**（面板可改，存在 data/settings.json，改完即时生效）。
+      //    ⚠️ 为什么追加在**末尾**而不是插在中间：prompt cache 是**前缀匹配** ——
+      //       追加在尾部时，前面的 人设+示例 前缀仍然命中；插在中间会把后面全部打掉。
+      //    ⚠️ 但即便如此，**改动这一段本身**仍会让前缀失效一次（命中价 1/50 → 全价）⇒ 别频繁改。
+      // 整段覆盖优先（面板人设框改过就用它；留空则回落默认 + 补充）
+      let whole = '';
+      try { whole = String(require('./settings').text('personaText', '') || '').trim(); } catch { whole = ''; }
+      if (whole) return whole;
+
+      let extra = '';
+      try { extra = String(require('./settings').text('personaExtra', '') || '').trim(); } catch { extra = ''; }
+      return extra ? (base + '\n\n【补充设定】' + extra) : base;
     },
   },
 

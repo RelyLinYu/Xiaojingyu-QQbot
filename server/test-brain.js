@@ -3225,7 +3225,10 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     //    ⇒ 渲染成 `<input … value="6"<button …>保存</button>` —— 元素没闭合，
     //      后面的文字被浏览器当纯文本 ⇒ 看起来就是"按钮是文字、点不动"。
     check('★★ 输入框的标签正确闭合（value="…"> 的 > 不能少）',
-      /value="' \+ esc\(val\) \+ '">'\) \+/.test(lw), '输入框少了收尾 >');
+      // ⚠️ 2026-10-06：设置行多了 textarea 分支（人设补充），写法变了 ⇒ 断言跟着改：
+      //    密码分支必须自带收尾 `>`（那个 `>` 被吃过两次，害得按钮变纯文本）
+      /type="password" placeholder="留空=不改；粘贴新的会覆盖" value="">'/.test(lw),
+      '密码输入框少了收尾 >');
     check('★★ 设置区的「保存」是完整 button 元素且可点（data-save + 事件委托）',
       lw.includes('class="sm" data-save="' + "'" + ' + k + ' + "'" + '">保存</button>')
       && lw.includes('button[data-save]'),
@@ -3235,7 +3238,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     //    ⇒ 渲染成 `<input … value=""<button …>保存</button>` ⇒ 密钥那行的按钮也变纯文本。
     //    ⚠️ 教训：这种"标签少一个字符"的错误，**光看源码字符串看不出来**
     //       ⇒ 所以这里**真去渲染一遍**（在 vm 里跑 renderSettings），检查生成的 HTML。
-    check('★★ 渲染后：5 个 input + 5 个 button 全部标签完整（含密码行）', (() => {
+    check('★★ 渲染后：4 input + 1 textarea + 5 button 全部标签完整', (() => {
       try {
         const vm = require('vm');
         const TICK = String.fromCharCode(96);
@@ -3271,12 +3274,17 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
           budgetDaily: { label: '每天限额（元）', value: 6, type: 'runtime' },
           budgetTotal: { label: '总限额（元）', value: 30, type: 'runtime' },
           dailyCalls: { label: '调用上限（次）', value: 1600, type: 'runtime' },
+          // 🆕 2026-10-06 用户要求：**人设补充不再单独成行**（合并进「人设」框）
+          //    ⇒ 面板变成 4 个 input + **1 个 textarea（人设）** + 5 个保存按钮
+          personaText: { label: '人设（整段可改，留空=用默认）', value: '你是测试鱼。', type: 'runtime', text: true },
         });
         const h = els.settings.innerHTML;
         const nIn = (h.match(/<input[^>]*>/g) || []).length;
         const nBtn = (h.match(/<button[^>]*>[^<]*<\/button>/g) || []).length;
         // 面板现在 4 项（AI 密钥 / 每天限额 / 总限额 / 调用上限）—— 锚点那行已删
-        return nIn === 4 && nBtn === 4 && !/value=""\s*<button/.test(h);
+        // 面板 5 行：AI 密钥 / 每天限额 / 总限额 / 调用上限（4 个 input）+ 人设补充（1 个 textarea）
+        const nTa = (h.match(/<textarea[^>]*>/g) || []).length;
+        return nIn === 4 && nTa === 1 && nBtn === 5 && !/value=""\s*<button/.test(h);
       } catch (e) { return false; }
     })(), '渲染后的标签不完整（有被吞掉的收尾字符）');
 
@@ -3355,6 +3363,61 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /quoteWanted \|\| sendMeta\.queuedBehind/.test(isrc));
     check('  额度吃紧时不再拆段（splitAllowed）',
       /splitAllowed\(\)/.test(isrc) && /额度吃紧：不拆段/.test(isrc));
+  }
+
+  // ===== 第 39 组：语气示范（examples）面板可改（2026-10-06，用户要的「示范显化」）=====
+  {
+    // ⚠️ read() 是别的块里定义的局部变量 ⇒ 这里自己来一个
+    const rd = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    const ex = require('./examples');
+    const cfg = require('./config');
+    const exSrc = rd('examples.js');
+
+    check('★★ 没配过文件时，用的还是代码里的默认 14 组',
+      ex.current() === null && cfg.persona.examples.length === 14);
+
+    // 存一组 → config 立刻用它（这就是"面板改完即生效"的机制）
+    const r1 = ex.save([{ u: '测试问', a: '测试答' }, { u: '帮个忙', a: '不帮', role: '普通群员' }]);
+    check('★ 保存后 config.persona.examples 立刻变成新的一组',
+      r1.ok && cfg.persona.examples.length === 2 && cfg.persona.examples[0].u === '测试问');
+    check('  role 也保留（身份标注要有用）',
+      cfg.persona.examples[1].role === '普通群员');
+
+    check('★ 半截数据（只有"群友说"没有"鱼回"）必须被拒',
+      ex.save([{ u: '只有一半' }]).ok === false);
+    check('★ 超过 30 组必须被拒（防止把真实群聊挤出上下文）',
+      ex.save(new Array(31).fill({ u: 'a', a: 'b' })).ok === false);
+    check('★ 非法 role 会被丢掉（不当成身份标注）',
+      (() => { const r = ex.save([{ u: 'x', a: 'y', role: '随便写的' }]); return r.ok && !cfg.persona.examples[0].role; })());
+
+    // 🔴 副作用闸：测试模式绝不能写真实的 data/examples.json
+    check('★★ 副作用闸：测试模式下**没有真的写文件**',
+      process.env.XLJ_NO_PERSIST === '1' && !require('fs').existsSync(ex.FILE)
+      || process.env.XLJ_NO_PERSIST !== '1');
+
+    ex.reset();
+    check('★ 恢复默认后回到 14 组', ex.current() === null && cfg.persona.examples.length === 14);
+
+    // 接线断言：面板 + 接口都要真接上（逻辑对但没接 = 没做）
+    check('★★ 面板有示范表格的接线（exList / exSave / /api/examples）',
+      /exList/.test(rd('tools/page.js')) && /exSave/.test(rd('tools/page.js'))
+      && /\/api\/examples/.test(rd('tools/page.js')));
+    check('★★ 后端接口存在且会做校验（examples.save）',
+      /\/api\/examples/.test(rd('tools/logweb.js')) && /ex\.save\(/.test(rd('tools/logweb.js')));
+    check('  examples.js 有测试模式保护（不污染线上数据）',
+      /XLJ_NO_PERSIST/.test(exSrc));
+
+    // 🔴 2026-10-06 用户报「没看到示范啊」：GET /api/examples 必须返回**当前生效的那份**
+    //    （没配过文件时要回落到代码里的默认 14 组，否则表格一片空白 = 功能等于没做）
+    check('★★ 示范接口返回"当前生效的那份"（不是空数组）',
+      /persona\.examples/.test(rd('tools/logweb.js')));
+
+    // 🔴 2026-10-06 用户报「出现了一个新群」：真因是**某群友昵称就是一个全角空格**
+    //    ⇒ 按昵称永远匹配不上 ⇒ 掉成孤儿卡。修法是"只看时间的兜底"。
+    check('★★ 有"只看时间"的兜底（治作者名为空导致的孤儿卡）',
+      /lookupByTime/.test(rd('tools/logweb.js')) && /how = 'time2'/.test(rd('tools/logweb.js')));
+    check('  且空白昵称不再被直接丢掉（仍进全局时间轴）',
+      /if \(!w\) continue;/.test(rd('tools/logweb.js')));
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

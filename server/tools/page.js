@@ -93,16 +93,31 @@ const PAGE = (opts) => `<!doctype html>
   .frow { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap; }
   .frow label { width:150px; color:var(--dim); font-size:12px; }
   .frow input { flex:1; min-width:120px; }
+  /* 2026-10-06 用户反馈：人设框「这么小这么多字这么看」+「输入框风格跟 ui 不配」
+     ⇒ 长文本行改成"标签在上、控件铺满"，高度给足，颜色/圆角/边框与其它控件一致 */
+  .frow.tall { display:block; }
+  .frow.tall label { display:block; width:auto; margin-bottom:6px; }
+  .frow.tall textarea { width:100%; box-sizing:border-box; min-height:380px; line-height:1.75; }
+  .frow.tall button { margin-top:8px; }
   .hint { color:var(--dim); font-size:11px; margin:4px 0 0; }
   pre { margin:0; padding:10px; background:#080e1a; border:1px solid var(--line); border-radius:10px;
         overflow:auto; max-height:340px; font-size:11.5px; line-height:1.55; color:#9fb3d1; }
+  /* 🆕 2026-10-06 用户：原始日志既然已经放到单独界面了，那展示框可以加长啊
+     ⇒ 日志页的 pre 去掉 340px 上限（由行内 style 覆盖 + 这里给个高下限） */
+  body[data-page="raw"] pre#log { max-height:none; min-height:65vh; }
+  .toolbar { display:flex; gap:8px; align-items:center; margin:2px 0 12px; }
+  /* 🆕 语气示范表格（2026-10-06） */
+  .exrow { display:grid; grid-template-columns:1fr 1fr 104px 40px; gap:8px; align-items:center; margin:6px 0; }
+  .exrow input, .exrow select { width:100%; box-sizing:border-box; }
+  .exbar { display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  @media (max-width:640px) { .exrow { grid-template-columns:1fr 40px; } .exrow select { grid-column:1; } }
   nav#tabs { position:fixed; left:0; right:0; bottom:0; z-index:30;
     display:flex; background:rgba(11,18,32,.97); backdrop-filter:blur(8px);
     border-top:1px solid var(--line); max-width:900px; margin:0 auto; }
   nav#tabs a { flex:1; text-align:center; padding:9px 4px 10px; text-decoration:none;
     color:var(--dim); font-size:12.5px; }
   nav#tabs a.on { color:#bfdbfe; background:#152039; font-weight:700; }
-  main { padding-bottom:118px !important; }
+  main { padding-bottom:86px !important; }
   /* 🔴 只对 main 里的区块生效 —— **千万别写成通配的 [data-page]{display:none}**：
      body 自身也带 data-page（当前页标记），通配规则会把整个 body 藏掉 ⇒ 整页黑屏（踩过）。 */
   main > [data-page] { display:none; }
@@ -128,6 +143,11 @@ const PAGE = (opts) => `<!doctype html>
 <div id="offbar"></div>
 <div id="errbar"></div>
 <main>
+  <div class="toolbar" data-page="overview">
+    <button onclick="load(true)">刷新</button>
+    <button id="autoBtn" onclick="toggleAuto()">自动刷新 5s</button>
+    <span id="fnote" class="hint" style="margin:0"></span>
+  </div>
   <section data-page="overview">
     <h2>额度与用量</h2>
     <div class="grid" id="budget"></div>
@@ -155,6 +175,24 @@ const PAGE = (opts) => `<!doctype html>
     <p class="hint">额度/次数上限：保存后立即生效。<b>AI 密钥</b>：保存后需要点一次「重启机器人」才生效。密钥不会回显，只显示前后几位。</p>
   </details>
 
+  <!-- 🆕 2026-10-06 用户要的「示范显化 / 可编辑」：
+       鱼的语气主要由这些示范决定（比人设文字影响更大）⇒ 做成面板可改。 -->
+  <section data-page="settings">
+    <h2>🐟 语气示范（教它怎么说话）</h2>
+    <div class="card">
+      <p class="hint">左边是「群友说」，右边是「鱼回」。<b>决定鱼语气的其实就是这些</b>（比人设那段文字影响更大）。</p>
+      <div id="exList"></div>
+      <div class="exbar">
+        <button class="sm" onclick="exAdd()">+ 加一组</button>
+        <button class="sm primary" onclick="exSave()">保存全部</button>
+        <button class="sm" onclick="exReset()">恢复默认</button>
+        <span id="exNote" class="hint" style="margin:0"></span>
+      </div>
+      <p class="hint">⚠️ 保存后会**立刻生效**（不用重启）。但示范属于 prompt 前缀 ⇒ **每改一次，模型缓存失效一次**（贵一点）。
+        建议：改完先去上面「🧪 试聊」试两句，满意就别再来回改。</p>
+    </div>
+  </section>
+
   <section data-page="settings">
     <h2>🧪 试聊（只给看，不发群）</h2>
     <div class="card">
@@ -173,9 +211,11 @@ const PAGE = (opts) => `<!doctype html>
     <div id="convos"></div>
   </section>
 
-  <details data-page="raw">
+  <!-- 🆕 2026-10-06 用户：原始日志既然已经放到单独界面了，那展示框可以加长啊，还有默认就是展开吧
+       ⇒ details 默认 open；pre 去掉 340px 上限、给足高度（样式见 body[data-page=raw] pre#log） -->
+  <details data-page="raw" open>
     <summary>🔍 原始日志（排查用，平时不用看）</summary>
-    <div style="margin-top:8px"><pre id="log">加载中…</pre></div>
+    <div style="margin-top:8px"><pre id="log" style="max-height:none;min-height:65vh">加载中…</pre></div>
   </details>
 </main>
 <nav id="tabs">
@@ -184,12 +224,8 @@ const PAGE = (opts) => `<!doctype html>
   <a href="#" data-tab="settings">⚙️ 设置</a>
   <a href="#" data-tab="raw">🔍 日志</a>
 </nav>
-<footer>
-  <button onclick="load(true)">刷新</button>
-  <button id="autoBtn" onclick="toggleAuto()">自动刷新 5s</button>
-  <span class="sp"></span>
-  <span id="fnote" class="hint" style="margin:0"></span>
-</footer>
+<!-- 🔴 2026-10-06：原来的固定 footer 被底部标签栏压住了（两条 fixed 抢同一条底边）。
+       用户说「这俩按键不能扔到页面里面去吗，卡位置了」⇒ 挪进"概览"页顶部，底部只留标签栏。 -->
 <div id="toast"></div>
 <script>
 const P = ${JSON.stringify(opts && opts.pwd || "")};
@@ -301,26 +337,37 @@ function card(big, small, warn){
 function renderSettings(s){
   const el = document.getElementById('settings');
   if (!s || !Object.keys(s).length) { el.innerHTML = '<p class="hint">没有可改的参数（settings.snapshot() 返回空）</p>'; return; }
-  const order = ['aiApiKey','budgetDaily','budgetTotal','budgetAnchor','dailyCalls'];
+  // 🆕 2026-10-06 用户：人设补充为什么要单独做功能，直接在修改里面的末尾加上不就行了？
+  //    ⇒ 去掉单独的「人设补充」行，只留一个「人设」大框（保存时会顺手清掉旧的补充值）
+  const order = ['aiApiKey','budgetDaily','budgetTotal','dailyCalls','personaText'];
   const rows = order.filter(k => s[k]).map(k => {
     const it = s[k];
     const val = it.value == null ? '' : it.value;
     const id = 'set_' + k;
-    return '<div class="frow"><label for="' + id + '">' + esc(it.label) + '</label>' +
-      '<input id="' + id + '" data-key="' + k + '" ' +
-      (it.secret ? 'type="password" placeholder="留空=不改；粘贴新的会覆盖" value="">' :
-        'type="number" step="0.01" value="' + esc(val) + '">') +
+    const tall = (k === 'personaText') ? ' tall' : '';   // 长文本行：标签在上、控件铺满
+    return '<div class="frow' + tall + '"><label for="' + id + '">' + esc(it.label) + '</label>' +
+      (k === 'personaText'
+        ? '<textarea id="' + id + '" data-key="' + k + '" rows="20" placeholder="留空=用代码里的默认人设">' + esc(val) + '</textarea>'
+        : '<input id="' + id + '" data-key="' + k + '" ' +
+          // ⚠️⚠️ 密码分支的收尾 > **必须留着**（这个收尾符被吃掉过两次，害得「保存」变纯文本）
+          (it.secret ? 'type="password" placeholder="留空=不改；粘贴新的会覆盖" value="">' :
+            'type="number" step="0.01" value="' + esc(val) + '">')) +
       '<button class="sm" data-save="' + k + '">保存</button></div>';
   }).join('');
-  el.innerHTML = rows + (s.aiApiKey ? '<p class="hint">当前密钥：' + esc(s.aiApiKey.value || '（未设置）') + '</p>' : '');
+  el.innerHTML = rows + (s.aiApiKey ? '<p class="hint">当前密钥：' + esc(s.aiApiKey.value || '（未设置）') + '</p>' : '')
+    // 🆕 2026-10-06 用户问：人设不是还有 14 组示例吗？⇒ 说清这个框管到哪、以及示例仍在生效
+    + '<p class="hint">人设 = <b>上面这个大框（system 人设）</b> + <b>14 组示范（examples，写在代码里、<u>仍然生效</u>，这个框改不到它）</b>。'
+    + '清空保存 = 回到默认人设。</p>';
 }
 
 async function saveOne(key){
-  const inp = document.querySelector('#settings input[data-key="' + key + '"]');
+  const inp = document.querySelector('#settings [data-key="' + key + '"]');
   if (!inp) return;
   const v = (inp.value || '').trim();
   const patch = {};
-  if (v) patch[key] = v;
+  // ⚠️ 人设补充（textarea）：**留空 = 清掉补充**（否则存了就永远删不掉）
+  const isText = inp.tagName === 'TEXTAREA';
+  if (v || isText) patch[key] = v;
   if (!Object.keys(patch).length) { toast('这个参数没改（空 = 不改）'); return; }
   const r = await fetch('/api/settings?p=' + encodeURIComponent(P), {
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(patch),
@@ -486,9 +533,103 @@ try { load(true); } catch (e) {
   var _e2 = document.getElementById('errbar');
   if (_e2) { _e2.style.display = 'block'; _e2.textContent = '⚠️ 启动失败：' + e.message; }
 }
+// 🆕 语气示范表格：进页面就把当前生效的那份读出来（没配过则显示"用的是默认"）
+try { exLoad(); } catch (e) { /* 读不到不影响别的 */ }
 // 🔴 分页面（2026-10-06 用户要求「做几个分页面，别全挤在一起」）：
 //    同一份 HTML 里给每个区块打了 data-page，这里按 body[data-page] 显隐 + 高亮标签栏。
 //    ⚠️ 用 CSS 显隐而不是"多套模板" —— 保证**只有一份模板**（避免又踩"两份拷贝"的坑）。
+// ===== 🆕 2026-10-06 语气示范（examples）面板编辑 =====
+// 说明：示范决定鱼的语气；存到 data/examples.json，改完即时生效（但会让模型缓存失效一次）。
+// ⚠️ 本段**不用模板字符串、不用反引号**（模板里的反引号会把整个 PAGE 截断 —— 白屏事故的根因）。
+var EX = [];
+var EX_ROLES = ['', '普通群员', '主人'];
+
+function exRowHtml(it, i) {
+  var opts = EX_ROLES.map(function (r) {
+    var sel = (String(it.role || '') === r) ? ' selected' : '';
+    return '<option value="' + esc(r) + '"' + sel + '>' + (r || '（不标身份）') + '</option>';
+  }).join('');
+  return '<div class="exrow" data-i="' + i + '">' +
+    '<input type="text" data-f="u" value="' + esc(it.u || '') + '" placeholder="群友说…" maxlength="300">' +
+    '<input type="text" data-f="a" value="' + esc(it.a || '') + '" placeholder="鱼回…" maxlength="300">' +
+    '<select data-f="role">' + opts + '</select>' +
+    '<button class="sm danger" onclick="exDel(' + i + ')">删</button>' +
+    '</div>';
+}
+
+function exRender() {
+  var el = document.getElementById('exList');
+  if (!el) return;
+  el.innerHTML = EX.length
+    ? EX.map(exRowHtml).join('')
+    : '<p class="hint">（现在用的是代码里的默认示范；点「恢复默认」也是它）</p>';
+}
+
+// 从 DOM 收集当前表格内容（全空的组自动跳过）
+function exCollect() {
+  var rows = document.querySelectorAll('#exList .exrow');
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var u = (r.querySelector('[data-f=u]').value || '').trim();
+    var a = (r.querySelector('[data-f=a]').value || '').trim();
+    var role = (r.querySelector('[data-f=role]').value || '').trim();
+    if (!u && !a) continue;
+    var o = { u: u, a: a };
+    if (role) o.role = role;
+    out.push(o);
+  }
+  return out;
+}
+
+function exNote(t, warn) {
+  var n = document.getElementById('exNote');
+  if (n) { n.textContent = t || ''; n.style.color = warn ? '#fca5a5' : ''; }
+}
+
+async function exLoad() {
+  try {
+    var r = await fetch('/api/examples?p=' + encodeURIComponent(P));
+    var j = await r.json();
+    EX = (j.status && j.status.items) || [];
+    exRender();
+    exNote(j.status && j.status.fromFile ? '（当前用的是你改过的版本）' : '（当前是代码里的默认）');
+  } catch (e) { exNote('读取失败：' + e.message, true); }
+}
+
+function exAdd() { EX = exCollect(); EX.push({ u: '', a: '' }); exRender(); }
+function exDel(i) { EX = exCollect(); EX.splice(i, 1); exRender(); }
+
+async function exSave() {
+  var items = exCollect();
+  if (!items.length) { exNote('一組都没有 —— 想清空的话请点「恢复默认」', true); return; }
+  exNote('保存中…');
+  try {
+    var r = await fetch('/api/examples?p=' + encodeURIComponent(P), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: items }),
+    });
+    var j = await r.json();
+    if (!j.ok) { exNote(j.why || '保存失败', true); return; }
+    EX = (j.status && j.status.items) || [];
+    exRender();
+    exNote('✅ 已保存 ' + EX.length + ' 组，立刻生效');
+    toast('示范已保存（' + EX.length + ' 组）');
+  } catch (e) { exNote('保存失败：' + e.message, true); }
+}
+
+async function exReset() {
+  if (!confirm('恢复成代码里的默认示范？你改的那些会被删掉。')) return;
+  try {
+    var r = await fetch('/api/examples/reset?p=' + encodeURIComponent(P), { method: 'POST' });
+    var j = await r.json();
+    if (!j.ok) { exNote(j.why || '恢复失败', true); return; }
+    EX = (j.status && j.status.items) || [];
+    exRender();
+    exNote('✅ 已恢复默认');
+  } catch (e) { exNote('恢复失败：' + e.message, true); }
+}
+
 (function initPages(){
   document.body.setAttribute("data-page", CUR);
   var tabs = document.querySelectorAll("#tabs a");
@@ -501,7 +642,7 @@ try { load(true); } catch (e) {
   }
   var note = document.getElementById("fnote");
   if (note) {
-    note.textContent = CUR === "chat" ? "可用下面的搜索框筛消息"
+    note.textContent = CUR === "chat" ? "（对话页稍后会加搜索框）"
       : CUR === "settings" ? "改完点它自己的「保存」"
       : CUR === "raw" ? "技术日志，排查时才看" : "";
   }

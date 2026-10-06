@@ -88,6 +88,39 @@ function powerState() {
   }
 }
 
+// 2026-10-06：面板的人设框要显示当前生效的人设（否则用户面对空框没法改）。
+// 人设真源在 config.js（它 require 了 settings）；这里只做显示用的填充，不改任何存储。
+function fillPersonaForPanel(snapObj) {
+  try {
+    if (!snapObj) return snapObj;
+    // 🆕 2026-10-06（用户：「回复上限改为 3000 保存后修改框里的 3000 没有消失」→ 顺带发现
+    //    "每天限额/总限额"两个框是**空的**，而额度卡片上明明显示 ¥3/¥30 —— 因为
+    //    settings.json 里没存过，`snapshot()` 就给 null → 空框）⇒ **数值框也填"当前生效值"**，
+    //    让用户看到的就是真正在用的数（保存 = 把它固化进 settings.json，无害）。
+    try {
+      const cfgNum = require('../config');
+      const eff = {
+        budgetDaily: cfgNum.budget.dailyLimitYuan,
+        budgetTotal: cfgNum.budget.totalLimitYuan,
+        dailyCalls: cfgNum.policy.dailyCallLimit,
+      };
+      for (const k of Object.keys(eff)) {
+        const v = eff[k];
+        if (snapObj[k] && (snapObj[k].value == null) && Number.isFinite(Number(v))) {
+          snapObj[k].value = Number(v);
+          snapObj[k].fromDefault = true;
+        }
+      }
+    } catch (e) { /* 填不上就算了 */ }
+    if (!snapObj.personaText) return snapObj;
+    const cur = String(snapObj.personaText.value || '');
+    if (cur.trim()) return snapObj;
+    const cfg = require('../config');
+    snapObj.personaText.value = String(cfg.persona.systemPrompt || '');
+    snapObj.personaText.fromDefault = true;
+  } catch (e) { /* 填不上不影响别的 */ }
+  return snapObj;
+}
 function budgetState() {
   try {
     const f = path.join(APP_DIR, 'data', 'budget.json');
@@ -218,13 +251,21 @@ function whoKey(w) {
 function authorTimeMap() {
   const byTime = new Map();     // `${whoKey}@${HH:MM:SS}` -> { scopeId, kind }
   const byAuthor = new Map();
+  const all = [];               // 🆕 全局时间轴（不看作者）：给"作者名是空白"的消息兜底
   for (const e of recentEvents(3000)) {
     if (!e.who || !e.scopeId) continue;
+    const sec0 = toSec(e.time);
+    if (sec0 !== null) all.push({ sec: sec0, scopeId: e.scopeId, kind: e.kind || '' });
     const w = whoKey(e.who);
+    // ⚠️ 2026-10-06：**作者名归一化后可能为空**（实测有群友昵称就是 `'\u3000'` 一个全角空格）
+    //    ⇒ 原来这里 `if (!w) continue` 直接把那条事件丢掉 ⇒ 那条消息永远反查不到群号
+    //      ⇒ 面板上冒出一张"群 N（未命名）·群内码（认不出）"的孤儿卡（用户以为是"新群"）。
+    //    ⇒ 不再丢掉：它照样进全局时间轴，靠"时间最近"归属。
     if (!w) continue;
     if (e.time) byTime.set(`${w}@${e.time}`, { scopeId: e.scopeId, kind: e.kind || '' });
     byAuthor.set(w, e.scopeId);      // 后来者覆盖 = 最近优先（仅作兜底）
   }
+  all.sort((a, b) => a.sec - b.sec);
   // 每个作者的时间键：排序 + 带秒数，供"容差查找"用
   const sorted = new Map();
   for (const [key, info] of byTime) {
@@ -261,6 +302,26 @@ function authorTimeMap() {
         if (gap <= TIME_TOLERANCE_SEC && gap < bestGap) { bestGap = gap; best = arr[i]; }
       }
       return best;      // { sec, scopeId, kind } 或 null
+    },
+    /**
+     * 🆕 2026-10-06：**只看时间、不看作者**的兜底查找。
+     * 用途：作者名是空白（昵称就是空格）的消息，按昵称怎么都匹配不上 ⇒ 用"时间最近的那条事件"
+     * 归属。⚠️ 它是**兜底**，只在按作者查不到时才用（忙群里可能撞到别的群，但总比变成孤儿卡好）。
+     */
+    lookupByTime(time) {
+      const sec = toSec(time);
+      if (sec === null || !all.length) return null;
+      let lo = 0; let hi = all.length - 1; let pos = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (all[mid].sec <= sec) { pos = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      let best = null; let bestGap = 1e9;
+      for (let i = Math.max(0, pos - 3); i < Math.min(all.length, pos + 4); i++) {
+        const gap = Math.abs(all[i].sec - sec);
+        if (gap <= TIME_TOLERANCE_SEC && gap < bestGap) { bestGap = gap; best = all[i]; }
+      }
+      return best;
     },
   };
 }
@@ -355,6 +416,13 @@ function buildConvos(journalText, opts = {}) {
       let found = hit ? hit.scopeId : '';
       if (found) how = 'time';
       if (hit && hit.kind) c.kind = hit.kind;
+      // ①' 🆕 2026-10-06：**只看时间的兜底**（作者名是空白时，按昵称永远匹配不上）。
+      //     实测：某群友昵称就是 `'\u3000'`（一个全角空格）⇒ 归一化后为空 ⇒ 反查不到群号
+      //     ⇒ 那条消息掉成"群 N（未命名）"孤儿卡（用户以为是"出现了一个新群"）。
+      if (!found) {
+        const h2 = map.lookupByTime(c.time);
+        if (h2) { found = h2.scopeId; how = 'time2'; if (h2.kind) c.kind = h2.kind; }
+      }
       // ② 退回：只按作者（同一人跨群时会不准）
       if (!found) { found = map.byAuthor.get(whoKey(c.who)) || ''; if (found) how = 'author'; }
       // ③ 🆕 吸附：一个群号都没查到，但这个人**在某个已知群里说过话** ⇒ 归到那个群
@@ -579,7 +647,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       log, service, budget, power, events, convos,
-      settings: settings.snapshot(),          // 🆕 可改参数（密钥只给掩码）
+      settings: fillPersonaForPanel(settings.snapshot()),   // 🆕 可改参数（密钥只给掩码；人设框填上当前生效的人设）
       scopeIds: recentScopeIds(),             // 🆕 猜群号用
       build: BUILD,                           // 🆕 版本戳（页头显示，用来确认"是不是新页面"）
     }));
@@ -636,6 +704,47 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ ok: false, why: e.message }));
     }
+    return;
+  }
+
+  // 🆕 2026-10-06 用户要的「示范显化 / 可编辑」：语气示范（examples）面板可改。
+  //    读：GET /api/examples → { items, fromFile, max }
+  //    存：POST /api/examples { items:[{u,a,role?}] } → 写 data/examples.json（校验 + 备份 + 原子写）
+  //    恢复默认：POST /api/examples/reset → 删掉那个文件（回落 config.js 里的默认 14 组）
+  //    ⚠️ 示范属于 prompt 前缀 ⇒ **改一次缓存失效一次**；页面上有提示。
+  if (url.pathname === '/api/examples') {
+    const ex = require('../examples');
+    if (req.method === 'GET') {
+      // 🔴 2026-10-06 修（用户：「没看到示范啊」）：**返回"当前生效的那份"**。
+      //    原来没配文件时返回空数组 ⇒ 面板表格一片空白，用户看不到那 14 组，
+      //    而"把示范显出来给他改"正是这个功能的全部意义。
+      //    ⇒ 没配文件就返回代码里的默认（`cfg.persona.examples` 已经做了这个回落）。
+      let items = [];
+      try { items = require('../config').persona.examples || []; } catch (e) { items = []; }
+      const st = ex.status();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, status: Object.assign({}, st, { items: items }) }));
+      return;
+    }
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      let items = null;
+      try { items = JSON.parse(body || '{}').items; } catch { items = null; }
+      const r = ex.save(items);
+      // 返回的 items 也给"当前生效的那份"（保存后就是刚存进去的）
+      let eff = [];
+      try { eff = require('../config').persona.examples || []; } catch (e) { eff = []; }
+      res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(Object.assign({ ok: r.ok }, r,
+        { status: Object.assign({}, ex.status(), { items: eff }) })));
+      return;
+    }
+  }
+  if (url.pathname === '/api/examples/reset' && req.method === 'POST') {
+    const ex = require('../examples');
+    const r = ex.reset();
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(Object.assign({ ok: r.ok }, r, { status: ex.status() })));
     return;
   }
 
