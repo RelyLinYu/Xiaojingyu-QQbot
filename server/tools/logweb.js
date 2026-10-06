@@ -695,7 +695,7 @@ function renderSettings(s){
     return '<div class="frow"><label for="' + id + '">' + esc(it.label) + '</label>' +
       '<input id="' + id + '" data-key="' + k + '" ' +
       (it.secret ? 'type="password" placeholder="留空=不改；粘贴新的会覆盖" value=""' :
-        'type="number" step="0.01" value="' + esc(val) + '"') +
+        'type="number" step="0.01" value="' + esc(val) + '">') +
       '<button class="sm" onclick="saveOne(' + "'" + k + "'" + ')">保存</button></div>';
   }).join('');
   el.innerHTML = rows + (s.aiApiKey ? '<p class="hint">当前密钥：' + esc(s.aiApiKey.value || '（未设置）') + '</p>' : '');

@@ -265,7 +265,7 @@ git rev-parse HEAD ; git rev-parse origin/main       # 两个值相等才算推�
 node server/test-brain.js
 ```
 
-**676 项自测**，覆盖：
+**687 项自测**，覆盖：
 
 | 组 | 内容 |
 |---|---|
