@@ -103,11 +103,13 @@ const PAGE = (opts) => `<!doctype html>
     color:var(--dim); font-size:12.5px; }
   nav#tabs a.on { color:#bfdbfe; background:#152039; font-weight:700; }
   main { padding-bottom:118px !important; }
-  [data-page] { display:none; }
-  body[data-page="overview"] [data-page="overview"],
-  body[data-page="chat"] [data-page="chat"],
-  body[data-page="settings"] [data-page="settings"],
-  body[data-page="raw"] [data-page="raw"] { display:block; }
+  /* 🔴 只对 main 里的区块生效 —— **千万别写成通配的 [data-page]{display:none}**：
+     body 自身也带 data-page（当前页标记），通配规则会把整个 body 藏掉 ⇒ 整页黑屏（踩过）。 */
+  main > [data-page] { display:none; }
+  body[data-page="overview"] main > [data-page="overview"],
+  body[data-page="chat"] main > [data-page="chat"],
+  body[data-page="settings"] main > [data-page="settings"],
+  body[data-page="raw"] main > [data-page="raw"] { display:block; }
   footer { position:fixed; left:0; right:0; bottom:0; background:rgba(11,18,32,.95);
            backdrop-filter:blur(8px); border-top:1px solid var(--line); padding:9px 12px;
            display:flex; gap:8px; max-width:900px; margin:0 auto; }
@@ -177,10 +179,10 @@ const PAGE = (opts) => `<!doctype html>
   </details>
 </main>
 <nav id="tabs">
-  <a href="?p=" + encodeURIComponent(P) + "&page=overview" data-tab="overview">📊 概览</a>
-  <a href="?p=" + encodeURIComponent(P) + "&page=chat" data-tab="chat">💬 对话</a>
-  <a href="?p=" + encodeURIComponent(P) + "&page=settings" data-tab="settings">⚙️ 设置</a>
-  <a href="?p=" + encodeURIComponent(P) + "&page=raw" data-tab="raw">🔍 日志</a>
+  <a href="#" data-tab="overview">📊 概览</a>
+  <a href="#" data-tab="chat">💬 对话</a>
+  <a href="#" data-tab="settings">⚙️ 设置</a>
+  <a href="#" data-tab="raw">🔍 日志</a>
 </nav>
 <footer>
   <button onclick="load(true)">刷新</button>
@@ -491,7 +493,11 @@ try { load(true); } catch (e) {
   document.body.setAttribute("data-page", CUR);
   var tabs = document.querySelectorAll("#tabs a");
   for (var i = 0; i < tabs.length; i++) {
-    if (tabs[i].getAttribute("data-tab") === CUR) tabs[i].className = "on";
+    var t = tabs[i];
+    // 🔴 每个标签的链接要在**运行时**拼（密码要 encodeURIComponent 一次）
+    //    之前写成字面文本 '?p=" + encodeURIComponent(P) + "' ⇒ 点不动、还被当非法页码
+    t.setAttribute("href", "?p=" + encodeURIComponent(P) + "&page=" + t.getAttribute("data-tab"));
+    if (t.getAttribute("data-tab") === CUR) t.className = "on";
   }
   var note = document.getElementById("fnote");
   if (note) {
