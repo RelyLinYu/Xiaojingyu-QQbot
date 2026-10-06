@@ -23,6 +23,7 @@ const CACHE_HIT_RATIO = 0.02;
 const fs = require('fs');
 const path = require('path');
 const cfg = require('./config');
+const settings = require('./settings');   // 🆕 面板可改的参数（即时生效的那些）
 
 const STATE_DIR = path.join(__dirname, 'data');
 const STATE_FILE = path.join(STATE_DIR, 'budget.json');
@@ -93,6 +94,10 @@ function save() {
     const out = Object.assign({}, state, {
       dailyLimit: cfg.budget.dailyLimitYuan,
       totalLimit: cfg.budget.totalLimitYuan,
+      // 🆕 顺手把"官方口径"也写进文件 —— 日志网页是**独立进程**，
+      //    读不到本模块的内存，只能靠这个文件显示"累计已花（官方）"。
+      // ⚠️ 这里会覆盖 `state.official`（老版本存过）⇒ 文件里不会留过期字段。
+      official: balanceInfo(),
       savedAt: new Date().toISOString(),
     });
     fs.writeFileSync(STATE_FILE, JSON.stringify(out, null, 2));
@@ -156,6 +161,100 @@ function mostExpensivePrice() {
   return all.reduce((a, b) => (b[0] + b[1] > a[0] + a[1] ? b : a));
 }
 
+// ---------- 🆕 官方余额（2026-10-05 新增，用户的提议）----------
+//
+// 「话说额度不能直接同步官方的吗」—— 能，而且**比本地推算准**。
+// DeepSeek 有 `GET /user/balance`：返回 is_available + balance_infos[]
+// （currency / total_balance / granted_balance / topped_up_balance）。
+//
+// 🔴 为什么本地账本**不能**被它取代：
+//   · 官方只给"账户还剩多少"，**没有"今天花了多少"** —— 而 ¥3/天 那道闸只能本地算；
+//   · 官方**不给"本次请求花了多少"** —— 单次成本只能本地按 token × 单价算。
+// ⇒ 所以正确分工是：**本地管"日"，官方管"总额"**（`totalLimitYuan` 降级成兜底）。
+//
+// 🔴 为什么要这道闸（实测数据）：官方余额 ¥3.94，而本地账本推算"还剩 ¥5.42" ——
+//    差 ¥1.5，因为**事件日志 09-22 才开始**、更早的花费没进账本。
+//    ⇒ "推算余额"永远有误差，**只有问官方才是真的**。
+//
+// ⚠️ 三条安全设计（都踩过同类坑）：
+//   ① **只读、永不写**：本地账本是"花了多少"，官方余额是"还剩多少"，绝不混改；
+//   ② **查不到就不拦**（fail-open）：网络抖一下不能把机器人弄哑 —— 还有本地那道兜底；
+//   ③ **缓存 10 分钟**：不能每来一条消息就发一次 HTTP（那会把回话拖慢）。
+const BALANCE_TTL = 10 * 60 * 1000;
+let balCache = { at: 0, total: null, granted: null, currency: '', available: null, err: '' };
+
+function isBalanceCheckOn() {
+  return cfg.budget.officialBalance !== false;
+}
+
+async function fetchOfficialBalance(force = false) {
+  if (!isBalanceCheckOn()) return null;
+  const now = Date.now();
+  if (!force && balCache.total !== null && now - balCache.at < BALANCE_TTL) return balCache;
+  try {
+    const key = process.env.AI_API_KEY || '';
+    const base = String(process.env.AI_BASE_URL || 'https://api.deepseek.com').replace(/\/+$/, '');
+    if (!key) throw new Error('没有 AI_API_KEY');
+    const r = await fetch(`${base}/user/balance`, {
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    const info = (j.balance_infos || []).find((b) => b.currency === 'CNY') || (j.balance_infos || [])[0] || {};
+    balCache = {
+      at: now,
+      total: Number(info.total_balance),
+      granted: Number(info.granted_balance),
+      currency: info.currency || 'CNY',
+      available: j.is_available !== false,
+      err: '',
+    };
+    // ⚠️ 用户 2026-10-05 明确说「日志不需要加官方余额」⇒ **这里不再往日志里打余额**。
+    //    查询本身保留（"总额"那道闸要用它、网页要显示"累计已花"的官方口径）。
+    // 🔴 但**必须落盘**：日志网页是独立进程，只能从 budget.json 读到它。
+    //    （踩过：只 console.log 没 save，结果网页上一直显示"查不到"。）
+    save();
+    return balCache;
+  } catch (e) {
+    // 查不到就记下来，但**不拦**（还有本地兜底）
+    balCache = { ...balCache, err: e.message, available: null };
+    return null;
+  }
+}
+
+function balanceInfo() {
+  const total = balCache.total;
+  // 🆕 「累计已花」的**官方口径** = 锚点 − 当前余额（用户要的是这个同步）
+  const anchor = Number(cfg.budget.balanceAnchorYuan) || 0;
+  const spent = (total !== null && anchor > 0) ? Number((anchor - total).toFixed(4)) : null;
+  return {
+    ok: total !== null,
+    total,
+    spent,                                   // 🆕 官方口径的累计已花（没配锚点就是 null）
+    anchor: anchor || null,
+    granted: balCache.granted,
+    currency: balCache.currency,
+    available: balCache.available,
+    at: balCache.at ? new Date(balCache.at).toISOString() : null,
+    ageMs: balCache.at ? Date.now() - balCache.at : null,
+    err: balCache.err || '',
+    threshold: Number(cfg.budget.officialWarnYuan) || 1,
+  };
+}
+
+// 给自测用：不联网，直接喂一个"官方余额"进来
+function setBalanceForTest(total, opts = {}) {
+  balCache = {
+    at: Date.now(),
+    total: total === null ? null : Number(total),
+    granted: 0,
+    currency: 'CNY',
+    available: opts.available !== false,
+    err: opts.err || '',
+  };
+}
+
 // ---------- 调用前：能不能花？ ----------
 // 返回 { ok, reason }。reason 是给群里看的理由（会直接发出去）。
 function canSpend() {
@@ -170,6 +269,20 @@ function canSpend() {
     return {
       ok: false,
       reason: `没钱了。这个月的话费（¥${tl}）我已经花完了，累计 ¥${state.spentYuan.toFixed(2)}`,
+    };
+  }
+
+  // 🆕 再判"官方余额" —— 这是真闸（比本地推算准）。
+  //    ⚠️ 查不到（网络抖/没配 key）就**跳过这道**，别把机器人弄哑。
+  const bal = balanceInfo();
+  const warnAt = Number(cfg.budget.officialWarnYuan) || 1;
+  if (bal.ok && bal.available === false) {
+    return { ok: false, reason: '官方余额显示账户不可用了（可能欠费或被限制），先别花了' };
+  }
+  if (bal.ok && warnAt > 0 && bal.total < warnAt) {
+    return {
+      ok: false,
+      reason: `官方账户只剩 ¥${bal.total.toFixed(2)} 了，先充点再说吧`,
     };
   }
   if (dl > 0 && state.daySpent >= dl) {
@@ -276,8 +389,9 @@ function record(model, usage) {
 //    不带上的话它显示的是 ¥? —— 手机上最想看的恰恰是"还剩多少"。
 function status() {
   rollover();
-  const dl = cfg.budget.dailyLimitYuan;
-  const tl = cfg.budget.totalLimitYuan;
+  // 🆕 面板改过的值优先（即时生效）
+  const dl = settings.num('budgetDaily', cfg.budget.dailyLimitYuan);
+  const tl = settings.num('budgetTotal', cfg.budget.totalLimitYuan);
   return {
     day: state.day,
     daySpent: Number(state.daySpent.toFixed(6)),
@@ -288,7 +402,8 @@ function status() {
     totalLeft: tl > 0 ? Number(Math.max(0, tl - state.spentYuan).toFixed(6)) : null,
     calls: state.calls,          // 终身累计（⚠️ 别拿去显示"今日"）
     dayCalls: state.dayCalls || 0,   // 🆕 今日（跨天清零）
-    dailyCallLimit: cfg.policy.dailyCallLimit,   // 🆕 让调用方能显示"今日 N / 1600"
+    dailyCallLimit: settings.num('dailyCalls', cfg.policy.dailyCallLimit),   // 🆕 面板可改
+    official: balanceInfo(),     // 🆕 官方账户余额（"还剩多少钱"的真值）
     blocked: state.blocked,
     byModel: state.byModel,
   };
@@ -296,8 +411,9 @@ function status() {
 
 // 供日志网页调用（它跑在另一个进程里，读不到本模块的内存状态）
 function persistedStatus() {
-  const dl = cfg.budget.dailyLimitYuan;
-  const tl = cfg.budget.totalLimitYuan;
+  // 🆕 面板改过的值优先（即时生效）
+  const dl = settings.num('budgetDaily', cfg.budget.dailyLimitYuan);
+  const tl = settings.num('budgetTotal', cfg.budget.totalLimitYuan);
   const daySpent = Number(state.daySpent || 0);
   const spentYuan = Number(state.spentYuan || 0);
   return {
@@ -310,7 +426,8 @@ function persistedStatus() {
     totalLeft: tl > 0 ? Math.max(0, tl - spentYuan) : null,
     calls: state.calls || 0,          // 终身累计
     dayCalls: state.dayCalls || 0,    // 🆕 今日（跨天清零）
-    dailyCallLimit: cfg.policy.dailyCallLimit,   // 🆕 供日志网页显示"今日 N / 上限"
+    dailyCallLimit: settings.num('dailyCalls', cfg.policy.dailyCallLimit),   // 🆕 供日志网页显示"今日 N / 上限"
+    official: balanceInfo(),          // 🆕 官方余额（日志网页显示"官方还剩多少"）
     blocked: state.blocked || 0,
     byModel: state.byModel || {},
   };
@@ -323,9 +440,18 @@ function markBlocked() {
 
 load();
 
+// 🆕 定时问一次官方余额（10 分钟一轮；只读、失败不拦）。
+//    ⚠️ unref() 让这个定时器**不阻止进程退出**（和项目里其他定时器一个做法）。
+if (isBalanceCheckOn()) {
+  fetchOfficialBalance();
+  setInterval(() => { fetchOfficialBalance(); }, BALANCE_TTL).unref();
+}
+
 module.exports = {
   canSpend, shouldAnnounceStop, record, status, persistedStatus, priceOf, isFreeModel, markBlocked,
+  fetchOfficialBalance, balanceInfo,   // 🆕 官方余额（给日志网页 / 运维脚本用）
   // 🆕 只给自测用：把"今天"改成指定日期，用来验证"跨天到底清了哪些字段"。
   //    ⚠️ 生产代码不要调它。NO_PERSIST 模式下它也不会写任何文件。
   setDayForTest: (d) => { state.day = String(d); },
+  setBalanceForTest,
 };

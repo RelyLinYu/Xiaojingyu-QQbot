@@ -2023,9 +2023,10 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       return !!(j.stopAnnounced && j.stopAnnounced[S1] === j.day);
     })());
 
-    // 🔴 上限改了：默认 20（用户 2026-10-01 要求）
-    check('★★ 总计上限默认是 20（用户要求「把总线额调到20」）',
-      cfg.budget.totalLimitYuan === 20, String(cfg.budget.totalLimitYuan));
+    // 🔴 上限改过两次：10 → 20（2026-10-01 用户要求）→ **30**（2026-10-05 用户要求）。
+    //    ⚠️ 现在这个数字**只是兜底**：真正的"总额"闸看**官方余额**（见第 33 组）。
+    check('★★ 总计上限默认是 30（2026-10-05 用户要求；官方余额才是真闸）',
+      cfg.budget.totalLimitYuan === 30, String(cfg.budget.totalLimitYuan));
     check('  今日上限仍是 3（没被顺带改掉）',
       cfg.budget.dailyLimitYuan === 3, String(cfg.budget.dailyLimitYuan));
 
@@ -2198,7 +2199,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
   {
     // 🔴 真实事故 + 一次做错的修正（两轮，都要记）：
     //
-    //   ① 事故（用户：「看日志，有人频繁@导致刷屏回复」）：群友「狗狗」30 秒内 @ 6 次、
+    //   ① 事故（用户：「看日志，有人频繁@导致刷屏回复」）：群友「某群友」30 秒内 @ 6 次、
     //      **每次都是同一张图**，机器人**每次都回**（自己都在数"第三遍…第六遍"），
     //      24 小时触发 138 次回复（占全部 40%）。
     //      根因：`bypass = at || owner` —— @ 把两道闸**全绕过了**。
@@ -2726,13 +2727,504 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★ budget.js 的启动横幅显示"今日 N/上限 次调用（终身累计 M 次）"',
       /今日 \$\{state\.dayCalls\}\/\$\{cfg\.policy\.dailyCallLimit\} 次调用（终身累计 \$\{state\.calls\} 次）/.test(bsrc));
     check('★ `[ai]` 日志行用的是账本口径 dayCalls（不是本文件的 callCount）',
-      /今日第 \$\{st\.dayCalls\}\/\$\{cfg\.policy\.dailyCallLimit\} 次/.test(isrc));
-    check('★ 日志网页卡片改成 dayCalls / 上限（原来显示终身累计却标"今日"）',
-      /b\.dayCalls\|\|0\) \+ ' \/ ' \+ \(b\.dailyCallLimit/.test(lsrc));
+      /今日第 \$\{st\.dayCalls\}\/\$\{st\.dailyCallLimit\} 次/.test(isrc));
+    check('★ 日志网页卡片用 dayCalls 显示"今日调用"（不再显示终身累计）',
+      /\(b\.dayCalls\|\|0\)/.test(lsrc) && !/b\.calls\|\|0\) \+ '<\/b><span>今日/.test(lsrc));
     check('  日志网页纯文本端点也标清"今日 … （终身累计 …）"',
       /调用次数 : 今日 \$\{b\?\.dayCalls/.test(lsrc));
     check('  ⚠️ 别把 `calls` 当成"今日"再显示回去（守住这次的修复）',
       !/今日调用次数<\/span>/.test(lsrc) || !/b\.calls\|\|0\) \+ '<\/b><span>今日/.test(lsrc));
+  }
+
+  console.log('\n=== 32. ⭐ 情绪观察器（只观察不注入 · 单字词默认不用 · 自带误报回归）===');
+  {
+    // 来源：朋友那套 AstrBot 情感插件的「情绪解析」层，重写为观察器（server/emotion.js）。
+    // 🔴 这一组要锁死三件事，少一件它就会退化成"让鱼胡说八道"：
+    //    ① **误报回归**：他那版实测把「我想喝牛奶」读成骄傲、「今天真爽约了」读成快乐、
+    //       「麻烦你了」读成愤怒、「积累经验」读成压力 —— 这几条必须**读不出情绪**
+    //    ② **真话还得读得出**（别为了消误报把功能阉了）
+    //    ③ **绝无副作用**：不发消息、不落盘、不 push 上下文
+    const emo = require('./emotion');
+    const esrc = require('fs').readFileSync(require('path').join(__dirname, 'emotion.js'), 'utf8');
+
+    // ① 词表载入（数据在 server/data/emotion-lexicon.json）
+    const lex = emo._lexicon();
+    const nEmo = Object.keys(lex.emotions).length;
+    const nWord = Object.values(lex.emotions).reduce((a, w) => a + w.length, 0);
+    check('★ 词表载入成功（26 类 / 240 个多字词）', nEmo === 26 && nWord === 240, `${nEmo} 类 / ${nWord} 词`);
+    check('  └ 严重词表也在（崩溃/绝望/气炸…）', Object.keys(lex.severe || {}).length === 17,
+      Object.keys(lex.severe || {}).length);
+
+    // ② 误报回归 —— 这几条是朋友那版的实测误报，我们现在必须读不出
+    const noFalsePositive = [
+      ['我想喝牛奶', '牛→骄傲'],
+      ['今天真爽约了', '爽→快乐'],
+      ['麻烦你了', '烦→愤怒'],
+      ['这个旧手机', '旧→怀旧'],
+      ['积累经验', '累→压力'],
+      ['暖手宝', '暖→欣慰'],
+    ];
+    for (const [text, why] of noFalsePositive) {
+      const r = emo.parseText(text);
+      check(`★★ 误报回归：「${text}」读不出情绪（${why}）`, !r || r.hits === 0,
+        r && r.hits ? r.label : '');
+    }
+
+    // ③ 真话还得读得出
+    const real = [
+      ['我今天好开心', '快乐'],
+      ['被同事冤枉了，好委屈', '委屈'],
+      ['我真的好绝望', '悲伤'],
+    ];
+    for (const [text, want] of real) {
+      const r = emo.parseText(text);
+      check(`★ 「${text}」→ 读成「${want}」`, !!r && r.primary === want, r ? r.label : '(空)');
+    }
+
+    // ④ 单字词确实被默认跳过；开了开关它就会回来（证明"跳过"是我们主动做的）
+    check('★ 默认跳过单字词（「好烦」读不出愤怒）',
+      (emo.parseText('好烦') || { hits: 0 }).hits === 0, JSON.stringify(emo.parseText('好烦')));
+    const single = emo.parseText('好烦', { allowSingleChar: true });
+    check('  └ 显式打开 allowSingleChar 后，「烦」就会命中（开关有效）',
+      !!single && single.hits > 0, single ? single.label : '(空)');
+
+    // ⑤ 强度分档与"多情绪并列"
+    const lv = (t) => (emo.parseText(t) || {}).level;
+    check('★ 程度词会把强度抬档（「有点难过」< 「超级难过」）',
+      lv('有点难过') <= lv('超级难过'), `${lv('有点难过')} vs ${lv('超级难过')}`);
+    const multi = emo.parseText('又难过又生气，还有点害怕');
+    check('★ 一句话读出多种情绪（不是只取一个）',
+      !!multi && Object.keys(multi.emotions).length >= 2, multi ? JSON.stringify(multi.emotions) : '');
+
+    check('★★ 同一个词在同一条消息里**只算一次**（防分数虚高）',
+      (() => {
+        const r = emo.parseText('喜欢 然后 又说了一遍 喜欢');
+        const w = r.hitWords['爱'] || [];
+        // "喜欢"出现两次，但只该计一次；也不能在结果里出现两遍
+        return w.length === 1 && w[0] === '喜欢';
+      })(), JSON.stringify(emo.parseText('喜欢 然后 又说了一遍 喜欢')));
+
+    // ⑥ 边界：空文本 / 纯符号 / 超长文本都不扔异常、不误判
+    check('  空文本 / 纯符号 → 不判情绪、不抛异常',
+      emo.parseText('') === null && (emo.parseText('  ') || { hits: 0 }).hits === 0
+      && (emo.parseText('。。。！！！') || { hits: 0 }).hits === 0);
+    check('  超长文本不炸（取 5000 字也能跑完）',
+      (() => { try { emo.parseText('难过'.repeat(2500)); return true; } catch { return false; } })());
+
+    // ⑦ observe()：去重 + 抽样为 0 时完全不动作
+    emo._resetSeen();
+    const o1 = emo.observe({ msgId: 'EMO_TEST_1', openid: 'OP', text: '今天好难过', isAt: false, rate: 1 });
+    const o2 = emo.observe({ msgId: 'EMO_TEST_1', openid: 'OP', text: '今天好难过', isAt: false, rate: 1 });
+    check('★ 同一条消息只观察一次（防日志重复污染统计）', !!o1 && o2 === null);
+    check('  └ rate=0 时完全不动作', emo.observe({ msgId: 'EMO_TEST_2', text: '好难过', rate: 0 }) === null);
+    check('  没有 msgId 也不炸（只是不做去重）',
+      !!emo.observe({ openid: 'OP', text: '很难过' }));
+
+    // ⑧ 🔴 副作用闸：这个模块**只能打日志**，不许发消息 / 落盘 / 动上下文
+    check('★★ emotion.js 里没有发消息、没有写文件、没有碰上下文',
+      !/sendGroupMessage|sendPrivateMessage|qqapi/.test(esrc)
+      && !/writeFileSync|appendFileSync|mkdirSync/.test(esrc)
+      && !/pushContext|contexts/.test(esrc));
+    check('★ 默认配置：观察器开着但**只观察**（没有"注入"这类字段）',
+      cfg.policy.emotionObserve.enabled === true
+      && cfg.policy.emotionObserve.allowSingleChar === false
+      && !('inject' in cfg.policy.emotionObserve));
+  }
+
+  console.log('\n=== 33. ⭐ 官方余额（"没钱了"的真闸）+ 额度 20→30 ===');
+  {
+    // 🆕 2026-10-05 用户提议「额度不能直接同步官方的吗」—— 能，见 budget.js。
+    //    DeepSeek: GET /user/balance → is_available + balance_infos[]
+    //    （currency / total_balance / granted_balance / topped_up_balance）
+    // 🔴 分工：**本地管"日"，官方管"总额"** —— 官方没有"今天花了多少"，
+    //    所以 ¥3/天 那道闸只能本地算。
+    // ⚠️ 三条安全设计里最重要的一条：**查不到就不拦**（fail-open）——
+    //    网络抖一下不能把机器人弄哑（还有本地那道兜底）。
+    const budget = require('./budget');
+    const bsrc = require('fs').readFileSync(require('path').join(__dirname, 'budget.js'), 'utf8');
+
+    check('★ 额度默认值 20 → 30（本地口径；官方余额才是真闸）',
+      cfg.budget.totalLimitYuan === 30, String(cfg.budget.totalLimitYuan));
+
+    // ① 查不到（没缓存过）→ 不拦，照常能花（fail-open）
+    budget.setBalanceForTest(null);
+    const r0 = budget.canSpend();
+    check('★★ 官方余额**查不到时不拦**（fail-open，不把机器人弄哑）',
+      r0.ok === true, JSON.stringify(r0));
+    check('  └ 官方查询挂在 canSpend 里（不是另开一条路）',
+      String(budget.canSpend).includes('今天的话费花完了'));
+    check('  └ 阈值取 officialWarnYuan',
+      String(budget.balanceInfo).includes('officialWarnYuan'));
+
+    // ② 有余额且充足 → 放行
+    budget.setBalanceForTest(12.5);
+    const r1 = budget.canSpend();
+    check('★ 官方余额充足（¥12.5）→ 放行', r1.ok === true, JSON.stringify(r1));
+
+    // ③ 官方余额见底 → 拦住，且理由里带上真实余额
+    budget.setBalanceForTest(0.4);
+    const r2 = budget.canSpend();
+    check('★★ 官方余额见底（¥0.4 < 阈值 ¥1）→ 拦住',
+      r2.ok === false && /0\.40/.test(r2.reason), JSON.stringify(r2));
+
+    // ④ 官方标记 is_available=false → 也要拦（欠费/被限）
+    budget.setBalanceForTest(5, { available: false });
+    const r3 = budget.canSpend();
+    check('★ 官方标记"账户不可用"→ 拦住', r3.ok === false, JSON.stringify(r3));
+
+    // ⑤ 恢复 + 边界：正好等于余额阈值时放行（判据是 `<`，不是 `<=`）
+    budget.setBalanceForTest(1);
+    check('  边界：余额正好等于阈值 ¥1 → 放行（判据用 <）', budget.canSpend().ok === true);
+
+    // ⑥ 绝不误拦：查询失败后余额变成 null，下一轮应放行
+    budget.setBalanceForTest(null, { err: 'HTTP 500' });
+    check('★ 查询失败（err）→ 记录错误但**不拦**',
+      budget.canSpend().ok === true && budget.balanceInfo().ok === false);
+
+    // ⑦ 关掉开关就不查（用户可用 BUDGET_BALANCE=0 退回纯本地口径）
+    check('  有"关掉官方查询"的开关（BUDGET_BALANCE=0）',
+      /officialBalance/.test(bsrc) && /BUDGET_BALANCE/.test(
+        require('fs').readFileSync(require('path').join(__dirname, 'config.js'), 'utf8')));
+    check('  官方查询是**只读**的：从来不写本地账本',
+      !/fetchOfficialBalance[\s\S]{0,600}?save\(\)/.test(bsrc));
+
+    budget.setBalanceForTest(12.5);   // 收尾：留一个正常值，别影响后面的用例
+
+    // ⑧ 对外可见性：日志网页是**另一个进程**，只能靠文件 ——
+    //    所以"官方口径"必须出现在落盘对象和 /api 的返回里，否则手机上还是看不到。
+    const ps = budget.persistedStatus();
+    check('★ 官方口径进了**落盘对象**（日志网页跨进程只能靠文件）',
+      !!ps.official && typeof ps.official === 'object' && 'total' in ps.official,
+      JSON.stringify(ps.official));
+    const lsrc = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
+    // ⚠️ 注意：页面在 2026-10-05 重做过一次，卡片现在由前端 renderBudget() 生成
+    //    ⇒ 断言要看**现在这段代码**，不能盯着旧模板（我改 UI 时这几条一起红了）。
+    check('★ 网页用官方口径显示**累计已花**（用户要的是这个同步）',
+      /official\.spent != null\) \? b\.official\.spent : b\.spentYuan/.test(lsrc));
+    // ⚠️ 断言锚定"输出上下文"，不是扫整个源文件 —— 否则注释里一提那四个字就报红
+    //    （我为此连踩两次，见 lesson"不许出现X的断言别扫全文件"）。
+    check('★★ 累计已花**不带来源标注**（用户要求删掉那个尾巴）',
+      !/累计已花（官方）|累计已花（本地估）/.test(lsrc), '页面上还带着来源标注');
+    check('★★ 但**上限必须留着**（我一开始把上限一起删了，被用户抓出来）',
+      /累计已花 \/ 上限 ' \+ yuan\(b\.totalLimit\)/.test(lsrc), '累计已花那张卡丢了上限');
+    check('★★ 但**不展示官方余额**（用户明确说「日志不需要加官方余额」）',
+      !/official\.ok \? '¥'/.test(lsrc) && !/官方余额（充值到账即变）/.test(lsrc),
+      '页面里还在渲染余额数字');
+    // ⑨ 版式统一：每张卡 = 一个大数字 + 一句说明，数字里不夹 "/ 上限"
+    check('★★ 卡片版式统一：**数字里不夹 "/ 上限"**（用户指出第 3 张跟前面不一样）',
+      /function card\(big, small, warn\)/.test(lsrc)
+      && !/card\(\(b\.dayCalls\|\|0\) \+ ' \/ '/.test(lsrc) && !/' \/ ' \+ \(b\.dailyCallLimit/.test(lsrc));
+    check('  └ 调用次数卡也用同一个 card() 函数（不再手写两值）',
+      /card\(\(b\.dayCalls\|\|0\), '今日调用 \/ 上限 '/.test(lsrc));
+    // 🔴 补一条：**三类数字都要带"上限"**（今日已花 / 今日调用 / 累计已花）——
+    //    我删来源标注时把累计已花的上限一起删了，用户立刻抓到。
+    check('★★ 三类数字**都带"上限"**（今日已花 / 今日调用 / 累计已花）',
+      /今日已花 \/ 上限 ' \+ yuan\(b\.dailyLimit\)/.test(lsrc)
+      && /累计已花 \/ 上限 ' \+ yuan\(b\.totalLimit\)/.test(lsrc)
+      && /今日调用 \/ 上限 ' \+ \(b\.dailyCallLimit/.test(lsrc), '有卡片丢了上限');
+  }
+
+  console.log('\n=== 34. ⭐ 纯寒暄（早安/晚安）→ 零成本固定应答 ===');
+  {
+    // 🔴 真实案例（用户报的）：群里有人发「早安肥鱼」，鱼回了
+    //    「早啊，今天又来找我聊天？」—— 对方只是打个招呼、根本没有下文，
+    //    那句话等于**给不存在的对话起了个标题**。
+    //    根因：「肥鱼」命中关键词 → shouldReply() 固定给 9 分、完全不判断 → 直接生成。
+    // ⇒ 判据（故意做窄，判不准走原流程）：剥掉名字后**只剩寒暄词** + ≤6 字 +
+    //    无疑问/请求 + **必须点名**。
+    const brain = require('./brain');
+    const mk = (content) => ({ content, mentions: [], author: { username: '群友' } });
+    const g = (text, isAt = false) => brain.isPureGreeting(mk(text), { isAt });
+
+    // ① 该认的：点名 + 纯寒暄
+    for (const [text, want] of [['早安肥鱼', 'hello'], ['晚安肥鱼', 'bye'], ['拜拜肥鱼', 'bye'],
+      ['早啊蓝色大肥鱼', 'hello'], ['小蓝鲸早', 'hello']]) {
+      const r = g(text);
+      check(`★ 「${text}」→ 认成纯寒暄（${want}）`, r.greeting && r.kind === want, JSON.stringify(r));
+    }
+    check('  被 @ 但没有名字也能认（「<@bot> 早安」）', g('<@BOT> 早安', true).greeting === true);
+    check('  ⚠️ 关键：认的是**关键词表里的名字**（肥鱼），不是只认人设全名',
+      g('早安肥鱼').greeting === true);
+
+    // ② 绝不能误判的（这些吞掉就坏了）
+    for (const text of ['早安肥鱼，今天天气怎么样', '早安，帮我看看这个报错',
+      '大肥鱼你话怎么这么多', '早', '肥鱼', '晚安']) {
+      check(`★★ 「${text}」→ **不算**纯寒暄（该走正常流程）`, g(text).greeting === false,
+        JSON.stringify(g(text)));
+    }
+    check('  没点名、只是提了名字的寒暄也不算（「早」单发不理）', g('早').greeting === false);
+    check('  空消息 / 缺字段不抛异常', g('').greeting === false && brain.isPureGreeting(null).greeting === false);
+
+    // ③ 配置与接线
+    check('★ 配置存在且有 hello/bye 两套应答',
+      cfg.policy.greetingReply.enabled === true
+      && Array.isArray(cfg.policy.greetingReply.hello)
+      && Array.isArray(cfg.policy.greetingReply.bye));
+    const isrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    check('★★ 命中后**直接发固定应答并 return**（不调模型、不追问）',
+      /纯寒暄（\$\{g\.word\}）→ 回固定应答，不调模型/.test(isrc)
+      && /isPureGreeting\(d, \{ isAt: !!l0\.isAt \}\)/.test(isrc));
+    check('  └ 这段在 L1 判断之**前**（否则模型照样被调用 = 白花一次钱）',
+      isrc.indexOf('纯寒暄') < isrc.indexOf('brain.shouldReply'));
+  }
+
+  console.log('\n=== 35. ⭐ 「刚刚处理过的链接」→ 让鱼答得对（答偏修复）===');
+  {
+    // 🔴 真实案例：群友发了 B站 15 小时半的视频 → 卡片正常发了、视频按规矩跳过；
+    //    45 秒后他问「给我解析刚刚发的链接」，鱼答：
+    //    「链接点开就是个 b23.tv 的跳转，**我这边又看不到视频画面，解析不了**。」
+    //    —— **答偏了**：它不知道自己刚发过卡片、也不知道视频为什么没发。
+    // ⇒ 修法：发卡片 / 跳过视频时各记一笔，生成回复时把这几句事实塞进 prompt。
+    const lp = require('./linkparse');
+    const S = 'group:LINKNOTE_TEST';
+    lp._recentReset();
+
+    // ① 没记录时不产生任何东西（零影响）
+    check('★ 没处理过链接时，contextNote 是空串（对普通对话零影响）',
+      lp.contextNote(S) === '');
+
+    // ② 发了卡片 → 生成的事实里要带平台名和标题
+    lp.noteCard(S, { platform: 'bilibili', title: '【看封面 全四部】4K超清未删减完整版', duration: '15:29:29' }, 'card');
+    const note = lp.contextNote(S);
+    check('★ 发过卡片 → 事实里带平台名与标题',
+      note.includes('B站') && note.includes('看封面'), note.slice(0, 80));
+    check('  └ 带时长（模型才知道"15 个半小时"有多长）', note.includes('15:29:29'), '');
+    check('  └ 明确交代"卡片已经发过了、别再说解析不了"',
+      note.includes('已经发过') && note.includes('解析不了'), '');
+
+    // ③ 视频被跳过 → 原因要写进去（这才是"答得对"的关键）
+    lp.noteVideoSkip(S, '时长 929 分钟，超过上限 10 分钟，搬不动');
+    const note2 = lp.contextNote(S);
+    check('★★ 视频被跳过 → 事实里写明原因（不是笼统的"没发"）',
+      note2.includes('没有发') && note2.includes('929 分钟'), note2.slice(0, 120));
+
+    // ④ 换一个群互不影响（按群隔离）
+    check('★ 按群隔离：别的群读不到这个群的记录', lp.contextNote('group:OTHER_TEST') === '');
+
+    // ⑤ 接线：generateReply 真的把这段话拼进了 user（不联网，读源码断言）
+    const bsrc = require('fs').readFileSync(require('path').join(__dirname, 'brain.js'), 'utf8');
+    check('★★ brain.generateReply 会把 linkNote 拼进 prompt',
+      /const linkPart = linkNote \? /.test(bsrc) && bsrc.includes('【刚刚发生的】'));
+    const isrc2 = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    check('★★ index.js 三处接线都在：发卡片记账 / 跳过视频记账 / 生成时带上',
+      isrc2.includes("require('./linkparse')") && isrc2.includes('contextNote(scope)')
+      && isrc2.includes('noteVideoSkip(scope') && isrc2.includes("linkparse.noteCard(scope, lastCardInfo"));
+    check('  └ 视频跳过时也带 scope（否则记到了空 key 上，等于没记）',
+      isrc2.includes('sendVideo(d, vtarget.info, openid, scope)'));
+
+    // ⑥ 边界：缺字段不炸
+    check('  缺字段 / null 都不抛异常',
+      (() => { try { lp.noteCard(S, null); lp.noteVideoSkip(S, null); lp.contextNote(''); return true; } catch { return false; } })());
+
+    lp._recentReset();
+  }
+
+  console.log('\n=== 36. ⭐ 记忆（全群共享便签本 · 隐私护栏 · 上限淘汰）===');
+  {
+    // 方案见仓库外《记忆功能方案-2026-10-05.md》。三个要点：
+    //   ① 作用域 = 全群共享（**没有"私密记忆"这个概念**）
+    //   ② 第一版只做"显式记"，不做自动抽事实
+    //   ③ 🔴 **敏感内容一律拒收** —— 全群共享 + 存私密 = 把私密挂在群里
+    const mem = require('./memory');
+    mem._reset();
+
+    // ① 指令识别（要窄：陈述句不能误判成"要记东西"）
+    check('★ 「记住我在天津」→ 认成 add', mem.parseCommand('记住我在天津')?.action === 'add');
+    check('  「记一下 群活动每周五」→ 认成 add', mem.parseCommand('记一下 群活动每周五')?.action === 'add');
+    check('  「忘掉天津」→ 认成 del', mem.parseCommand('忘掉天津')?.action === 'del');
+    check('  「你都记得什么」→ 认成 list', mem.parseCommand('你都记得什么')?.action === 'list');
+    check('★★ 陈述句不能误判：「我记住了」/「记住这个干嘛」不算指令',
+      mem.parseCommand('我记住了') === null && mem.parseCommand('记住这个干嘛') === null,
+      JSON.stringify([mem.parseCommand('我记住了'), mem.parseCommand('记住这个干嘛')]));
+
+    // ② 🔴 隐私护栏：12 类探针**必须全拒**
+    const privacyProbes = [
+      '我的手机号是 13812345678',
+      '我邮箱 abc@example.com',
+      '微信号：wxid_abc12345',
+      '我的身份证 110101199001011234',
+      '密码是 qwerty123',
+      '验证码 8899',
+      '我住在 3 号楼 502',
+      '我宿舍楼 12-305',
+      '我最近确诊了癌症',
+      '这事别告诉别人',
+      '我支付宝余额 8000',
+      '银行卡 6222021234567890123',
+    ];
+    let rejected = 0;
+    for (const p of privacyProbes) {
+      const r = mem.add(p, 'OPENID');
+      if (!r.ok && r.why === 'privacy') rejected += 1;
+    }
+    check(`★★ 敏感内容 ${privacyProbes.length} 条探针**全部拒收**（宁可没记住，不可错收）`,
+      rejected === privacyProbes.length, `拒了 ${rejected}/${privacyProbes.length}`);
+
+    // ③ 正常内容能记住 + 召回
+    mem._reset();
+    check('★ 普通事实记得住', mem.add('主人不吃香菜', 'OPENID').ok === true);
+    check('  重复记同一条不产生第二条（更新即可）',
+      mem.add('主人不吃香菜', 'OPENID').ok === true && mem._all().length === 1);
+    mem.add('群里每周五晚上开黑', 'OPENID');
+    const hit = mem.recall('香菜');
+    check('★★ 相关查询召回得到', hit.length >= 1 && hit[0].text.includes('香菜'), JSON.stringify(hit));
+    const miss = mem.recall('今天天气怎么样');
+    check('★ 不相关的查询召不回（阈值起作用）', miss.length === 0, JSON.stringify(miss));
+    check('  召回是**纯函数**：算完不改计数（调用方显式 markHit）',
+      mem.stats().recalled === 0, JSON.stringify(mem.stats()));
+    mem.markHit(hit.map((x) => x.id));
+    check('  markHit 之后 recalled 计数 +1', mem.stats().recalled === 1);
+
+    // ④ 预算裁剪：条数与字数封顶
+    mem._reset();
+    for (let i = 0; i < 10; i++) mem.add(`测试记忆条目编号${i}关于同一个话题`, 'O');
+    const many = mem.recall('测试记忆条目');
+    check('★★ 召回条数封顶（默认最多 3 条）', many.length <= 3, String(many.length));
+    const chars = many.reduce((a, x) => a + x.text.length, 0);
+    check('  召回字数封顶（默认 120 字）', chars <= 120, String(chars));
+
+    // ⑤ render 纯函数
+    check('★ render 拼出带标题的清单', mem.render([{ text: '甲' }, { text: '乙' }])
+      .startsWith('【群里记得的事】') && mem.render([]) === '');
+
+    // ⑥ 删
+    mem._reset();
+    mem.add('主人不吃香菜', 'O');
+    mem.add('群里周五开黑', 'O');
+    const del = mem.remove('香菜');
+    check('★ 「忘掉 X」删掉含关键词的条目', del.ok === true && del.removed === 1 && mem._all().length === 1);
+    check('  删不存在的东西不会乱删', mem.remove('不存在的东西').removed === 0);
+
+    // ⑦ 上限淘汰：**先打日志再丢**，绝不静默
+    mem._reset();
+    cfg.policy.memory.maxItems = 5;
+    for (let i = 0; i < 8; i++) mem.add(`第${i}条记忆`, 'O');
+    check('★ 超过条数上限会淘汰（留 5 条）', mem._all().length === 5, String(mem._all().length));
+    check('  淘汰是"最少用到的最先走"（都等于 0 时留最新的）',
+      mem._all().includes('第7条记忆') && !mem._all().includes('第0条记忆'), JSON.stringify(mem._all()));
+    cfg.policy.memory.maxItems = 200;
+
+    // ⑧ 副作用闸 + 回滚开关
+    const msrc = require('fs').readFileSync(require('path').join(__dirname, 'memory.js'), 'utf8');
+    check('★★ memory.js **不发消息、不碰上下文、不联网**',
+      !/sendGroupMessage|sendPrivateMessage|qqapi|pushContext|contexts|fetch\(/.test(msrc));
+    check('★★ 有回滚开关（`memory.enabled = false` 立刻回到没有记忆）',
+      cfg.policy.memory.enabled === true && /function on\(\)/.test(msrc));
+    mem._reset();
+  }
+
+  console.log('\n=== 37. ⭐ 面板：对话卡片解析 + 可改参数（白名单/密钥掩码）===');
+  {
+    // 用户需求原话：「日志显示不清晰……很多纯英文乱码，那个对我来说没有用……
+    //   建议是日志显示提问者+决策+回答，不同群/私聊放不同卡片，卡片首行是群名和群号」
+    const convo = require('./tools/convo');
+    const settings = require('./settings');
+
+    // ① 解析：把一条"群消息 → 决策 → 回答"拼成一张卡
+    const journal = [
+      '2026-10-05T18:07:35+08:00 host node[1]: [群] GROUP_MESSAGE_CREATE | 小明: 早安肥鱼',
+      '2026-10-05T18:07:35+08:00 host node[1]:   ├ message_type=0 mentions=[]',
+      '2026-10-05T18:07:36+08:00 host node[1]:   ├ 纯寒暄（早安）→ 回固定应答，不调模型',
+      '2026-10-05T18:07:36+08:00 host node[1]: [send:group] ✓ 早',
+      '2026-10-05T18:07:40+08:00 host node[1]: [群] GROUP_MESSAGE_CREATE | 小红: 帮我看个报错',
+      '2026-10-05T18:07:41+08:00 host node[1]: [ai] deepseek-flash in=1200 out=30 缓存0%',
+      '2026-10-05T18:07:41+08:00 host node[1]:   └ 不回（连续发言已达上限(2)）',
+    ].join('\n');
+    const cs = convo.parseConversations(journal, { max: 10 });
+    check('★ 解析出 2 张对话卡（最新的在前）', cs.length === 2, String(cs.length));
+    check('★ 卡片里有"提问者 + 他说的话"', cs[0].who === '小红' && cs[0].text === '帮我看个报错',
+      JSON.stringify(cs[0]));
+    check('★★ 决策行被保留且**人话化**（"不回（…）"）',
+      /不回/.test(cs[0].decision || ''), JSON.stringify(cs[0].decision));
+    check('★ 回复被归到对应那张卡上（"早"）', cs[1].replies[0] === '早', JSON.stringify(cs[1].replies));
+    check('★★ 英文/内部噪音**不出现**在卡片里（message_type= / [ai] in=out=）',
+      !JSON.stringify(cs).includes('message_type') && !JSON.stringify(cs).includes('in=1200'),
+      JSON.stringify(cs[0]));
+    check('  私聊能被识别成 private', convo.parseConversations(
+      '2026-10-05T18:08:00+08:00 host node[1]: [私聊] C2C_MESSAGE_CREATE | 小王: 在吗', { max: 5 })[0].kind === 'private');
+    check('  空输入不炸', convo.parseConversations('', { max: 5 }).length === 0);
+
+    // ② 可改参数：白名单 + 密钥掩码
+    const snap = settings.snapshot();
+    check('★ 面板能拿到可改项（含密钥、额度、次数）',
+      !!snap.aiApiKey && !!snap.budgetDaily && !!snap.budgetTotal && !!snap.dailyCalls,
+      JSON.stringify(Object.keys(snap)));
+    check('★★ **密钥绝不回显**：只给掩码（含 …）', (() => {
+      const v = snap.aiApiKey.value || '';
+      return v === '' || (v.includes('…') && v.length <= 14);
+    })(), JSON.stringify(snap.aiApiKey && snap.aiApiKey.value));
+    check('★★ **白名单**：不在登记表里的键一律拒改',
+      settings.update({ 乱来的键: 1 }).ok === false);
+    check('★ 数值有区间闸（把每天限额设成 0 应被拒）',
+      settings.update({ budgetDaily: 0 }).ok === false);
+    check('  区间内的值能存下来（写入 data/settings.json）',
+      (() => {
+        const before = settings.values().budgetDailyYuan;
+        const r = settings.update({ budgetDaily: 3.5 });
+        const after = settings.values().budgetDailyYuan;
+        settings.update({ budgetDaily: Number.isFinite(before) ? before : 3 });   // 还原
+        return r.ok && after === 3.5;
+      })());
+    check('★★ 密钥写入前会**备份 .env**（源码里有 .bak- 逻辑）',
+      /\.bak-\$\{Date\.now\(\)\}/.test(require('fs').readFileSync(
+        require('path').join(__dirname, 'settings.js'), 'utf8')));
+  }
+
+  console.log('\n=== 38. ⭐ 同群发送排队（两个人同时问 → 8 条交叉刷出来）===');
+  {
+    // 🔴 用户原话：「两个人连续提问，然后两个回答都是 4 条消息，
+    //    那会一次性回复 8 条消息，没有艾特也没有引用」（已确认：**同一个群**）
+    // 根因：gateway 是 Promise.resolve().then(onEvent) —— 事件之间不排队；
+    //      分段发送里每个 await sleep() 都是交叉点。
+    const q = require('./sendqueue');
+    const isrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    const gsrc = require('fs').readFileSync(require('path').join(__dirname, 'gateway.js'), 'utf8');
+
+    // ① 先坐实根因还在（不是"我以为会并发"）
+    check('★ 根因确认：gateway 的事件回调**没有排队**（所以并发是可能的）',
+      /\.then\(\(\) => onEvent\(p\.t, p\.d\)\)/.test(gsrc) && !/await onEvent/.test(gsrc));
+
+    // ② 同群两串必须完整串行（异步真跑一遍）
+    const order = [];
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const mA = {}; const mB = {};
+    const pa = q.enqueue('test:g1', mA, async () => {
+      for (let i = 1; i <= 4; i++) { order.push('A' + i); await sleep(8); }
+      return 4;
+    });
+    await sleep(3);
+    const pb = q.enqueue('test:g1', mB, async () => {
+      for (let i = 1; i <= 4; i++) { order.push('B' + i); await sleep(8); }
+      return 4;
+    });
+    const [ra, rb] = await Promise.all([pa, pb]);
+    check('★★ 同一个群里两串 4 条**完整不交叉**（用户报的 8 条乱序）',
+      order.join('') === 'A1A2A3A4B1B2B3B4', order.join(' '));
+    check('★★ 排队不影响返回值（曾把返回值吃掉 ⇒ 发送失败会被当成已回复）',
+      ra === 4 && rb === 4, `${ra}/${rb}`);
+    check('★★ 排在后面的那串会被标记 queuedBehind（据此加引用，解决"没引用分不清回谁"）',
+      !mA.queuedBehind && mB.queuedBehind === true);
+    check('  不同群之间不互相排队（不能因为 A 群忙而拖慢 B 群）', (() => {
+      const mC = {};
+      q.enqueue('test:g2', mC, async () => 1);
+      return mC.queuedBehind === false;
+    })());
+    check('  前一个任务抛错不会卡死队列', await (async () => {
+      q.enqueue('test:g3', {}, async () => { throw new Error('模拟失败'); });
+      const r = await q.enqueue('test:g3', {}, async () => 7);
+      return r === 7;
+    })());
+    check('  跑完队列会自己清空（不残留内存）',
+      (() => { const s = q.stats(); return !s.scopes.includes('test:g1'); })());
+    q.reset();
+
+    // ③ 接线断言（逻辑对了但没接上等于没做）
+    check('★★ index.js 的发送段落**真的走了队列**',
+      /await sendqueue\.enqueue\(scope, sendMeta/.test(isrc));
+    check('★ 排队的那串会带引用（quoteWanted || queuedBehind）',
+      /quoteWanted \|\| sendMeta\.queuedBehind/.test(isrc));
+    check('  额度吃紧时不再拆段（splitAllowed）',
+      /splitAllowed\(\)/.test(isrc) && /额度吃紧：不拆段/.test(isrc));
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

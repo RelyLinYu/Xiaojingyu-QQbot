@@ -130,6 +130,82 @@ function markCarded(scope, keys) {
   for (const k of list) if (k) cardedAt.set(`${scope}|${k}`, now);
 }
 
+// ---------- 🆕 刚刚处理过的链接（2026-10-05）----------
+//
+// 🔴 真实案例：群友发了一条 B站 15 小时半的视频链接 → 我们**正常发了卡片**、
+//    并按规矩**跳过了视频**（时长超上限）。45 秒后他问「给我解析刚刚发的链接」，
+//    鱼答：「链接点开就是个 b23.tv 的跳转，**我这边又看不到视频画面，解析不了**。」
+//    —— **答偏了**：它不知道自己刚发过卡片、也不知道视频为什么没发。
+//
+// ⇒ 这里记一笔"本群刚刚处理过什么"，生成回复时告诉模型一句，
+//    让它能答「15 个半小时的片，我可搬不动」这种**对的话**。
+//
+// ⚠️ 按群隔离（别的群跟这事无关）、带 TTL（聊过去了就别再提）、
+//    只记**结构化事实**（平台/标题/跳过原因），不记消息原文。
+const recentAt = new Map();     // scope -> { ts, cards: [...], videoSkip: '...' }
+
+function recentTtl() {
+  return cfg.policy.linkParse?.recentTtlMs ?? 5 * 60 * 1000;
+}
+
+// 记一张"刚发出去的卡片"。kind: 'video' 表示视频也发成功过
+function noteCard(scope, info, kind) {
+  try {
+    const now = Date.now();
+    const cur = recentAt.get(scope) || { ts: now, cards: [], videoSkip: '' };
+    cur.ts = now;
+    cur.cards.push({
+      platform: String(info?.platform || ''),
+      title: String(info?.title || '').slice(0, 30),
+      duration: String(info?.duration || ''),
+      kind: kind || 'card',
+    });
+    if (cur.cards.length > 3) cur.cards = cur.cards.slice(-3);
+    recentAt.set(scope, cur);
+  } catch { /* 记不上就算了，绝不能影响发卡片 */ }
+}
+
+// 记一笔"视频被跳过了"（原因写具体，模型才知道怎么答）
+function noteVideoSkip(scope, reason) {
+  try {
+    const now = Date.now();
+    const cur = recentAt.get(scope) || { ts: now, cards: [], videoSkip: '' };
+    cur.ts = now;
+    cur.videoSkip = String(reason || '跳过');
+    recentAt.set(scope, cur);
+  } catch { /* 同上 */ }
+}
+
+// 给模型看的那句话；没东西可说就返回 ''（**纯函数**，自测直接调它）
+function contextNote(scope) {
+  const cur = recentAt.get(scope);
+  if (!cur) return '';
+  if (Date.now() - cur.ts > recentTtl()) { recentAt.delete(scope); return ''; }
+
+  const parts = [];
+  const last = cur.cards[cur.cards.length - 1];
+  if (last) {
+    const name = { bilibili: 'B站', kuaishou: '快手', douyin: '抖音', github: 'GitHub' }[last.platform] || last.platform;
+    const extra = last.duration ? `（时长 ${last.duration}）` : '';
+    parts.push(`本群刚刚已经因为一条${name}链接发过卡片：「${last.title}」${extra}`);
+  }
+  if (cur.videoSkip && cur.videoSkip !== 'ok') {
+    parts.push(`视频**没有发**：${cur.videoSkip}`);
+  } else if (last && last.kind === 'video') {
+    parts.push('视频也一起发过了');
+  }
+  if (!parts.length) return '';
+  return parts.join('；') + '。如果现在被问到"解析/发一下那个链接"，说明**卡片已经发过了**，别再说"我解析不了"；'
+    + '视频没发的话，就把原因如实说一句（语气照常）。';
+}
+
+// 定期清理
+setInterval(() => {
+  const now = Date.now();
+  const ttl = recentTtl() * 4;
+  for (const [k, v] of recentAt) if (now - (v.ts || 0) > ttl) recentAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
 // 定期清理，防内存涨
 setInterval(() => {
   const now = Date.now();
@@ -1153,6 +1229,11 @@ module.exports = {
   infoKey,
   wasCarded,
   markCarded,
+  // 🆕 刚刚处理过的链接：发卡片时记一笔，生成回复时问一句
+  noteCard,
+  noteVideoSkip,
+  contextNote,
+  _recentReset: () => recentAt.clear(),
   // 给自测用
   _fmtDuration: fmtDuration,
   _fmtNum: fmtNum,

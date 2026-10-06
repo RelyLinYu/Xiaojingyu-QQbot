@@ -68,7 +68,31 @@ function save() {
 
 load();
 
-function isOn() { return on; }
+// ---------- 🆕 从磁盘同步（2026-10-05 新增）----------
+//
+// 为什么需要：**开关机现在有两个入口** ——
+//   ① 群里 @它说「关机」（这个进程自己写文件）
+//   ② 网页面板上的"一键开关机"按钮（**另一个进程** logweb 写文件）
+// 而本模块的状态是启动时读一次的 ⇒ 网页改完，机器人这边**不会知道**。
+//
+// ⇒ 靠 `fs.statSync().mtimeMs` 变化触发重读：没变就只做一次 stat（很便宜），
+//   变了才真去读文件。**同时覆盖"两个进程互相改"和"群主手动改文件"两种情况**。
+//
+// ⚠️ 注意不能反过来用 fs.watchFile 的轮询回调去改内存 —— 那样测试里会留定时器；
+//    这里选择"读时同步"，语义最简单：**每次问它状态，它先跟磁盘对一下**。
+let lastMtime = 0;
+function syncFromDisk() {
+  try {
+    const st = fs.statSync(STATE_FILE);
+    if (st.mtimeMs === lastMtime) return;
+    lastMtime = st.mtimeMs;
+    load();
+  } catch {
+    // 文件还不存在（第一次开机）→ 按开机处理，什么都不用做
+  }
+}
+
+function isOn() { syncFromDisk(); return on; }
 
 // 返回 true 表示"状态确实变了"（调用方据此决定说什么）
 function setOn(v, who) {
@@ -84,6 +108,7 @@ function setOn(v, who) {
 }
 
 function status() {
+  syncFromDisk();          // 🆕 网页/群里改过都要能被看到
   return {
     on,
     since,

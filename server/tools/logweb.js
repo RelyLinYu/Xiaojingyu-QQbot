@@ -27,6 +27,8 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const ogcache = require('./ogcache');
+const convo = require('./convo');        // 🆕 把原始日志翻译成人看得懂的对话卡片
+const settings = require('../settings'); // 🆕 面板可改的参数（白名单 + 密钥掩码）
 
 const PORT = Number(process.env.PORT) || 8080;
 const PASSWORD = process.env.LOG_PASSWORD || '';
@@ -112,20 +114,52 @@ function budgetState() {
       calls: Number(j.calls) || 0,            // 终身累计
       dayCalls: Number(j.dayCalls) || 0,      // 🆕 今日（跨天清零）—— 页面显示的是它
       dailyCallLimit: Number(j.dailyCallLimit) || 1600,   // 🆕 上限，用来显示"今日 N / 上限"
+      // 🆕 2026-10-05：官方口径（余额 + 由锚点反推的"累计已花"）。
+      //    ⚠️ 它是**主进程定时查回来、顺手写进 budget.json** 的（budget.js 的 save()），
+      //    这个页面是独立进程，读不到主进程的内存，只能靠文件。
+      //    ⚠️ 用户明确说过「**日志不需要加官方余额**」⇒ 页面上**不展示余额**，
+      //      只用它的 `spent`（= 锚点 − 当前账户余额）来显示"累计已花"的官方口径。
+      official: j.official || null,
       blocked: Number(j.blocked) || 0,
       byModel: j.byModel || {},
     };
   } catch { return null; }
 }
 
+// 🆕 事件读取加缓存 + 放大窗口 + **跨天读两个文件**（2026-10-05）
+//    🔴 三个原因，缺一个都会让"群号反查"大面积失准（实测 `guess=weak` 刷屏）：
+//      ① 一次页面刷新里 `recentEvents` 会被调用多次（建作者表、建群号顺序表…）⇒ 重复读整个文件；
+//      ② 原来只取最后 3000 条，而日志面板一次显示几百行、可能跨几千条事件 ⇒ 更早的反查不到；
+//      ③ **服务是跨夜跑的**：日志面板显示的是**昨天 18:xx** 的对话，而"最后那个 events 文件"
+//         已经是**今天 01:xx** 的了 ⇒ 只读最后一个文件，等于**把面板要显示的那批事件全漏掉**。
+let _evCache = { at: 0, rows: null };
 function recentEvents(n) {
+  const now = Date.now();
+  if (_evCache.rows && now - _evCache.at < 3000) return _evCache.rows.slice(-n);
   try {
     const dir = path.join(APP_DIR, 'data');
     const files = fs.readdirSync(dir).filter((x) => x.startsWith('events-')).sort();
     if (!files.length) return [];
-    const lines = fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8')
-      .trim().split('\n').filter(Boolean).slice(-n);
-    return lines.map((l) => {
+    // 同时读最近两个文件（跨天时"昨天下午的对话"在倒数第二个文件里）
+    //
+    // 🔴 每个文件取多少行 —— 这里踩过一次很隐蔽的坑：
+    //    原来写 `slice(-Math.max(n, 20000))`，看着像"至少两万行、够了吧"，
+    //    但实际效果是**"只保留尾部这么多行"**：10-05 那个文件有 4944 行，
+    //    而面板要显示的 **18:31** 那条排在第 ~3800 行 ⇒ **正好被切掉**，
+    //    表现为"这条对话反查不到群号，退化成按作者猜"。
+    //  ⇒ 现在每个文件只取**最后 2000 行**（= 当天最近的一批），
+    //    一天的事件文件本身就有几千行，取尾部 2000 行足够覆盖面板显示的窗口，
+    //    而且**两个文件加起来不会太慢**（解析 4000 行 JSONL 是毫秒级）。
+    const PER_FILE = Math.max(n, 2000);
+    const pick = files.slice(-2);
+    const lines = [];
+    for (const f of pick) {
+      try {
+        const part = fs.readFileSync(path.join(dir, f), 'utf8').trim().split('\n').filter(Boolean);
+        lines.push(...part.slice(-PER_FILE));
+      } catch { /* 单个文件读不了就跳过 */ }
+    }
+    const rows = lines.map((l) => {
       try {
         const e = JSON.parse(l);
         const d = e.d || {};
@@ -135,11 +169,203 @@ function recentEvents(n) {
           who: d.author?.username || '?',
           text: typeof d.content === 'string' ? d.content.trim() : '',
           type: d.message_type,
+          // 🆕 群/用户 id：日志里只有角色，**id 只在这里有** ⇒ 拼卡片时要用
+          scopeId: d.group_openid || d.group_id || d.author?.member_openid || '',
           quoted: (d.msg_elements || []).map((x) => (x.content || '').trim()).filter(Boolean).join(' '),
         };
       } catch { return null; }
     }).filter(Boolean);
+    _evCache = { at: now, rows };
+    return rows.slice(-n);
   } catch { return []; }
+}
+
+// 🆕 把"作者 + 时间"映射到群号（2026-10-05）
+//
+// 🔴 为什么不能只按作者：**同一个人会在多个群说话** ——
+//    我先写的"作者→群号（取最近出现的）"把他**在别的群说的话也贴到了第一个群**，
+//    用户立刻发现（"这些是在另外一个群说的，为什么也在第一个群的卡片里？"）。
+// 🔴🔴 为什么还必须**带容差**（第二轮才发现）：日志里的时间**比平台 timestamp 晚约 1 秒**
+//    （日志打的是"机器人收到的那一刻"，事件里的 timestamp 是平台发出的时刻）。
+//    实测：表里是 `<某人>@18:43:27`，而面板上是 `18:43:28`
+//    ⇒ **精确匹配一个都对不上，全部退化成"按作者猜"**，于是同一个群被拆成两张卡。
+//    ⇒ 用 ±3 秒窗口在**同一作者**里找（键按秒排序 + 二分定位，几千条也不慢）。
+const TIME_TOLERANCE_SEC = 3;
+
+function toSec(t) {
+  const m = /^(\d{1,2}):(\d{2}):(\d{2})$/.exec(String(t || ''));
+  return m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : null;
+}
+
+function authorTimeMap() {
+  const byTime = new Map();     // `${who}@${HH:MM:SS}` -> scopeId
+  const byAuthor = new Map();
+  for (const e of recentEvents(3000)) {
+    if (!e.who || !e.scopeId) continue;
+    if (e.time) byTime.set(`${e.who}@${e.time}`, e.scopeId);
+    byAuthor.set(e.who, e.scopeId);      // 后来者覆盖 = 最近优先（仅作兜底）
+  }
+  // 每个作者的时间键：排序 + 带秒数，供"容差查找"用
+  const sorted = new Map();
+  for (const [key, scopeId] of byTime) {
+    const at = key.lastIndexOf('@');
+    const who = key.slice(0, at);
+    const sec = toSec(key.slice(at + 1));
+    if (sec === null) continue;
+    if (!sorted.has(who)) sorted.set(who, []);
+    sorted.get(who).push({ sec, scopeId });
+  }
+  for (const arr of sorted.values()) arr.sort((a, b) => a.sec - b.sec);
+
+  return {
+    byTime,
+    byAuthor,
+    /** 容差查找：这个作者、这个时间 ±N 秒 的群号；找不到返回 '' */
+    lookup(who, time) {
+      const sec = toSec(time);
+      if (sec === null) return '';
+      const arr = sorted.get(who);
+      if (!arr || !arr.length) return '';
+      // 二分定位到 <= sec 的最后一项，再左右扫一小段
+      let lo = 0; let hi = arr.length - 1; let pos = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (arr[mid].sec <= sec) { pos = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      let best = ''; let bestGap = 1e9;
+      for (let i = Math.max(0, pos - 6); i < Math.min(arr.length, pos + 7); i++) {
+        const gap = Math.abs(arr[i].sec - sec);
+        if (gap <= TIME_TOLERANCE_SEC && gap < bestGap) { bestGap = gap; best = arr[i].scopeId; }
+      }
+      return best;
+    },
+  };
+}
+
+// 群号的"可读编号"：第 1 次出现的群叫"群 1"，以此类推
+function scopeOrder() {
+  const seen = [];
+  for (const e of recentEvents(3000)) {
+    if (e.scopeId && !seen.includes(e.scopeId)) seen.push(e.scopeId);
+  }
+  return seen;
+}
+
+// 🆕 最近见过的群 id（原始事件里出现过哪些）
+function recentScopeIds() {
+  return scopeOrder();
+}
+
+// ---------- 🆕 群名/群号的可改表（读不到就让用户手填）----------
+//  ⚠️ 现实约束：QQ 官方 API **不直接给群名**，日志和事件里只有 32 位群 openid ⇒
+//     所以"读不到就占位符、允许手改"是**设计必需**，不是退让。
+const GROUPS_FILE = path.join(APP_DIR, 'data', 'groups.json');
+function groupsLoad() {
+  try {
+    const j = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'));
+    return (j && typeof j.aliases === 'object') ? j.aliases : {};
+  } catch { return {}; }
+}
+function groupsSave(aliases) {
+  try {
+    const tmp = GROUPS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ aliases }, null, 2));
+    fs.renameSync(tmp, GROUPS_FILE);
+    return { ok: true };
+  } catch (e) { return { ok: false, why: e.message }; }
+}
+
+// 🆕 把日志解析成对话卡片，并给**每条对话**分配它属于哪个会话（群 / 私聊）。
+//    🔴 2026-10-05 修过一次：原来按"昵称"归组，结果**同一个人的跨群消息被贴到同一个群里**
+//       （用户发现："这些是在另外一个群说的，为什么也在第一个群的卡片里？"）
+//    ⇒ 现在按**群号**归组，群号用"作者 + 秒级时间"去原始事件里反查。
+function buildConvos(journalText, opts = {}) {
+  const list = convo.parseConversations(journalText, { max: opts.max || 40 });
+  const aliases = groupsLoad();
+  // 🆕 群号反查：先按"作者+时间"精确匹配，再退回"作者"
+  const map = authorTimeMap();
+  const order = scopeOrder();
+
+  // 🔴 把已知群号集合拿出来 —— 用来把"猜不到群号"的消息**吸附**到最可能的那个群。
+  //    实测场景（用户报的）：同一个群的消息，一部分反查到了群号、另一部分没查到，
+  //    结果**分裂成两张卡**（「某个群」+「群 3（未命名）」），用户要求合并。
+  //    ⚠️ 判据要窄：只在"一个群号都没认出"时才吸附，而且按作者（作者在哪说过话最有信息量）。
+  const knownIds = order;
+  const authorKnown = new Map();
+  for (const [k, v] of map.byAuthor) if (knownIds.includes(v)) authorKnown.set(k, v);
+
+  // 🆕 "合并"用的别名表：`group:<旧群号>` 可以指向 `group:<目标群号>`。
+  //    场景：同一个群被反查/平台搞出了两个 id（实测「某个群」旁边多出一张「群 3」），
+  //    用户点一次"合并到…"，把旧 id 登记成 `{ movedTo: 'group:<新id>' }` ⇒ 之后自动并卡。
+  const scopeAlias = new Map();
+  for (const [k, v] of Object.entries(aliases)) {
+    if (v && typeof v.movedTo === 'string' && v.movedTo) scopeAlias.set(k, v.movedTo);
+  }
+
+  const runs = [];                       // 反查不到时的退回方案（按昵称分段）
+  return list.map((c) => {
+    const isPriv = c.kind === 'private';
+    let key;
+    let groupId = '';
+    let n = 0;
+    let how = '';
+
+    if (isPriv) {
+      key = `private:${c.who}`;
+      how = 'private';
+    } else {
+      // ① 作者 + 时间（带 ±3 秒容差：日志比平台 timestamp 晚约 1 秒）
+      let found = map.lookup(c.who, c.time);
+      if (found) how = 'time';
+      // ② 退回：只按作者（同一人跨群时会不准）
+      if (!found) { found = map.byAuthor.get(c.who) || ''; if (found) how = 'author'; }
+      // ③ 🆕 吸附：一个群号都没查到，但这个人**在某个已知群里说过话** ⇒ 归到那个群
+      //    （这一条就是"把同一个群分裂出来的两张卡合并"的关键）
+      if (!found) { found = authorKnown.get(c.who) || ''; if (found) how = 'attach'; }
+      if (found) {
+        groupId = found;
+        key = `group:${found}`;
+        n = Math.max(1, order.indexOf(found) + 1);
+      } else {
+        // ④ 实在认不出 ⇒ 按昵称分段，群号留空让用户填
+        let run = runs.find((r) => r.who === c.who && !r.closed);
+        if (!run) { run = { who: c.who, n: runs.length + 1, closed: false }; runs.push(run); }
+        n = run.n;
+        key = `group:${run.who}#${n}`;
+        how = 'none';
+      }
+    }
+
+    // 🆕 如果这个 scope 被登记过"合并到别处" ⇒ 改写 key（同一个 key = 同一张卡）
+    if (scopeAlias.has(key)) key = scopeAlias.get(key);
+
+    const al = aliases[key] || {};
+    const fallbackName = isPriv ? '私聊' : `群 ${n}（未命名）`;
+    return {
+      kind: c.kind,
+      scope: key,
+      who: c.who,
+      text: c.text,
+      time: c.time,
+      decision: c.decision,
+      replies: c.replies,
+      groupName: al.name || fallbackName,   // 读不到真名就是占位符（用户可手改）
+      groupId: al.id || groupId,            // 真实群号（可被用户覆盖）
+      defaultId: groupId,
+      // 让前端知道"这条的群号有多可信"（weak/none 时提示用户手填）
+      guess: how === 'time' ? 'ok' : (how === 'author' ? 'weak' : 'none'),
+    };
+  });
+}
+
+// 🆕 读请求体（改参数/开关机用）。有上限，防止被塞爆。
+function readBody(req) {
+  return new Promise((resolve) => {
+    let s = '';
+    req.on('data', (c) => { s += c; if (s.length > 64 * 1024) { s = ''; req.destroy(); } });
+    req.on('end', () => resolve(s));
+    req.on('error', () => resolve(''));
+  });
 }
 
 // ---------- 认证 ----------
@@ -156,139 +382,445 @@ const PAGE = (pwd) => `<!doctype html>
 <html lang="zh"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0f172a">
-<title>肥鱼日志</title>
+<meta name="theme-color" content="#0b1220">
+<title>🐋 大肥鱼 · 控制台</title>
+<!-- BUILD:__BUILD__ -->
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin:0; background:#0f172a; color:#e2e8f0;
-         font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-  header { position:sticky; top:0; background:#111c33; padding:10px 12px;
-           border-bottom:1px solid #24334f; display:flex; gap:10px;
-           align-items:center; flex-wrap:wrap; }
-  h1 { font-size:15px; margin:0; font-weight:600; }
-  .pill { font-size:12px; padding:2px 8px; border-radius:999px; background:#1e293b; }
-  .on { background:#065f46; color:#a7f3d0; }
-  .off { background:#7f1d1d; color:#fecaca; }
-  main { padding:10px 12px 60px; }
-  section { margin-bottom:16px; }
-  h2 { font-size:13px; color:#94a3b8; margin:0 0 6px; font-weight:600;
-       text-transform:uppercase; letter-spacing:.06em; }
-  pre { margin:0; padding:10px; background:#0b1225; border:1px solid #1e293b;
-        border-radius:8px; overflow-x:auto; white-space:pre-wrap; word-break:break-word;
-        font-size:12px; line-height:1.6; }
-  .ev { padding:6px 8px; border-bottom:1px solid #16213a; font-size:12px; }
-  .ev:last-child { border-bottom:0; }
-  .ev .m { color:#94a3b8; }
-  .ev .q { color:#7dd3fc; }
-  .ev .c { color:#e2e8f0; }
-  .bar { display:flex; gap:8px; }
-  a.btn, button { font:inherit; color:#cbd5e1; background:#1e293b; border:1px solid #334155;
-          border-radius:8px; padding:7px 12px; cursor:pointer; text-decoration:none; }
-  a.btn:active, button:active { background:#334155; }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  .card { background:#0b1225; border:1px solid #1e293b; border-radius:8px; padding:8px 10px; }
-  .card b { color:#f8fafc; font-size:16px; display:block; }
-  .card span { color:#94a3b8; font-size:11px; }
-  .warn { color:#fbbf24; }
-  footer { position:fixed; bottom:0; left:0; right:0; background:#111c33;
-           border-top:1px solid #24334f; padding:8px 12px; display:flex; gap:8px; }
-  footer .bar { flex:1; }
+  :root { color-scheme: dark; --bg:#0b1220; --card:#111a2e; --line:#1f2b45;
+          --dim:#8ea0bb; --txt:#e6edf7; --ok:#10b981; --bad:#ef4444; --warn:#f59e0b; --link:#60a5fa; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+  h1 { font-size:16px; margin:0; font-weight:700; letter-spacing:.02em; }
+  h2 { font-size:15px; color:#eaf1ff; margin:0 0 10px; font-weight:700; letter-spacing:.02em;
+       display:flex; align-items:center; gap:8px; }
+  h2::before { content:''; width:4px; height:16px; border-radius:2px;
+       background:linear-gradient(180deg,#60a5fa,#2563eb); }
+  header { position:sticky; top:0; z-index:20; background:rgba(11,18,32,.92); backdrop-filter:blur(8px);
+           border-bottom:1px solid var(--line); padding:10px 14px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  main { padding:14px 12px 76px; max-width:900px; margin:0 auto; }
+  section { margin-bottom:18px; }
+  .pill { font-size:11px; padding:3px 9px; border-radius:999px; background:var(--card); color:var(--dim); border:1px solid var(--line); }
+  .pill.on { background:rgba(16,185,129,.16); color:#6ee7b7; border-color:rgba(16,185,129,.4); }
+  .pill.off { background:rgba(239,68,68,.16); color:#fca5a5; border-color:rgba(239,68,68,.4); }
+  .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  @media (min-width:620px) { .grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+  .card b { color:#fff; font-size:18px; display:block; font-variant-numeric:tabular-nums; }
+  .card span { color:var(--dim); font-size:11px; }
+  .warn { color:var(--warn); }
+  #errbar { display:none; background:#7c2d12; color:#fed7aa; padding:10px 14px;
+            font-size:12.5px; word-break:break-all; }
+  #offbar { display:none; background:linear-gradient(90deg,#7f1d1d,#991b1b); color:#fff;
+            padding:10px 14px; font-size:13px; position:sticky; top:0; z-index:19; }
+
+  /* 🆕 一个群 = 一张卡（可收起/展开，跟"原始日志"一个交互） */
+  .gcard { background:var(--card); border:1px solid var(--line); border-radius:12px;
+           margin-bottom:12px; overflow:hidden; }
+  .gcard > summary { padding:10px 12px; background:#0e1729; cursor:pointer;
+           display:flex; gap:8px; align-items:center; flex-wrap:wrap; list-style:none; }
+  .gcard > summary::-webkit-details-marker { display:none; }
+  .gcard > summary::before { content:'▸'; color:#93c5fd; font-size:17px; font-weight:700;
+       width:22px; text-align:center; flex:0 0 auto; transition:transform .15s; }
+  .gcard[open] > summary::before { transform:rotate(90deg); }
+  .gtitle { font-weight:700; color:#c7d2fe; font-size:14.5px; }
+  .gid { color:var(--dim); font-size:11px; word-break:break-all; }
+  .cnt { color:var(--dim); font-size:11px; margin-left:auto; }
+  .gedit { display:flex; gap:6px; flex-wrap:wrap; padding:8px 12px; background:#0e1729;
+           border-bottom:1px solid var(--line); }
+  .gedit input { flex:1; min-width:120px; }
+  .msgs { padding:4px 12px 10px; }
+  .msg { padding:8px 0; border-bottom:1px dashed var(--line); }
+  .msg:last-child { border-bottom:0; }
+  .mtop { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+  .who { font-weight:700; color:#fbbf24; }
+  .tm { color:var(--dim); font-size:11px; margin-left:auto; font-variant-numeric:tabular-nums; }
+  .txt { color:var(--txt); word-break:break-word; }
+  .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:6px;
+         background:#1e293b; color:var(--dim); margin-right:6px; }
+  .tag.no { background:rgba(148,163,184,.15); }
+  .tag.yes { background:rgba(16,185,129,.18); color:#6ee7b7; }
+  .dec { margin-top:3px; color:var(--dim); font-size:12.5px; }
+  .ans { background:#0d1729; border-left:3px solid var(--ok); padding:7px 10px;
+         border-radius:0 8px 8px 0; margin:6px 0 2px; color:#d1fae5; }
+  input[type=text], input[type=number], input[type=password] { font:inherit; color:var(--txt);
+         background:#0d1729; border:1px solid var(--line); border-radius:8px; padding:7px 9px; min-width:0; }
+  input:focus { outline:1px solid var(--link); }
+  button { font:inherit; color:var(--txt); background:#1e293b; border:1px solid #334155;
+           border-radius:9px; padding:8px 12px; cursor:pointer; }
+  button:active { transform:translateY(1px); }
+  button.primary { background:#1d4ed8; border-color:#2563eb; }
+  button.danger { background:#7f1d1d; border-color:#b91c1c; }
+  button.sm { padding:6px 9px; font-size:12px; }
+  details { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:8px 12px; }
+  summary { cursor:pointer; font-weight:700; color:var(--dim); font-size:13px; }
+  .frow { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap; }
+  .frow label { width:150px; color:var(--dim); font-size:12px; }
+  .frow input { flex:1; min-width:120px; }
+  .hint { color:var(--dim); font-size:11px; margin:4px 0 0; }
+  pre { margin:0; padding:10px; background:#080e1a; border:1px solid var(--line); border-radius:10px;
+        overflow:auto; max-height:340px; font-size:11.5px; line-height:1.55; color:#9fb3d1; }
+  footer { position:fixed; left:0; right:0; bottom:0; background:rgba(11,18,32,.95);
+           backdrop-filter:blur(8px); border-top:1px solid var(--line); padding:9px 12px;
+           display:flex; gap:8px; max-width:900px; margin:0 auto; }
+  footer .sp { flex:1; }
+  #toast { position:fixed; left:50%; bottom:74px; transform:translateX(-50%); background:#111a2e;
+           border:1px solid var(--line); color:var(--txt); padding:9px 14px; border-radius:999px;
+           font-size:12.5px; display:none; z-index:50; max-width:92vw; }
 </style></head>
 <body>
 <header>
-  <h1>🐋 肥鱼日志</h1>
+  <h1>🐋 大肥鱼</h1>
   <span id="svc" class="pill">…</span>
+  <span id="build" class="pill" style="background:#1e3a8a;color:#bfdbfe">v?</span>
   <span id="upd" class="pill">…</span>
 </header>
-<div id="power" style="display:none;background:#7a1f1f;color:#fff;padding:10px 12px;font-size:14px;position:sticky;top:0;z-index:9"></div>
+<div id="offbar"></div>
+<div id="errbar"></div>
 <main>
   <section>
-    <h2>额度</h2>
+    <h2>额度与用量</h2>
     <div class="grid" id="budget"></div>
   </section>
+
   <section>
-    <h2>最近消息</h2>
-    <div id="events" style="background:#0b1225;border:1px solid #1e293b;border-radius:8px"></div>
+    <h2>开关机</h2>
+    <div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <b id="pwstate" style="font-size:15px">…</b>
+      <span id="pwby" style="color:var(--dim);font-size:12px"></span>
+      <span style="flex:1"></span>
+      <button class="primary sm" onclick="setPower(true)">开机</button>
+      <button class="danger sm" onclick="setPower(false)">关机</button>
+    </div>
+    <p class="hint">关机后：不回话、不解析链接、不识别图片（一分钱不花）。改完几秒内生效，不用重启。</p>
   </section>
+
+  <details>
+    <summary>⚙️ 参数设置（点开修改）</summary>
+    <div id="settings"></div>
+    <div class="frow" style="margin-top:10px">
+      <button onclick="restartBot()">重启机器人</button>
+      <span class="hint" style="margin:0">（每个参数改完点它自己的「保存」）</span>
+    </div>
+    <p class="hint">额度/次数上限：保存后立即生效。<b>AI 密钥</b>：保存后需要点一次「重启机器人」才生效。密钥不会回显，只显示前后几位。</p>
+  </details>
+
   <section>
-    <h2>日志（最近 200 行）</h2>
-    <pre id="log">加载中…</pre>
+    <h2>对话</h2>
+    <div id="convos"></div>
   </section>
+
+  <details>
+    <summary>🔍 原始日志（排查用，平时不用看）</summary>
+    <div style="margin-top:8px"><pre id="log">加载中…</pre></div>
+  </details>
 </main>
 <footer>
-  <div class="bar">
-    <button onclick="load(true)">刷新</button>
-    <button id="autoBtn" onclick="toggleAuto()">自动 5s</button>
-  </div>
+  <button onclick="load(true)">刷新</button>
+  <button id="autoBtn" onclick="toggleAuto()">自动刷新 5s</button>
+  <span class="sp"></span>
+  <button onclick="toggleRaw()">原始日志</button>
 </footer>
+<div id="toast"></div>
 <script>
 const P = ${JSON.stringify(pwd)};
+
+// 🔴 最重要的一段（2026-10-06 加）：**任何脚本错误都要看得见**。
+//    之前踩的坑：页面脚本在"发第一个请求之前"就静默崩了 ⇒ 页面只剩一堆空占位，
+//    错误只在控制台里（用户看不到），我连查三轮都没定位。
+try { window.addEventListener('error', function(ev){
+  try {
+    var e = document.getElementById('errbar');
+    if (e) {
+      e.style.display = 'block';
+      e.textContent = '⚠️ 脚本错误：' + (ev.message || ev.error) +
+        '（' + (ev.filename || '').split('/').pop() + ':' + (ev.lineno || '?') + '）';
+    }
+  } catch (_) {}
+});
+} catch (_) {}   // ⚠️ 挂监听本身也要防错（否则会复现"脚本起步即崩"）
+try { window.addEventListener('unhandledrejection', function(ev){
+  try {
+    var e = document.getElementById('errbar');
+    if (e) {
+      e.style.display = 'block';
+      e.textContent = '⚠️ 请求出错：' + ((ev.reason && (ev.reason.message || ev.reason)) || '未知');
+    }
+  } catch (_) {}
+});
+} catch (_) {}
 document.cookie = 'lp=' + encodeURIComponent(P) + ';path=/;max-age=31536000';
 let auto = null;
 
-function yuan(v){ return '¥' + (Number(v)||0).toFixed(4); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function yuan(v){ return '\\u00a5' + (Number(v)||0).toFixed(4); }
+function toast(msg, ms){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._t); t._t = setTimeout(()=>{ t.style.display='none'; }, ms || 2600);
+}
+function toggleRaw(){ const d = document.querySelectorAll('main > details'); if (d.length) { const last = d[d.length-1]; last.open = !last.open; } }
+
+function showErr(msg){
+  const e = document.getElementById('errbar');
+  if (!e) return;
+  if (!msg) { e.style.display = 'none'; return; }
+  e.style.display = 'block';
+  e.textContent = '⚠️ ' + msg;
+}
+function mark(id, txt){ const el = document.getElementById(id); if (el) el.textContent = txt; }
 
 async function load(manual){
+  // ⚠️ 这里**故意不调用 mark/showErr** —— 直接操作 DOM。
+  //    原因：万一辅助函数有问题，会导致"load 第一行就抛错、连请求都发不出去"（真实踩过）。
+  const _upd = document.getElementById('upd');
+  const _build = document.getElementById('build');
+  const _err = document.getElementById('errbar');
+  const setErr = (m) => { if (_err) { _err.style.display = m ? 'block' : 'none'; if (m) _err.textContent = '⚠️ ' + m; } };
+  setErr('');
+  if (_upd) _upd.textContent = '加载中…';
+  if (_build) _build.textContent = 'v…';
   try {
     const r = await fetch('/api/state?p=' + encodeURIComponent(P));
+    if (!r.ok) throw new Error('服务器返回 ' + r.status + (r.status === 401 ? '（密码不对或 cookie 过期）' : ''));
     const j = await r.json();
 
     const svc = document.getElementById('svc');
-    svc.textContent = j.service;
+    svc.textContent = (j.service === 'active' ? '运行中' : j.service);
     svc.className = 'pill ' + (j.service === 'active' ? 'on' : 'off');
-    document.getElementById('upd').textContent = new Date().toLocaleTimeString('zh-CN');
 
-    // 🆕 开关机横幅：关机时**最显眼**（否则"它怎么不理人"会被当成故障排查半天）
-    const pw = document.getElementById('power');
-    if (pw) {
-      if (j.power && !j.power.on) {
-        pw.style.display = 'block';
-        pw.textContent = '⏻ 已关机：不回话、不解析链接、不识别图片'
-          + (j.power.by ? '（由 ' + j.power.by + ' 设置）' : '')
-          + '　恢复：在群里 @我说「开机」';
-      } else {
-        pw.style.display = 'none';
-      }
-    }
+    const off = document.getElementById('offbar');
+    const pw = j.power || {};
+    if (!pw.on) {
+      off.style.display = 'block';
+      off.textContent = '⏻ 已关机：不回话、不解析链接、不识别图片'
+        + (pw.by ? '（由 ' + pw.by + ' 设置）' : '') + '　点下面的「开机」恢复';
+    } else off.style.display = 'none';
+    document.getElementById('pwstate').textContent = pw.on ? '⏻ 运行中' : '⏻ 已关机';
+    document.getElementById('pwstate').className = pw.on ? '' : 'warn';
 
-    const b = j.budget;
-    document.getElementById('budget').innerHTML = b ? (
-      '<div class="card"><b>' + yuan(b.daySpent) + '</b><span>今日已花 / 上限 ¥' + b.dailyLimit + '</span></div>' +
-      '<div class="card"><b>' + yuan(b.spentYuan) + '</b><span>累计已花 / 上限 ¥' + b.totalLimit + '</span></div>' +
-      // 🔴 2026-10-05 修：这里原来显示 b.calls（终身累计）却标着"今日调用次数" ——
-      //    实测误导（横幅/网页显示 10752，而当天真实只有 1247 次）。现在改显示 dayCalls。
-      //    ⚠️ 注意：这整个页面是**一个模板字符串**，注释里**不能出现反引号**，
-      //       否则会提前把字符串截断 → 整文件语法错误 → 服务起不来（我踩过，见坑 113）。
-      '<div class="card"><b>' + (b.dayCalls||0) + ' / ' + (b.dailyCallLimit||'?') + '</b><span>今日调用次数 / 上限</span></div>' +
-      '<div class="card"><b class="' + ((b.dayLeft!=null&&b.dayLeft<1)?'warn':'') + '">' + (b.dayLeft==null?'—':yuan(b.dayLeft)) + '</b><span>今日剩余</span></div>'
-    ) : '<div class="card"><span>暂无花费数据</span></div>';
-
-    document.getElementById('events').innerHTML = (j.events||[]).slice().reverse().map(e =>
-      '<div class="ev"><span class="m">' + (e.time||'') + '</span> ' +
-      '<span class="m">' + esc(e.who) + '</span>' +
-      (e.type && e.type !== 0 ? ' <span class="m">[type' + e.type + ']</span>' : '') +
-      (e.quoted ? '<div class="q">↩ ' + esc(e.quoted) + '</div>' : '') +
-      '<div class="c">' + esc(e.text || '(无文本)') + '</div></div>'
-    ).join('') || '<div class="ev m">暂无事件</div>';
-
-    document.getElementById('log').textContent = j.log || '(空)';
+    // 每一步单独兜底 —— 某一块出错不该让整页变成空白（之前就是这样，还只弹了个会消失的提示）
+    try { renderBudget(j.budget); } catch (e) { setErr('额度渲染失败：' + e.message); }
+    try { renderSettings(j.settings); } catch (e) { setErr('设置渲染失败：' + e.message); }
+    try { renderGroups(j.convos); } catch (e) { setErr('对话渲染失败：' + e.message); }
+    try { document.getElementById('log').textContent = j.log || '(空)'; } catch (e) {}
+    if (_build) _build.textContent = 'v' + (j.build || '?');
+    const n = (j.convos || []).length;
+    if (_upd) _upd.textContent = '更新 ' + new Date().toLocaleTimeString('zh-CN') + (n ? '' : '（0 条对话）');
   } catch (err) {
-    document.getElementById('log').textContent = '连接失败: ' + err.message;
+    setErr('取数据失败：' + err.message);
+    if (_upd) _upd.textContent = '失败';
+    toast('取数据失败：' + err.message);
   }
 }
-function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-function toggleAuto(){
-  if (auto) { clearInterval(auto); auto = null; document.getElementById('autoBtn').textContent = '自动 5s'; }
-  else { auto = setInterval(()=>load(false), 5000); document.getElementById('autoBtn').textContent = '停止自动'; }
+
+function renderBudget(b){
+  const el = document.getElementById('budget');
+  if (!b) { el.innerHTML = '<div class="card"><span>暂无花费数据</span></div>'; return; }
+  const spent = (b.official && b.official.spent != null) ? b.official.spent : b.spentYuan;
+  el.innerHTML =
+    card(yuan(b.daySpent), '今日已花 / 上限 ' + yuan(b.dailyLimit)) +
+    card(yuan(spent), '累计已花 / 上限 ' + yuan(b.totalLimit)) +
+    card((b.dayCalls||0), '今日调用 / 上限 ' + (b.dailyCallLimit||'?') + ' 次') +
+    card(b.dayLeft==null?'—':yuan(b.dayLeft), '今日剩余', (b.dayLeft!=null && b.dayLeft<1));
 }
-load(true);
+function card(big, small, warn){
+  return '<div class="card"><b class="' + (warn?'warn':'') + '">' + big + '</b><span>' + small + '</span></div>';
+}
+
+function renderSettings(s){
+  const el = document.getElementById('settings');
+  if (!s || !Object.keys(s).length) { el.innerHTML = '<p class="hint">没有可改的参数（settings.snapshot() 返回空）</p>'; return; }
+  const order = ['aiApiKey','budgetDaily','budgetTotal','budgetAnchor','dailyCalls'];
+  const rows = order.filter(k => s[k]).map(k => {
+    const it = s[k];
+    const val = it.value == null ? '' : it.value;
+    const id = 'set_' + k;
+    return '<div class="frow"><label for="' + id + '">' + esc(it.label) + '</label>' +
+      '<input id="' + id + '" data-key="' + k + '" ' +
+      (it.secret ? 'type="password" placeholder="留空=不改；粘贴新的会覆盖" value=""' :
+        'type="number" step="0.01" value="' + esc(val) + '"') +
+      '<button class="sm" onclick="saveOne(' + "'" + k + "'" + ')">保存</button></div>';
+  }).join('');
+  el.innerHTML = rows + (s.aiApiKey ? '<p class="hint">当前密钥：' + esc(s.aiApiKey.value || '（未设置）') + '</p>' : '');
+}
+
+async function saveOne(key){
+  const inp = document.querySelector('#settings input[data-key="' + key + '"]');
+  if (!inp) return;
+  const v = (inp.value || '').trim();
+  const patch = {};
+  if (v) patch[key] = v;
+  if (!Object.keys(patch).length) { toast('这个参数没改（空 = 不改）'); return; }
+  const r = await fetch('/api/settings?p=' + encodeURIComponent(P), {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(patch),
+  });
+  const j = await r.json();
+  if (!j.ok) { toast('❌ ' + (j.why||'保存失败')); return; }
+  toast('✅ 已保存' + (j.needRestart ? '（密钥需点「重启机器人」才生效）' : '（立即生效）'));
+  load(true);
+}
+
+async function saveSettings(){
+  const patch = {};
+  for (const inp of document.querySelectorAll('#settings input[data-key]')) {
+    const k = inp.dataset.key;
+    const v = (inp.value || '').trim();
+    if (!v) continue;
+    patch[k] = v;
+  }
+  if (!Object.keys(patch).length) { toast('没有要改的内容'); return; }
+  const r = await fetch('/api/settings?p=' + encodeURIComponent(P), {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(patch),
+  });
+  const j = await r.json();
+  if (!j.ok) { toast('❌ ' + (j.why||'保存失败')); return; }
+  toast('✅ 已保存' + (j.needRestart ? '（密钥需点「重启机器人」才生效）' : '（立即生效）'));
+  load(true);
+}
+
+async function restartBot(){
+  if (!confirm('现在重启机器人？大约 5 秒内恢复，期间不回复消息。')) return;
+  toast('正在重启…');
+  const r = await fetch('/api/restart?p=' + encodeURIComponent(P), { method:'POST' });
+  const j = await r.json();
+  toast(j.ok ? '✅ 已发出重启' : ('❌ ' + (j.why||'重启失败')));
+  setTimeout(()=>load(true), 4000);
+}
+
+async function setPower(on){
+  const r = await fetch('/api/power?p=' + encodeURIComponent(P), {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({on}),
+  });
+  const j = await r.json();
+  toast(j.ok ? ('✅ 已' + (on?'开机':'关机') + '（几秒内生效）') : ('❌ ' + (j.why||'失败')));
+  setTimeout(()=>load(true), 2500);
+}
+
+// 🔴 一个会话（群/私聊）= 一张卡：群信息只出现一次（卡片顶部），下面是这个群的所有消息。
+//    （用户 2026-10-05 纠正：每条消息各带一个编辑框"很奇怪而且占地方"。）
+function renderGroups(list){
+  const el = document.getElementById('convos');
+  if (!list || !list.length) { el.innerHTML = '<div class="card"><span>最近没有对话（日志里没解析到 [群]/[私聊] 行）</span></div>'; return; }
+
+  // 按 scope 归组，保持"最先出现的会话排最前"（跟列表顺序一致 = 时间倒序）
+  const groups = [];
+  const idx = new Map();
+  for (const c of list) {
+    let g = idx.get(c.scope);
+    if (!g) {
+      g = { scope:c.scope, kind:c.kind, name:c.groupName, id:c.groupId || c.defaultId || '', msgs:[] };
+      idx.set(c.scope, g); groups.push(g);
+    }
+    g.msgs.push(c);
+  }
+
+  el.innerHTML = groups.map((g, gi) => {
+    const isPriv = g.kind === 'private';
+    const nameVal = /未命名/.test(g.name || '') ? '' : (g.name || '');
+    // 卡片标题栏 + 编辑区，塞进 summary 里（点击标题就能收起/展开，跟"原始日志"一个交互）
+    const sum = '<summary>' +
+        '<span class="gtitle">' + esc(g.name || '未命名') + '</span>' +
+        '<span class="tag">' + (isPriv ? '私聊' : '群') + '</span>' +
+        '<span class="cnt">' + g.msgs.length + ' 条</span>' +
+      '</summary>';
+    // ⚠️ 编辑框放在 summary **外面** —— 否则点输入框会连带收起卡片
+    const edit = '<div class="gedit">' +
+        '<input type="text" placeholder="' + (isPriv ? '备注名（可手改）' : '群名（可手改）') + '" value="' + esc(nameVal) + '" data-g="' + gi + '" data-f="name">' +
+        '<input type="text" placeholder="群号（可手填）" value="' + esc(g.id || '') + '" data-g="' + gi + '" data-f="id">' +
+        '<button class="sm" onclick="saveGroup(' + gi + ')">保存</button>' +
+        (isPriv ? '' :
+          '<select id="mg' + gi + '"><option value="">合并到…</option>' +
+          groups.map((g2, j) => (j === gi || g2.kind === 'private' || !/group:/.test(g2.scope))
+            ? '' : '<option value="' + esc(g2.scope) + '">' + esc(g2.name) + '</option>').join('') +
+          '</select><button class="sm" onclick="mergeGroup(' + gi + ')">合并</button>') +
+      '</div>';
+
+    // 卡内按时间正序（先发生的在上），读起来像聊天记录
+    const msgs = g.msgs.slice().reverse().map((c) => {
+      const q = '<div class="mtop"><span class="who">' + esc(c.who) + '</span>' +
+        '<span class="tm">' + esc(c.time || '') + '</span></div>' +
+        '<div class="txt">' + (esc(c.text) || '<span style="color:var(--dim)">（非文字消息）</span>') + '</div>';
+      let dec = '';
+      if (c.decision) {
+        const isNo = /^不回/.test(c.decision);
+        dec = '<div class="dec"><span class="tag ' + (isNo?'no':'yes') + '">' + (isNo?'没回':'回了') + '</span>' + esc(c.decision) + '</div>';
+      } else if (!(c.replies && c.replies.length)) {
+        dec = '<div class="dec"><span class="tag no">没回</span>（没触发回复条件）</div>';
+      }
+      const ans = (c.replies && c.replies.length)
+        ? c.replies.map(t => '<div class="ans">' + esc(t) + '</div>').join('') : '';
+      return '<div class="msg">' + q + dec + ans + '</div>';
+    }).join('');
+
+    return '<details class="gcard" open>' + sum + edit + '<div class="msgs">' + msgs + '</div></details>';
+  }).join('');
+
+  // 把分组结果挂到 window 上，保存时按索引取
+  window.__groups = groups;
+}
+
+async function mergeGroup(gi){
+  const sel = document.getElementById('mg' + gi);
+  const target = sel ? sel.value : '';
+  if (!target) { toast('先在右边选一个要合并进去的群'); return; }
+  const g = (window.__groups || [])[gi];
+  if (!g) return;
+  if (!confirm('把「' + g.name + '」合并进所选的那个群？合并后这 ' + g.msgs.length + ' 条会显示在那边。')) return;
+  // 关键：让本卡的群号 = 目标群的群号（同一个群号 = 同一张卡），并把本地保存的别名一起搬过去
+  const targetId = (target || '').replace(/^group:/, '');
+  const r = await fetch('/api/groups?p=' + encodeURIComponent(P), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ aliases: { [target]: { id: targetId } }, move: { from: g.scope, to: target } }),
+  });
+  const j = await r.json();
+  toast(j.ok ? '✅ 已合并' : ('❌ ' + (j.why||'合并失败')));
+  if (j.ok) load(true);
+}
+
+async function saveGroup(gi){
+  const g = (window.__groups || [])[gi];
+  if (!g) return;
+  const wrap = document.querySelectorAll('.gcard')[gi];
+  if (!wrap) return;
+  const name = (wrap.querySelector('input[data-f=name]').value || '').trim();
+  const id = (wrap.querySelector('input[data-f=id]').value || '').trim();
+  const aliases = {};
+  aliases[g.scope] = { name, id };
+  const r = await fetch('/api/groups?p=' + encodeURIComponent(P), {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({aliases}),
+  });
+  const j = await r.json();
+  toast(j.ok ? '✅ 已保存' : ('❌ ' + (j.why||'保存失败')));
+  if (j.ok) load(true);
+}
+
+function toggleAuto(){
+  if (auto) { clearInterval(auto); auto = null; document.getElementById('autoBtn').textContent = '自动刷新 5s'; }
+  else { auto = setInterval(()=>load(false), 5000); document.getElementById('autoBtn').textContent = '停止自动刷新'; }
+}
+try { load(true); } catch (e) {
+  var _e2 = document.getElementById('errbar');
+  if (_e2) { _e2.style.display = 'block'; _e2.textContent = '⚠️ 启动失败：' + e.message; }
+}
 </script>
 </body></html>`;
 
 // ---------- 服务器 ----------
+// 🆕 构建标记：用来判断"用户拿到的到底是哪个版本的页面 / 接口"
+//    （踩过：改了页面、用户刷新还是老样子，查了很久才发现是浏览器缓存 —— 有了这个戳一眼就能定案）
+const BUILD = process.env.LOGWEB_BUILD || '2026-10-06c';
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+
+  // 🆕 访问日志：**只记路径和状态，不记密码**（密码常在 query 里！）
+  //    作用：用户说"刷新还是没变"时，能立刻看出他的请求有没有到、到了哪个路由、什么状态码。
+  const t0 = Date.now();
+  const safePath = url.pathname + (url.searchParams.has('p') ? '?p=***' : '');
+  res.on('finish', () => {
+    console.log(`[http] ${res.statusCode} ${safePath} ${Date.now() - t0}ms`);
+  });
 
   // GitHub 仓库预览图的中转缓存（公开路由，**故意放在密码校验之前** —— QQ 不会带密码）
   //
@@ -313,13 +845,119 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 🔴 2026-10-06：认证之后、所有路由之前 —— **统一声明"不要缓存"**。
+  //    这个面板的每个响应都是"当场现生"的（余额/日志/对话都在变），缓存它只会让用户看到旧数据。
+  //    踩过：页面没有 Cache-Control ⇒ 手机上刷新仍是老版本。
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   if (url.pathname === '/api/state') {
     const [log, service] = await Promise.all([journalLines(200), serviceState()]);
     const budget = budgetState();
     const power = powerState();
     const events = recentEvents(30);
+    const convos = buildConvos(await journalLines(400), { max: 40 });   // 🆕 人话版对话卡片
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ log, service, budget, power, events }));
+    res.end(JSON.stringify({
+      log, service, budget, power, events, convos,
+      settings: settings.snapshot(),          // 🆕 可改参数（密钥只给掩码）
+      scopeIds: recentScopeIds(),             // 🆕 猜群号用
+      build: BUILD,                           // 🆕 版本戳（页头显示，用来确认"是不是新页面"）
+    }));
+    return;
+  }
+
+  // 🆕 改群名/群号（读不到真名时用户手填）
+  if (url.pathname === '/api/groups' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const patch = JSON.parse(body || '{}');
+      const cur = groupsLoad();
+      let n = 0;
+      for (const [key, v] of Object.entries(patch.aliases || {})) {
+        if (!key || key.length > 120) continue;                 // 长度闸
+        const name = String(v?.name || '').slice(0, 40);
+        const id = String(v?.id || '').slice(0, 64);
+        const movedTo = String(v?.movedTo || '').slice(0, 120);
+        // ⚠️ 只在"三项都空"时才删 —— 否则只改群号会把 movedTo 抹掉
+        if (!name && !id && !movedTo) { delete cur[key]; n += 1; continue; }
+        cur[key] = Object.assign({}, cur[key], {
+          ...(name ? { name } : {}),
+          ...(id ? { id } : {}),
+          ...(movedTo ? { movedTo } : {}),
+        });
+        n += 1;
+      }
+      // 🆕 "合并"：把旧 scope 登记成"指向新 scope"，并把它本地的群名/群号一并带过去
+      const mv = patch.move;
+      if (mv && mv.from && mv.to && mv.from !== mv.to) {
+        const from = String(mv.from).slice(0, 120);
+        const to = String(mv.to).slice(0, 120);
+        const old = cur[from] || {};
+        cur[to] = Object.assign({}, cur[to], {
+          name: (cur[to] && cur[to].name) || old.name || '',
+          id: (cur[to] && cur[to].id) || old.id || to.replace(/^group:/, ''),
+        });
+        cur[from] = Object.assign({}, old, { movedTo: to });
+        n += 1;
+      }
+      const r = groupsSave(cur);
+      res.writeHead(r.ok ? 200 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: r.ok, why: r.why, saved: n }));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: e.message }));
+    }
+    return;
+  }
+
+  // 🆕 改参数（白名单在 settings.js 里；密钥只接受完整重填、永不回显）
+  if (url.pathname === '/api/settings' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const patch = JSON.parse(body || '{}');
+      const r = settings.update(patch);
+      res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(Object.assign({}, r, { snapshot: settings.snapshot() })));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: e.message }));
+    }
+    return;
+  }
+
+  // 🆕 开关机（写 data/power.json —— 机器人那边用 mtime 同步，几秒内生效）
+  if (url.pathname === '/api/power' && req.method === 'POST') {
+    const body = await readBody(req);
+    let want = null;
+    try { want = JSON.parse(body || '{}').on; } catch { /* ignore */ }
+    if (typeof want !== 'boolean') {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: 'on 必须是 true/false' }));
+      return;
+    }
+    try {
+      const f = path.join(APP_DIR, 'data', 'power.json');
+      const tmp = f + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify({
+        on: want, since: Date.now(), by: '网页', savedAt: new Date().toISOString(),
+      }, null, 2));
+      fs.renameSync(tmp, f);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, on: want, note: '已写入，机器人几秒内跟上（不用重启）' }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: e.message }));
+    }
+    return;
+  }
+
+  // 🆕 重启主服务（改了 API Key / 模型名这类"启动时才读"的参数后需要）
+  if (url.pathname === '/api/restart' && req.method === 'POST') {
+    const r = await run('systemctl', ['restart', SERVICE], 15000);
+    res.writeHead(r.err ? 500 : 200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: !r.err, why: r.err ? String(r.err.message || r.err) : '' }));
     return;
   }
 
@@ -335,7 +973,13 @@ const server = http.createServer(async (req, res) => {
       `开关状态 : ${p.on ? '⏻ 开机' : '⏻ 【关机】—— 不回话、不解析链接、不识别图片'}`
         + (p.on ? '' : `（${p.by ? `由 ${p.by} ` : ''}设置 · 恢复：群里 @我说「开机」）`),
       `今日花费 : ¥${(b?.daySpent ?? 0).toFixed(4)} / ¥${b?.dailyLimit ?? '?'}   （剩 ¥${(b?.dayLeft ?? 0).toFixed(4)}）`,
-      `累计花费 : ¥${(b?.spentYuan ?? 0).toFixed(4)} / ¥${b?.totalLimit ?? '?'}   （剩 ¥${(b?.totalLeft ?? 0).toFixed(4)}）`,
+      // ⚠️ 用户要求**尾巴上不要标注来源** ⇒ 只给数字；但**上限要留**
+      //    （我一开始把上限一起删了，用户立刻发现）。
+      //    "官方口径还没配锚点"这件事只在这个**排查用的**摘要端点里说明。
+      `累计已花 : ¥${(b?.official && b.official.spent != null
+        ? Number(b.official.spent)
+        : (b?.spentYuan ?? 0)).toFixed(4)} / ¥${b?.totalLimit ?? '?'}`
+        + (b?.official && b.official.spent != null ? '' : '   （官方口径：配 BUDGET_ANCHOR_YUAN 后自动切换）'),
       `调用次数 : 今日 ${b?.dayCalls ?? 0} / ${b?.dailyCallLimit ?? '?'}　（终身累计 ${b?.calls ?? 0}）`,
       `最近事件 : ${events.length} 条`,
       last ? `最新一条 : ${last.time} ${last.who} -> ${(last.text || '').slice(0, 40)}` : '最新一条 : （无）',
@@ -355,7 +999,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/index.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    // 🔴 2026-10-06：**必须禁止缓存**。
+    //    原因：页面原本没有 Cache-Control ⇒ 浏览器（尤其手机"加到主屏幕"那种）会缓存旧页面，
+    //    用户刷新仍然看到**老版本**（症状："我改完了，他怎么还是老样子"）。
+    //    ⚠️ 这个页面每一次都该是"当场现生"的（数据都在里面），缓存它没有任何收益。
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    });
     res.end(PAGE(url.searchParams.get('p') || ''));
     return;
   }

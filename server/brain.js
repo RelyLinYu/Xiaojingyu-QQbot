@@ -216,14 +216,84 @@ const AT_MARKUP = /<@!?[^>\s]+>/g;
 const QQ_INTERNAL_MARKUP = /<(?:faceType|emoji)[^>]*>/gi;
 
 function stripAtMentions(text) {
-  return String(text ?? '')
+  if (text == null) return '';       // ⚠️ 必须先挡：String(null) 会变成 "null" 这个字符串
+  return String(text)
     .replace(AT_MARKUP, ' ')
     .replace(QQ_INTERNAL_MARKUP, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-// ---------- 提取被引用的内容（message_type=103）----------
+// ---------- ⭐ 纯寒暄判定（2026-10-05 新增）----------
+//
+// 🔴 真实案例（用户报的）：群里有人发「早安肥鱼」，鱼回了
+//    「早啊，今天又来找我聊天？」—— 对方只是打个招呼，根本没有下文。
+//
+// 为什么会这样：「肥鱼」在关键词表里 → `hitKeyword=true` → `shouldReply()` 开头
+//    `if (hitKeyword) return { score: 9 }` **固定给 9 分、完全不判断** →
+//    模型拿到的输入只有一句「早安肥鱼」，于是**给一段不存在的对话起了个标题**。
+//
+// 根因不是"缺后续判断"，是**"打招呼"和"找我办事"被当成了同一类**：
+//    早安/晚安是**闭合动作**（对方回一句就结束了），而机器人把它当成了"开场"。
+//
+// ⇒ 判据（**故意做窄，判不准就走原流程**）：
+//    ① 剥掉 @ 标记和机器人名字后，剩下的**只有寒暄词**（早/早安/晚安/拜拜…）
+//    ② 长度 ≤ 6 个字（打招呼不会很长）
+//    ③ **不含疑问词、不含问号、不含请求词**（吗/呢/怎么/为什么/帮我/教我…）
+//        —— 有任何一样就不算纯寒暄（「早安，今天天气怎么样」该走正常流程）
+//    ④ **必须点了名**（@ 了它，或文字里出现它的名字）
+//        —— 否则那是在跟群友道晚安，不该理
+//
+// ⚠️ 判不准的代价是**不对称**的：漏判最坏就是现在这样"多说一句"；
+//    误判会把正经话吞掉（比如把"早，帮我看看这个报错"当成打招呼）。
+//    所以这里**一律往"不算寒暄"偏**。
+// ⚠️ 「晚安」同时像招呼也像道别 —— 但它本质是**收尾**（说完就去睡了），
+//    所以归到 bye，回「晚安 / 睡吧」而不是「早」。两张表**不能有交集**（有交集时先判 hello）。
+const GREETING_HELLO = ['早安', '早上好', '早呀', '早啊', '早', '中午好', '午安',
+  '下午好', '晚上好', '好梦'];
+const GREETING_BYE = ['晚安', '睡啦', '睡了', '先睡了', '拜拜', '再见', '88',
+  '溜了', '走了', '下线了', '我走了', '先走了'];
+
+// 这些词一出现就**否定**"纯寒暄"（有话题 / 有请求 / 有疑问）
+const GREETING_KILL = ['?', '？', '吗', '呢', '吧', '怎么', '为什么', '啥', '什么',
+  '帮我', '教我', '看看', '请问', '能不能', '可以', '麻烦', '在', '来'];
+
+function isPureGreeting(msg, opts = {}) {
+  if (!msg) return { greeting: false };
+  const raw = extractText(msg);
+  if (!raw) return { greeting: false };
+
+  // ④ 必须"点了名"：@ 了它（由调用方传入 isAt），或文字里带着**它的名字**。
+  //
+  // ⚠️ 这里踩过一次：人设全名是「蓝色大肥鱼」，而群友日常只叫「**肥鱼**」
+  //    —— 只认全名的话「早安肥鱼」会被判成"没点名"，整个修复就白做了。
+  //    正解是**复用关键词表**（`policy.keywords`）：那张表本来就是
+  //    "群友会怎么叫它"的登记处（蓝色大肥鱼/大肥鱼/肥鱼/鲸少女/小蓝鲸…）。
+  //    仍然很窄：词表里都是**它自己的名字**，不含通用词。
+  const names = [String(cfg.persona?.name || ''), ...(cfg.policy?.keywords || [])]
+    .map((s) => String(s || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);     // 长的优先剥（"蓝色大肥鱼" 先于 "肥鱼"）
+  const hitName = names.find((n) => raw.includes(n)) || '';
+  if (!hitName && !opts.isAt) return { greeting: false };
+
+  // ① 剥掉名字 → 剩下的应该只有寒暄词
+  let rest = hitName ? raw.split(hitName).join('') : raw;
+  rest = rest.replace(/[\s，,。.!！~～、]/g, '');
+  if (!rest) return { greeting: false };
+  if (rest.length > 6) return { greeting: false };   // ② 太长 → 不是单纯打招呼
+
+  // ③ 有话题/疑问/请求 → 不算纯寒暄
+  if (GREETING_KILL.some((k) => raw.includes(k))) return { greeting: false };
+
+  // 剩下的必须**整体等于**某个寒暄词（不是"包含"）
+  const kind = GREETING_HELLO.includes(rest) ? 'hello'
+    : (GREETING_BYE.includes(rest) ? 'bye' : null);
+  if (!kind) return { greeting: false };
+  return { greeting: true, kind, word: rest };
+}
+
+
 // 实测样本（2026-09 真机，一次"引用 + @机器人提问"）：
 //   content      : "还挺聪明"                          ← 引用者自己说的话
 //   msg_elements : [{ content: " 砍一个人，剩下五个正好一人一个",
@@ -244,8 +314,7 @@ function extractText(msg) {
   const own = stripAtMentions(msg.content).trim();
 
   // ⭐ 助手模式：去掉暗号，只把真正的问题交给它
-  //    （不去掉的话模型会看到"ovo 帮我解释X"，可能把 ovo 当内容一起答）
-  //    顺序说明：先判暗号、再拼引用 —— 两者可叠加，见下。
+  //    （不去掉的话模型会看到"ovo 帮我解释X"，可能把 ovo 当内容一起答）  //    顺序说明：先判暗号、再拼引用 —— 两者可叠加，见下。
   const am = detectAssistantMode(msg);
   const main = am.on ? am.text : own;
 
@@ -376,10 +445,17 @@ function isMentionOnly(eventType, msg) {
 }
 
 // ---------- 额度 ----------
+// 🆕 2026-10-05：日调用上限现在**可以在网页面板上改**（改完即时生效）——
+//    所以每次判额度都现取一次，不能再用启动时读进内存的那个数。
+function dailyLimit() {
+  try { return require('./settings').num('dailyCalls', cfg.policy.dailyCallLimit); }
+  catch { return cfg.policy.dailyCallLimit; }
+}
+
 function budgetOk() {
   const today = todayKey();
   if (today !== callDay) { callDay = today; callCount = 0; }   // 跨天重置
-  return callCount < cfg.policy.dailyCallLimit;
+  return callCount < dailyLimit();
 }
 
 function inQuietHours() {
@@ -589,7 +665,7 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
   // ⭐ 被 @ = 有人专门叫它 → 不走"普通消息"那两道闸（同人 60 秒冷却 / 同群连续上限）。
   //
   // 🔴 但 2026-10-01 发现：**完全不给闸会被人刷屏。**
-  //    实测日志：群友「狗狗」在 17:13:30～17:14:19 的 **30 秒内 @ 了 6 次**
+  //    实测日志：群友「某群友」在 17:13:30～17:14:19 的 **30 秒内 @ 了 6 次**
   //    （而且都是同一张图），机器人**每次都回**，自己都在数"第三遍…第六遍"。
   //    那 24 小时里他一个人触发 **138 次回复（占全部 347 条的 40%）**，
   //    最忙的一分钟回了 **19 条**。
@@ -820,7 +896,9 @@ function nextSendDelay() {
 }
 
 // ---------- L2：生成回复 ----------
-async function generateReply(scope, msg) {
+// `linkNote`：可选。本群刚刚处理过的链接事实（由 index.js 从 linkparse.contextNote 取）。
+//   ⚠️ 默认空串 = 行为和以前**完全一样**（所以这次改动对普通对话零影响）。
+async function generateReply(scope, msg, linkNote) {
   // 只带"时效内"的消息 —— 这是"冷场后不乱接话"的关键
   // ⚠️ 同样用 contextText()：当前这条由下面的 `who` 单独给，别重复送
   const ctx = contextText(scope, msg);
@@ -889,9 +967,16 @@ async function generateReply(scope, msg) {
     : `\n\n你要接一句：`;
 
   // 【当前时间】放在 user 的最前面（原因见上面 sys 那段注释 —— 放 system 会打掉缓存）
+  //
+  // 🆕 2026-10-05 `linkNote`：「本群刚刚处理过什么链接」。
+  //    🔴 真实案例：群友发了 15 小时半的 B站视频 → 卡片正常发了、视频按规矩跳过；
+  //       45 秒后他问「给我解析刚刚发的链接」，鱼却答「我这边又看不到视频画面，解析不了」
+  //       —— **答偏了**，因为模型不知道自己刚发过卡片。这句就是补给它的事实。
+  //    ⚠️ 放在 user 里（不是 system）→ 不破坏 prefix cache；没内容时是空串、不影响任何东西。
+  const linkPart = linkNote ? `\n\n【刚刚发生的】${linkNote}` : '';
   const user = `【当前时间】${timeStr}\n`
     + `（有人问时间/日期/星期，直接照这个答。别编造，也别说"我又不是时钟"——你知道现在几点。）\n\n`
-    + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + tail;
+    + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + linkPart + tail;
   const r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples, null, extractText(msg));
   // 预算用光时，把"没钱了"的理由原样带回去，由 index.js 发到群里
   if (r.budgetStop) return r;
@@ -1143,7 +1228,7 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
         // 🔴 这里用 `st.dayCalls`（账本口径：**跨天清零、含识图**），不用本文件的 `callCount`
         //    —— 后者只在"过闸时"自增、**不含识图**，两个数会差一截（2026-10-05 发现）。
         //    显示口径统一到账本，人看到的数字就和"那道闸消耗了多少"是同一个。
-        + ` (今日第 ${st.dayCalls}/${cfg.policy.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
+        + ` (今日第 ${st.dayCalls}/${st.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
     }
     return { text: out };
   } catch (e) {
@@ -1208,6 +1293,7 @@ module.exports = {
   isMentionOnly,
   detectAssistantMode,
   mentionedOthers,
+  isPureGreeting,   // 🆕 纯寒暄（打招呼/道别）判定 —— 命中就零成本固定应答，不生成
   messageRefId,
   stripAtMentions,
   // 🆕 给"开关机命令"用：判断原文里有没有 @ 标记
@@ -1221,7 +1307,7 @@ module.exports = {
     lastReply.set(`${scope}|${openid}`, Date.now());
     replyLog.push({ scope, ts: Date.now() });
   },
-  stats: () => ({ calls: callCount, limit: cfg.policy.dailyCallLimit, day: callDay }),
+  stats: () => ({ calls: callCount, limit: dailyLimit(), day: callDay }),
   // 给 index.js 用的连续发言检查（回复前再确认一次）
   consecutiveOk,
   // 只登记"本群刚发过言"（喂给 maxConsecutive），**不动某个人的冷却**。

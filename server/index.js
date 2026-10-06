@@ -15,6 +15,12 @@ const vision = require('./vision');
 const power = require('./power');
 const budget = require('./budget');   // 只为"没钱了"的节流（shouldAnnounceStop）
 const qqmedia = require('./qqmedia');
+const emotion = require('./emotion');   // 🆕 情绪观察器（只观察、不注入，见 config.policy.emotionObserve）
+const memory = require('./memory');     // 🆕 记忆（全群共享便签本，见 config.policy.memory）
+
+// 🆕 记忆注入的节流表：scope -> 上次注入时间
+//    （防"每条消息都塞记忆"，见 config.policy.memory.recallMinIntervalMs）
+const lastRecallAt = new Map();
 const {
   sendGroupMessage, sendPrivateMessage,
   sendGroupMarkdown, sendPrivateMarkdown,
@@ -56,6 +62,29 @@ function logEvent(type, d) {
 }
 
 // ---------- 主流程 ----------
+// ---------- 🆕 同群发送排队（2026-10-06）----------
+//
+// 🔴 要修的问题（用户原话）：「两个人连续提问，两个回答都是 4 条消息，
+//    那会一次性回复 8 条，没有 @ 也没有引用」（已确认是**同一个群**）
+//
+// 逻辑本体在 `sendqueue.js`（纯函数、可自测）；这里只是接线 + 日志。
+const sendqueue = require('./sendqueue');
+
+// 🆕 日额度吃紧时**不拆段**（少发几条也算帮忙）
+//    判据：次数已过 80% 或当天钱已花掉 80%。
+function splitAllowed() {
+  try {
+    const b = require('./budget').persistedStatus();
+    const callCap = Number(b.dailyCallLimit) || 0;
+    const calls = Number(b.dayCalls) || 0;
+    if (callCap > 0 && calls / callCap >= 0.8) return false;
+    const moneyCap = Number(b.dailyLimit) || 0;
+    const spent = Number(b.daySpent) || 0;
+    if (moneyCap > 0 && spent / moneyCap >= 0.8) return false;
+    return true;
+  } catch { return true; }   // 查不到就照常拆（别因为统计问题改变说话方式）
+}
+
 async function handleEvent(type, d) {
   // 1. 原始事件先落盘。阶段 B 就是靠翻它看清字段的
   logEvent(type, d);
@@ -251,6 +280,89 @@ async function handleEvent(type, d) {
     return;
   }
 
+  // 5.4 🆕 记忆指令（记 / 忘 / 看）—— **零模型调用**，自己拼一句话回
+  //
+  //   作用域是**全群共享**（用户拍板 C），所以：
+  //     · 谁都能记、谁都能看（这是"群共享"的题中之义）
+  //     · **只有主人能删**（防止有人把别人记的东西删掉）
+  //     · 🔴 **敏感内容一律拒收**（见 memory.js 的护栏）——
+  //       全群共享 + 存私密 = 把私密内容挂在群里
+  //   ⚠️ 放在情绪观察器之前：它的回复是我们自己发的话，不该被当成"群友的情绪"。
+  if (cfg.policy.memory?.enabled) {
+    try {
+      const cmd = memory.parseCommand(brain.extractText(d));
+      if (cmd) {
+        let text = '';
+        if (cmd.action === 'add') {
+          const r = memory.add(cmd.content, d.author?.member_openid || d.author?.id || '');
+          if (r.ok) {
+            text = r.dup ? `这个我记过了：${cmd.content}` : `行，记下了：${cmd.content}`;
+            console.log(`  ├ [mem] 记下（${r.dup ? '重复' : '新增'}）：${cmd.content}`);
+          } else if (r.why === 'privacy') {
+            text = '这个我不记 —— 涉及隐私，记在群里不合适。';
+            console.log(`  ├ [mem] 拒收（${r.category}）：不落盘、不复述`);
+          } else {
+            text = '这个我记不了（太长或者空的）。';
+          }
+        } else if (cmd.action === 'del') {
+          if (!l0.isOwner) {
+            text = '删记忆得我主人来 —— 你记的可以留着，别删别人的。';
+            console.log('  ├ [mem] 非主人想删记忆 → 拒绝');
+          } else {
+            const r = memory.remove(cmd.content);
+            text = r.removed ? `好，把和「${cmd.content}」有关的 ${r.removed} 条清掉了。` : `没找到和「${cmd.content}」有关的。`;
+            console.log(`  ├ [mem] 删除 ${r.removed} 条`);
+          }
+        } else if (cmd.action === 'list') {
+          const l = memory.list(10);
+          text = l.total === 0
+            ? '我还没记住什么。你跟我说「记住 XXX」，我就记下来。'
+            : `我记着这些（共 ${l.total} 条）：\n` + l.shown.map((x, i) => `${i + 1}. ${x}`).join('\n')
+              + (l.total > l.shown.length ? `\n…还有 ${l.total - l.shown.length} 条` : '');
+          console.log(`  ├ [mem] 列出记忆（共 ${l.total} 条）`);
+        }
+        if (text) {
+          const sent = isGroup
+            ? await sendGroupMessage(openid, text, d.id)
+            : await sendPrivateMessage(openid, text, d.id);
+          if (sent) brain.markReplied(scope, d.author?.user_openid || d.author?.member_openid);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(`  └ [mem] 指令处理出错（不影响回话）：${e.message}`);
+    }
+  }
+
+  // 5.4 🆕 情绪观察器（2026-10-05）—— **只读旁路：只打日志，绝不改行为**
+  //
+  //   为什么放这里（过了 L0、还没进 L1）：能拿到完整文本（识图描述已在第 ① 步挂上），
+  //   而且**在花钱的判断之前** —— 观察器是零成本的，不该让它挤占模型预算。
+  //
+  //   🔴 它对下面这条管线**没有任何影响**：
+  //      · 不 push 进 `contexts`（那会变成下一轮的输入 ⇒ 自我强化污染）
+  //      · 不发消息、不改人设、不落盘、不调用模型
+  //      · 整个包在 try 里，***坏了也不影响后面回不回话***
+  if (cfg.policy.emotionObserve?.enabled) {
+    try {
+      const opt = cfg.policy.emotionObserve;
+      if (!opt.onlyWhenAddressed || l0.isAt || l0.hitKeyword) {
+        emotion.observe({
+          msgId: d.id,
+          scope,
+          openid: d.author?.member_openid || d.author?.id || '',
+          nick: d.author?.username || '',
+          text: brain.extractText(d),
+          isAt: !!l0.isAt,
+          hitKeyword: !!l0.hitKeyword,
+          rate: Number.isFinite(opt.rate) ? opt.rate : 1,
+        });
+      }
+    } catch (e) {
+      console.warn(`  └ [emo] 观察出错（不影响回话）：${e.message}`);
+    }
+  }
+
   // 5.5 只 @ 了它、没写内容 → 默认**沉默**（见 config.policy.mentionOnlyReply）
   //     想让它吱一声就把那个开关打开；开着时回一句固定应答，**不调模型**（零成本）
   if (l0.mentionOnly) {
@@ -263,6 +375,31 @@ async function handleEvent(type, d) {
       : await sendPrivateMessage(openid, reply, d.id);
     if (sent) brain.markReplied(scope, d.author.user_openid || d.author.member_openid);
     return;
+  }
+
+  // 5.6 🆕 纯寒暄（打招呼 / 道别）→ **零成本固定应答**（2026-10-05）
+  //
+  //   🔴 起因：群里有人发「早安肥鱼」，鱼回了「早啊，今天又来找我聊天？」
+  //      —— 对方只是打个招呼、没有下文，那句话等于**给不存在的对话起了个标题**。
+  //      根因是"早安"命中了关键词（肥鱼）→ 固定 9 分 → 直接生成。
+  //
+  //   ⇒ 早安/晚安是**闭合动作**，回一句就完了：不调模型、不追问、不邀约。
+  //   ⚠️ 判据很窄（见 brain.isPureGreeting）：剥掉名字后只剩寒暄词 + ≤6 字 +
+  //      无疑问/请求 + 必须点名。判不准就往下走原来的流程。
+  //   💰 顺带省钱：这类消息以前要花一次 L2 生成。
+  if (cfg.policy.greetingReply?.enabled) {
+    const g = brain.isPureGreeting(d, { isAt: !!l0.isAt }) || {};
+    if (g.greeting) {
+      const opt = cfg.policy.greetingReply;
+      const pool = (g.kind === 'bye' ? opt.bye : opt.hello) || ['嗯'];
+      const reply = pool[Math.floor(Math.random() * pool.length)];
+      console.log(`  ├ 纯寒暄（${g.word}）→ 回固定应答，不调模型`);
+      const sent = isGroup
+        ? await sendGroupMessage(openid, reply, d.id)
+        : await sendPrivateMessage(openid, reply, d.id);
+      if (sent) brain.markReplied(scope, d.author?.user_openid || d.author?.member_openid);
+      return;
+    }
   }
 
   // 6. L1 便宜模型判断
@@ -314,7 +451,28 @@ async function handleEvent(type, d) {
   }
 
   // 7. L2 生成
-  const gen = await brain.generateReply(scope, d);
+  //    🆕 带上"本群刚刚处理过什么链接"—— 治"刚发完卡片、被问到时却说解析不了"
+  //    🆕 带上"群里记得的相关事实"—— 全群共享的记忆，命中时才注入
+  //
+  //    ⚠️ 注入频率上限：同一个群至少隔 `recallMinIntervalMs`（默认 5 分钟）才注入一次，
+  //       否则"每条消息都塞记忆"会把成本和噪音都抬上去。
+  //    ⚠️ 注入内容**只拼进这一轮的 user 文本**，绝不 push 进 contexts ——
+  //       否则它会变成下一轮的输入，形成自我强化污染。
+  const memItems = (() => {
+    if (!cfg.policy.memory?.enabled) return [];
+    const last = lastRecallAt.get(scope) || 0;
+    if (Date.now() - last < (Number(cfg.policy.memory.recallMinIntervalMs) || 300000)) return [];
+    const hit = memory.recall(brain.extractText(d));
+    if (!hit.length) return [];
+    lastRecallAt.set(scope, Date.now());
+    memory.markHit(hit.map((x) => x.id));      // 用进废退：记下"这条被用上了"
+    return hit;
+  })();
+  const linkNote = linkparse.contextNote(scope);
+  const memNote = memItems.length ? memory.render(memItems) : '';
+  const extraNote = [linkNote, memNote].filter(Boolean).join('\n');
+  if (memItems.length) console.log(`  ├ [mem] 注入 ${memItems.length} 条记忆（${memNote.length} 字）`);
+  const gen = await brain.generateReply(scope, d, extraNote);
 
   // 7.5 生成阶段才发现预算用尽 —— 同样把理由发出去（**同一套节流**，否则这里有第二条刷屏路径）
   if (gen && gen.budgetStop) {
@@ -348,32 +506,44 @@ async function handleEvent(type, d) {
   }
 
   // 8. 发送（支持多行：分段 + 随机间隔，像真人在一句一句打字）
-  const segments = (gen.segments && gen.segments.length) ? gen.segments : [reply];
+  //    🆕 2026-10-06：整串发送**按会话排队**（修"同群两个人同时问 → 8 条交叉刷出来"）
+  let segments = (gen.segments && gen.segments.length) ? gen.segments : [reply];
+  // 🆕 日额度吃紧时不再拆段（少发几条本身也是帮忙）
+  if (segments.length > 1 && !splitAllowed()) {
+    console.log('  ├ 额度吃紧：不拆段（合并成一条发）');
+    segments = [segments.join('')];
+  }
 
   // ⭐ 什么时候带"引用"：
-  //    因关键词触发（没被 @）时引用原消息 —— 对方才知道它在回哪句话。
-  //    被 @ 时不引用（@ 本身已指明对象，再引用显得啰嗦）。
-  const quoteRef = (cfg.policy.quoteOnKeywordReply && l0.hitKeyword && !l0.isAt)
-    ? brain.messageRefId(d)
-    : null;
-  if (quoteRef) console.log('  ├ 带引用回复');
+  //    ① 因关键词触发（没被 @）时引用原消息 —— 对方才知道它在回哪句话
+  //    ② 🆕 这一串是"排在其他回复之后"发的 —— 连着刷几串时不引用就分不清谁在回谁
+  //    被 @ 时通常不引用（@ 已指明对象），但第 ② 种情况例外。
+  const sendMeta = { queuedBehind: false };
+  const quoteWanted = (cfg.policy.quoteOnKeywordReply && l0.hitKeyword && !l0.isAt);
+  if (quoteWanted) console.log('  ├ 带引用回复');
 
   if (segments.length > 1) {
     console.log(`  ├ 分段发送：${segments.length} 条`);
   }
 
-  let okCount = 0;
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-
-    // 第 2 条起先等一下 —— 这是"人味"的关键：真人不会瞬间连发
-    if (i > 0) await sleep(brain.nextSendDelay());
-
-    const sent = isGroup
-      ? await sendGroupMessage(openid, seg, d.id, quoteRef)
-      : await sendPrivateMessage(openid, seg, d.id, quoteRef);
-    if (sent) okCount++;
-  }
+  const okCount = await sendqueue.enqueue(scope, sendMeta, async () => {
+    // 引用在"排到我们"时才最终决定（排队期间可能又来了别的回复）
+    const ref = (quoteWanted || sendMeta.queuedBehind) ? brain.messageRefId(d) : null;
+    if (sendMeta.queuedBehind) {
+      console.log('  ├ 同群排队：等前一条串发完再发' + (ref ? '，并带引用' : ''));
+    }
+    let ok = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      // 第 2 条起先等一下 —— 这是"人味"的关键：真人不会瞬间连发
+      if (i > 0) await sleep(brain.nextSendDelay());
+      const sent = isGroup
+        ? await sendGroupMessage(openid, seg, d.id, ref)
+        : await sendPrivateMessage(openid, seg, d.id, ref);
+      if (sent) ok++;
+    }
+    return ok;
+  });
 
   // 9. 只有发出去才算回复过（部分成功也算，否则会重复触发同一条）
   if (okCount > 0) {
@@ -442,6 +612,7 @@ async function handleLink(d, links, scope, isGroup, openid) {
 
   // ② 逐张发卡片
   let sentAny = false;
+  let lastCardInfo = null;
   for (const p of parsed) {
     console.log(`  ├ 卡片已生成（${p.platform}，${p.card.length} 字）`);
     const sent = isGroup
@@ -449,6 +620,7 @@ async function handleLink(d, links, scope, isGroup, openid) {
       : await sendPrivateMarkdown(openid, p.card, d.id);
     if (sent) {
       sentAny = true;
+      lastCardInfo = p.info || null;
       // ✅ 只有真发出去了才记 —— 发失败的话下次还该能发
       linkparse.markCarded(scope, p._keys || []);
     } else {
@@ -456,6 +628,9 @@ async function handleLink(d, links, scope, isGroup, openid) {
     }
   }
   if (sentAny) {
+    // 🆕 2026-10-05：记一笔"本群刚发过这张卡片"，供生成回复时告诉模型
+    //    （治"刚发完卡片、45 秒后被问却答『我解析不了』"）
+    if (lastCardInfo) linkparse.noteCard(scope, lastCardInfo, 'card');
     // ⚠️ 只计入"本群连发上限"，**不调 markReplied** ——
     //    否则会把对方 60 秒的聊天冷却一起占掉，他接着问问题就不理了。
     brain.markScopeReplied(scope);
@@ -472,7 +647,7 @@ async function handleLink(d, links, scope, isGroup, openid) {
   if (parsed.length > 1) {
     console.log(`  ├ ⚠️ 这条消息有 ${parsed.length} 个链接，视频只发第一个（${vtarget.platform}）—— 被动回复配额只有 5 条`);
   }
-  await sendVideo(d, vtarget.info, openid);
+  await sendVideo(d, vtarget.info, openid, scope);
 }
 
 // 🆕 P2：把 B站视频下载下来 → 分片上传到 QQ → 用 msg_type=7 发出去
@@ -511,7 +686,7 @@ async function sendVideoPending(d, groupopenid, info, src, v) {
   console.log(`  ├ 🎬 已发解析提示${ok ? '' : '（⚠️ 发送失败）'}：${text}`);
 }
 
-async function sendVideo(d, info, groupOpenid) {
+async function sendVideo(d, info, groupOpenid, scope) {
   const v = cfg.policy.linkParse.video;
   const tag = info.platform === 'kuaishou' ? '  ├ 🎬[快手]' : '  ├ 🎬';
 
@@ -520,6 +695,11 @@ async function sendVideo(d, info, groupOpenid) {
   // 时长太长的先挡掉（下载+上传太久，而且大概率超 30MB）
   if (info.durationSec && info.durationSec > v.maxDurationSec) {
     console.log(`${tag} 跳过（时长 ${info.durationSec}s > 上限 ${v.maxDurationSec}s）`);
+    // 🆕 记下"为什么没发视频"，生成回复时才答得对
+    if (scope) {
+      linkparse.noteVideoSkip(scope,
+        `时长 ${Math.round(info.durationSec / 60)} 分钟，超过上限 ${Math.round(v.maxDurationSec / 60)} 分钟，搬不动`);
+    }
     return;
   }
 
@@ -531,13 +711,18 @@ async function sendVideo(d, info, groupOpenid) {
     const src = info.platform === 'kuaishou'
       ? await linkparse.getKuaishouVideoUrl(info, maxBytes)
       : await linkparse.getBilibiliVideoUrl(info, maxBytes);
-    if (!src) { console.log(`${tag} 拿不到直链（番剧 / 付费 / 已删除 都可能）`); return; }
+    if (!src) {
+      console.log(`${tag} 拿不到直链（番剧 / 付费 / 已删除 都可能）`);
+      if (scope) linkparse.noteVideoSkip(scope, '拿不到视频直链（可能是番剧/付费/已删除）');
+      return;
+    }
 
     const mb = src.size ? (src.size / 1048576).toFixed(1) + 'MB' : '大小未知';
     console.log(`${tag} 直链 OK：${mb}${src.quality ? ' · qn=' + src.quality : ''}${src.downgraded ? '（已自动降清晰度）' : ''}`);
 
     if (src.size && src.size > maxBytes) {
       console.log(`${tag} 跳过（${mb} > 上限 ${v.maxMB}MB —— 超了 QQ 会把它降级成"文件"，不是可播放视频）`);
+      if (scope) linkparse.noteVideoSkip(scope, `视频文件 ${mb}，超过上限 ${v.maxMB}MB，发不了`);
       return;
     }
 
@@ -565,6 +750,11 @@ async function sendVideo(d, info, groupOpenid) {
     console.log(ok
       ? `${tag} ✓ 视频已发送（全程 ${((Date.now() - t0) / 1000).toFixed(1)}s）`
       : `${tag} ✗ 视频发送失败（看上面的 err_code）`);
+    // 🆕 成功发了视频也记一笔（这样被问到时不会说"我解析不了"）
+    if (scope) {
+      if (ok) linkparse.noteCard(scope, info, 'video');
+      else linkparse.noteVideoSkip(scope, '视频发送失败了（QQ 那边报错）');
+    }
   } catch (e) {
     console.warn(`${tag} 失败: ${e.message || e}`);
   } finally {
