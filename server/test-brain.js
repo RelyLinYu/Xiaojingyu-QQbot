@@ -3219,6 +3219,47 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /onclick="saveOne\(' \+ "'" \+ k \+ "'" \+ '\)">保存<\/button>/.test(lsrc37),
       '按钮标签被截断（会渲染成纯文本）');
 
+    // 🔴 2026-10-06（同日第二处）：**密码那一行**的分支也少了收尾 `>`
+    //    ⇒ 渲染成 `<input … value=""<button …>保存</button>` ⇒ 密钥那行的按钮也变纯文本。
+    //    ⚠️ 教训：这种"标签少一个字符"的错误，**光看源码字符串看不出来**
+    //       ⇒ 所以这里**真去渲染一遍**（在 vm 里跑 renderSettings），检查生成的 HTML。
+    check('★★ 渲染后：5 个 input + 5 个 button 全部标签完整（含密码行）', (() => {
+      try {
+        const vm = require('vm');
+        const TICK = String.fromCharCode(96);
+        const sm = 'const PAGE = (pwd) => ' + TICK;
+        const st = lsrc37.indexOf(sm);
+        let i = st + sm.length, en = -1;
+        while (i < lsrc37.length) { if (lsrc37[i] === TICK && lsrc37[i + 1] === ';') { en = i; break; } i++; }
+        const tpl = lsrc37.slice(st + sm.length, en);
+        const js = /<script>([\s\S]*)<\/script>/.exec(tpl)[1].replace(/\$\{JSON\.stringify\(pwd\)\}/g, '"PW"');
+        const els = {};
+        const getEl = (id) => els[id] || (els[id] = { id, innerHTML: '', textContent: '', style: {}, className: '', dataset: {} });
+        const sb = {
+          console, JSON, Date, Math, Number, String, Array, Object, RegExp, Error, isNaN, parseInt, parseFloat,
+          document: { getElementById: getEl, querySelector: () => null, querySelectorAll: () => [], cookie: '', addEventListener: () => {} },
+          window: { addEventListener: () => {} },
+          setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
+          fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+          alert: () => {}, confirm: () => true,
+        };
+        sb.globalThis = sb;
+        vm.createContext(sb);
+        vm.runInContext(js, sb);
+        sb.renderSettings({
+          aiApiKey: { label: 'AI 密钥', value: 'sk-74f…111', secret: true, type: 'env' },
+          budgetDaily: { label: '每天限额（元）', value: 6, type: 'runtime' },
+          budgetTotal: { label: '总限额（元）', value: 30, type: 'runtime' },
+          budgetAnchor: { label: '锚点（元）', value: 0, type: 'runtime' },
+          dailyCalls: { label: '调用上限（次）', value: 1600, type: 'runtime' },
+        });
+        const h = els.settings.innerHTML;
+        const nIn = (h.match(/<input[^>]*>/g) || []).length;
+        const nBtn = (h.match(/<button[^>]*>[^<]*<\/button>/g) || []).length;
+        return nIn === 5 && nBtn === 5 && !/value=""\s*<button/.test(h);
+      } catch (e) { return false; }
+    })(), '渲染后的标签不完整（有被吞掉的收尾字符）');
+
     // 功能性验证：perScope 真的按会话各留 N 条
     const conv2 = require('./tools/convo');
     const mk = (who, n) => {
