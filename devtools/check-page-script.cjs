@@ -8,7 +8,8 @@ const path = require('path');
 const vm = require('vm');
 
 const TICK = String.fromCharCode(96);
-const file = path.join(__dirname, '..', 'server', 'tools', 'logweb.js');
+// 🆕 2026-10-06：页面模板已抽到 server/tools/page.js（唯一真源）
+const file = path.join(__dirname, '..', 'server', 'tools', 'page.js');
 const src = fs.readFileSync(file, 'utf8');
 const startMark = 'const PAGE = (pwd) => ' + TICK;
 const st = src.indexOf(startMark);

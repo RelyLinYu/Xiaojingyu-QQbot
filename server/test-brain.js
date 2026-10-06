@@ -2723,7 +2723,10 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     const read = (p) => fs.readFileSync(path.join(__dirname, p), 'utf8');
     const bsrc = read('budget.js');
     const isrc = read('brain.js');
-    const lsrc = read('tools/logweb.js');
+    // ⚠️ 2026-10-06：页面模板已抽到 tools/page.js（唯一真源）⇒ 卡片类断言看它；
+    //    而"纯文本摘要端点"等运行逻辑仍在 logweb.js（用 lwsrc）
+    const lsrc = read('tools/page.js');
+    const lwsrc = read('tools/logweb.js');
     check('★ budget.js 的启动横幅显示"今日 N/上限 次调用（终身累计 M 次）"',
       /今日 \$\{state\.dayCalls\}\/\$\{cfg\.policy\.dailyCallLimit\} 次调用（终身累计 \$\{state\.calls\} 次）/.test(bsrc));
     check('★ `[ai]` 日志行用的是账本口径 dayCalls（不是本文件的 callCount）',
@@ -2731,7 +2734,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★ 日志网页卡片用 dayCalls 显示"今日调用"（不再显示终身累计）',
       /\(b\.dayCalls\|\|0\)/.test(lsrc) && !/b\.calls\|\|0\) \+ '<\/b><span>今日/.test(lsrc));
     check('  日志网页纯文本端点也标清"今日 … （终身累计 …）"',
-      /调用次数 : 今日 \$\{b\?\.dayCalls/.test(lsrc));
+      /调用次数 : 今日 \$\{b\?\.dayCalls/.test(lwsrc));
     check('  ⚠️ 别把 `calls` 当成"今日"再显示回去（守住这次的修复）',
       !/今日调用次数<\/span>/.test(lsrc) || !/b\.calls\|\|0\) \+ '<\/b><span>今日/.test(lsrc));
   }
@@ -2896,7 +2899,8 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★ 官方口径进了**落盘对象**（日志网页跨进程只能靠文件）',
       !!ps.official && typeof ps.official === 'object' && 'total' in ps.official,
       JSON.stringify(ps.official));
-    const lsrc = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
+    // 🆕 2026-10-06：页面模板已抽到 tools/page.js（唯一真源）—— 卡片/版式类断言看它
+    const lsrc = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
     // ⚠️ 注意：页面在 2026-10-05 重做过一次，卡片现在由前端 renderBudget() 生成
     //    ⇒ 断言要看**现在这段代码**，不能盯着旧模板（我改 UI 时这几条一起红了）。
     // 🔴 2026-10-06：**"累计已花锚点/官方口径"已按用户要求删除**
@@ -3176,24 +3180,28 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     //    「把合并群功能删了吧，没必要，那是修代码才导致出现问题，正常使用应该不会」
     //    「还要图中这串乱码，算群内码吧，对我来说没啥用，非要写可以固定在卡片群昵称旁边
     //      或者下面独占一行给你当日志用，**那个框框默认空缺拿来填群号**」
-    const lsrc37 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
+    // 🆕 2026-10-06：页面模板已抽到 tools/page.js（唯一真源）—— 页面相关断言看它
+    // ⚠️ 2026-10-06：页面模板已抽到 tools/page.js（唯一真源）
+    //    ⇒ `lw` 指**页面模板**（历史原因沿用这个名字），`pg` 指 logweb.js 的运行逻辑
+    const lw = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
+    const pg = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
     check('★★ 合并群功能**已删**（用户要求：那是修代码引入的补丁）',
-      !/mergeGroup/.test(lsrc37) && !/合并到…/.test(lsrc37) && !/patch\.move/.test(lsrc37),
+      !/mergeGroup/.test(lw) && !/合并到…/.test(lw) && !/patch\.move/.test(lw),
       '还残留合并相关代码');
     check('★★ 群内码是**只读展示**（不再占输入框；输入框改成填群号）',
-      /class="gcode">群内码/.test(lsrc37)
-      && /placeholder="群号（自己填，方便你认）"/.test(lsrc37)
-      && !/data-f="id"/.test(lsrc37));
+      /class="gcode">群内码/.test(lw)
+      && /placeholder="群号（自己填，方便你认）"/.test(lw)
+      && !/data-f="id"/.test(lw));
     check('★ 群号存进 `no` 字段（不再覆盖群内码），群内码由 scope 推导',
-      /groupNo: al\.no \|\| ''/.test(lsrc37) && /const mReal = \/\^group:/.test(lsrc37));
+      /groupNo: al\.no \|\| ''/.test(pg) && /const mReal = \/\^group:/.test(pg));
     check('  读取侧仍兼容历史 `movedTo`（万一旧数据里登记过，别变坏卡）',
-      /scopeAlias\.get\(key\)/.test(lsrc37));
+      /scopeAlias\.get\(key\)/.test(pg));
 
     // 🔴 2026-10-06 用户又问了两件事：
     //    「每个群卡片的收录消息上限是多少」→ 原来只有**总共 40 条**，活跃群把额度吃光
     //    「卡片内消息排序……每次刷新消息都会出现在卡片最下面了，要去翻，不合理，**排序反一下**」
     check('★★ 每个会话有自己的条数上限（不再是"总共 40 条"被一个活跃群吃光）',
-      /perScope: 60/.test(lsrc37) && /const cap = Math\.max\(1, Number\(opts\.perScope\) \|\| 60\)/.test(lsrc37));
+      /perScope: 60/.test(pg) && /const cap = Math\.max\(1, Number\(opts\.perScope\) \|\| 60\)/.test(pg));
     check('★★ convo.js 支持按会话限流（perScope，作者级第一道闸）',
       (() => {
         const csrc = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'convo.js'), 'utf8');
@@ -3201,26 +3209,27 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
           && /buckets\.get\(key\)\.slice\(-perScope\)/.test(csrc);
       })());
     check('★★ 群级限流在**反查出群号之后**做（作者级限流挡不住"一个群几十个人"）',
-      /const byScope = new Map\(\)/.test(lsrc37) && /byScope\.get\(k\)\.slice\(0, cap\)/.test(lsrc37));
+      /const byScope = new Map\(\)/.test(pg) && /byScope\.get\(k\)\.slice\(0, cap\)/.test(pg));
     check('★★ 组内**显式按时间倒序**（不能依赖上游顺序 —— 跨群交错后会乱）',
-      /const tsec = \(t\) =>/.test(lsrc37)
-      && /arr\.sort\(\(a, b\) => tsec\(b\.time\) - tsec\(a\.time\)\)/.test(lsrc37));
+      /const tsec = \(t\) =>/.test(pg)
+      && /arr\.sort\(\(a, b\) => tsec\(b\.time\) - tsec\(a\.time\)\)/.test(pg));
     check('★★ 卡内排序**最新在上**（用户要求反过来，别让他往下翻）',
-      !/g\.msgs\.slice\(\)\.reverse\(\)/.test(lsrc37)
-      && /const msgs = g\.msgs\.map/.test(lsrc37),
+      !/g\.msgs\.slice\(\)\.reverse\(\)/.test(lw)
+      && /const msgs = g\.msgs\.map/.test(lw),
       '卡内还在反向排序');
     check('★ 卡片条数标出上限（"N 条（每群最多 60）"）',
-      /条（每群最多 60）/.test(lsrc37));
+      /条（每群最多 60）/.test(lw));
 
     // 🔴 2026-10-06 用户报：「这些保存是文字啊，不是提交按钮」
     //    真因：模板里**两处 HTML 的收尾字符被吃掉**（输入框少了 `>`、按钮少了 `"`）
     //    ⇒ 渲染成 `<input … value="6"<button …>保存</button>` —— 元素没闭合，
     //      后面的文字被浏览器当纯文本 ⇒ 看起来就是"按钮是文字、点不动"。
     check('★★ 输入框的标签正确闭合（value="…"> 的 > 不能少）',
-      /value="' \+ esc\(val\) \+ '">'\) \+/.test(lsrc37), '输入框少了收尾 >');
-    check('★★ 设置区的「保存」是完整 button 元素（收尾引号不能少）',
-      /onclick="saveOne\(' \+ "'" \+ k \+ "'" \+ '\)">保存<\/button>/.test(lsrc37),
-      '按钮标签被截断（会渲染成纯文本）');
+      /value="' \+ esc\(val\) \+ '">'\) \+/.test(lw), '输入框少了收尾 >');
+    check('★★ 设置区的「保存」是完整 button 元素且可点（data-save + 事件委托）',
+      lw.includes('class="sm" data-save="' + "'" + ' + k + ' + "'" + '">保存</button>')
+      && lw.includes('button[data-save]'),
+      '按钮标签被截断或没有事件委托');
 
     // 🔴 2026-10-06（同日第二处）：**密码那一行**的分支也少了收尾 `>`
     //    ⇒ 渲染成 `<input … value=""<button …>保存</button>` ⇒ 密钥那行的按钮也变纯文本。
@@ -3231,10 +3240,10 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         const vm = require('vm');
         const TICK = String.fromCharCode(96);
         const sm = 'const PAGE = (pwd) => ' + TICK;
-        const st = lsrc37.indexOf(sm);
+        const st = lw.indexOf(sm);
         let i = st + sm.length, en = -1;
-        while (i < lsrc37.length) { if (lsrc37[i] === TICK && lsrc37[i + 1] === ';') { en = i; break; } i++; }
-        const tpl = lsrc37.slice(st + sm.length, en);
+        while (i < lw.length) { if (lw[i] === TICK && lw[i + 1] === ';') { en = i; break; } i++; }
+        const tpl = lw.slice(st + sm.length, en);
         const js = /<script>([\s\S]*)<\/script>/.exec(tpl)[1].replace(/\$\{JSON\.stringify\(pwd\)\}/g, '"PW"');
         const els = {};
         const getEl = (id) => els[id] || (els[id] = { id, innerHTML: '', textContent: '', style: {}, className: '', dataset: {} });
