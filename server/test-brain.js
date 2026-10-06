@@ -2899,8 +2899,11 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     const lsrc = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
     // ⚠️ 注意：页面在 2026-10-05 重做过一次，卡片现在由前端 renderBudget() 生成
     //    ⇒ 断言要看**现在这段代码**，不能盯着旧模板（我改 UI 时这几条一起红了）。
-    check('★ 网页用官方口径显示**累计已花**（用户要的是这个同步）',
-      /official\.spent != null\) \? b\.official\.spent : b\.spentYuan/.test(lsrc));
+    // 🔴 2026-10-06：**"累计已花锚点/官方口径"已按用户要求删除**
+    //    （原话「不需要那个锚点，我自己看，删掉」）⇒ "累计已花"只用本地账本。
+    check('★★ 网页的"累计已花"**只用本地账本**（锚点/官方口径已删干净）',
+      /card\(yuan\(b\.spentYuan\), '累计已花 \/ 上限 '/.test(lsrc)
+      && !/official\.spent/.test(lsrc) && !/BUDGET_ANCHOR_YUAN/.test(lsrc));
     // ⚠️ 断言锚定"输出上下文"，不是扫整个源文件 —— 否则注释里一提那四个字就报红
     //    （我为此连踩两次，见 lesson"不许出现X的断言别扫全文件"）。
     check('★★ 累计已花**不带来源标注**（用户要求删掉那个尾巴）',
@@ -3250,13 +3253,13 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
           aiApiKey: { label: 'AI 密钥', value: 'sk-74f…111', secret: true, type: 'env' },
           budgetDaily: { label: '每天限额（元）', value: 6, type: 'runtime' },
           budgetTotal: { label: '总限额（元）', value: 30, type: 'runtime' },
-          budgetAnchor: { label: '锚点（元）', value: 0, type: 'runtime' },
           dailyCalls: { label: '调用上限（次）', value: 1600, type: 'runtime' },
         });
         const h = els.settings.innerHTML;
         const nIn = (h.match(/<input[^>]*>/g) || []).length;
         const nBtn = (h.match(/<button[^>]*>[^<]*<\/button>/g) || []).length;
-        return nIn === 5 && nBtn === 5 && !/value=""\s*<button/.test(h);
+        // 面板现在 4 项（AI 密钥 / 每天限额 / 总限额 / 调用上限）—— 锚点那行已删
+        return nIn === 4 && nBtn === 4 && !/value=""\s*<button/.test(h);
       } catch (e) { return false; }
     })(), '渲染后的标签不完整（有被吞掉的收尾字符）');
 

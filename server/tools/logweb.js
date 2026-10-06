@@ -680,10 +680,10 @@ async function load(manual){
 function renderBudget(b){
   const el = document.getElementById('budget');
   if (!b) { el.innerHTML = '<div class="card"><span>暂无花费数据</span></div>'; return; }
-  const spent = (b.official && b.official.spent != null) ? b.official.spent : b.spentYuan;
+  // 🔴 2026-10-06：**"累计已花"只用本地账本**（官方口径/锚点已按用户要求删除）。
   el.innerHTML =
     card(yuan(b.daySpent), '今日已花 / 上限 ' + yuan(b.dailyLimit)) +
-    card(yuan(spent), '累计已花 / 上限 ' + yuan(b.totalLimit)) +
+    card(yuan(b.spentYuan), '累计已花 / 上限 ' + yuan(b.totalLimit)) +
     card((b.dayCalls||0), '今日调用 / 上限 ' + (b.dailyCallLimit||'?') + ' 次') +
     card(b.dayLeft==null?'—':yuan(b.dayLeft), '今日剩余', (b.dayLeft!=null && b.dayLeft<1));
 }
@@ -694,7 +694,7 @@ function card(big, small, warn){
 function renderSettings(s){
   const el = document.getElementById('settings');
   if (!s || !Object.keys(s).length) { el.innerHTML = '<p class="hint">没有可改的参数（settings.snapshot() 返回空）</p>'; return; }
-  const order = ['aiApiKey','budgetDaily','budgetTotal','budgetAnchor','dailyCalls'];
+  const order = ['aiApiKey','budgetDaily','budgetTotal','dailyCalls'];
   const rows = order.filter(k => s[k]).map(k => {
     const it = s[k];
     const val = it.value == null ? '' : it.value;
@@ -1018,11 +1018,9 @@ const server = http.createServer(async (req, res) => {
       `今日花费 : ¥${(b?.daySpent ?? 0).toFixed(4)} / ¥${b?.dailyLimit ?? '?'}   （剩 ¥${(b?.dayLeft ?? 0).toFixed(4)}）`,
       // ⚠️ 用户要求**尾巴上不要标注来源** ⇒ 只给数字；但**上限要留**
       //    （我一开始把上限一起删了，用户立刻发现）。
-      //    "官方口径还没配锚点"这件事只在这个**排查用的**摘要端点里说明。
-      `累计已花 : ¥${(b?.official && b.official.spent != null
-        ? Number(b.official.spent)
-        : (b?.spentYuan ?? 0)).toFixed(4)} / ¥${b?.totalLimit ?? '?'}`
-        + (b?.official && b.official.spent != null ? '' : '   （官方口径：配 BUDGET_ANCHOR_YUAN 后自动切换）'),
+      // 🔴 2026-10-06：**"锚点/官方口径"已按用户要求整块删掉**（「不需要那个锚点，我自己看，删掉」）
+      //    ⇒ "累计已花"就用**本地账本**的值，尾巴上也**不再提任何口径说明**。
+      `累计已花 : ¥${(b?.spentYuan ?? 0).toFixed(4)} / ¥${b?.totalLimit ?? '?'}`,
       `调用次数 : 今日 ${b?.dayCalls ?? 0} / ${b?.dailyCallLimit ?? '?'}　（终身累计 ${b?.calls ?? 0}）`,
       `最近事件 : ${events.length} 条`,
       last ? `最新一条 : ${last.time} ${last.who} -> ${(last.text || '').slice(0, 40)}` : '最新一条 : （无）',

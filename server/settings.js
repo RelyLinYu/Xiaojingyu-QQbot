@@ -31,7 +31,8 @@ const SPEC = {
   aiApiKey: { type: 'env', env: 'AI_API_KEY', label: 'AI 密钥（DeepSeek API Key）', secret: true },
   budgetDaily: { type: 'runtime', key: 'budgetDailyYuan', env: 'BUDGET_DAILY_YUAN', label: '每天限额（元）', min: 0.1, max: 1000 },
   budgetTotal: { type: 'runtime', key: 'budgetTotalYuan', env: 'BUDGET_TOTAL_YUAN', label: '总限额（元）', min: 1, max: 100000 },
-  budgetAnchor: { type: 'runtime', key: 'budgetAnchorYuan', env: 'BUDGET_ANCHOR_YUAN', label: '累计已花锚点（元，0=不启用官方口径）', min: 0, max: 100000 },
+  // 🔴 2026-10-06：`budgetAnchor`（累计已花锚点）**已按用户要求删除** —— 他原话：
+  //    「不需要那个锚点，我自己看，删掉」。⇒ "累计已花"只用本地账本（页面显示 `spentYuan`）。
   dailyCalls: { type: 'runtime', key: 'dailyCallLimit', env: 'DAILY_CALL_LIMIT', label: '每天回复调用上限（次）', min: 10, max: 100000 },
 };
 

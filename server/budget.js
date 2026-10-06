@@ -211,7 +211,8 @@ async function fetchOfficialBalance(force = false) {
       err: '',
     };
     // ⚠️ 用户 2026-10-05 明确说「日志不需要加官方余额」⇒ **这里不再往日志里打余额**。
-    //    查询本身保留（"总额"那道闸要用它、网页要显示"累计已花"的官方口径）。
+    //    查询本身的唯一用途是那道"**官方余额低于阈值就拒答**"的闸（`officialWarnYuan`，默认 ¥1）。
+    //    🔴 2026-10-06：原本还用它算"官方口径的累计已花"（锚点 − 余额），**那个已按用户要求删掉**。
     // 🔴 但**必须落盘**：日志网页是独立进程，只能从 budget.json 读到它。
     //    （踩过：只 console.log 没 save，结果网页上一直显示"查不到"。）
     save();
@@ -225,14 +226,14 @@ async function fetchOfficialBalance(force = false) {
 
 function balanceInfo() {
   const total = balCache.total;
-  // 🆕 「累计已花」的**官方口径** = 锚点 − 当前余额（用户要的是这个同步）
-  const anchor = Number(cfg.budget.balanceAnchorYuan) || 0;
-  const spent = (total !== null && anchor > 0) ? Number((anchor - total).toFixed(4)) : null;
+  // 🔴 2026-10-06：**"累计已花锚点"已按用户要求删除**（他原话：「不需要那个锚点，我自己看，删掉」）。
+  //    背景：官方接口**只给"还剩多少钱"、没有"累计已花"字段**，所以原来加了"锚点 − 当前余额"
+  //    这种反推法（锚点=本月开始时账户里的钱，每月 1 号要重设）。用户觉得多余 ⇒ 去掉，
+  //    **"累计已花"统一用本地账本的值**（页面上显示的 `spentYuan`）。
+  //    ⚠️ 官方余额查询**保留**（下面那道"余额过低就拒答"的闸要用它）。
   return {
     ok: total !== null,
     total,
-    spent,                                   // 🆕 官方口径的累计已花（没配锚点就是 null）
-    anchor: anchor || null,
     granted: balCache.granted,
     currency: balCache.currency,
     available: balCache.available,
