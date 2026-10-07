@@ -17,6 +17,7 @@ const budget = require('./budget');   // 只为"没钱了"的节流（shouldAnno
 const qqmedia = require('./qqmedia');
 const emotion = require('./emotion');   // 🆕 情绪观察器（只观察、不注入，见 config.policy.emotionObserve）
 const memory = require('./memory');     // 🆕 记忆（全群共享便签本，见 config.policy.memory）
+const knowledge = require('./knowledge'); // 🆕 点播式知识（热搜/历史上的今天，见 config.policy.knowledge）
 
 // 🆕 记忆注入的节流表：scope -> 上次注入时间
 //    （防"每条消息都塞记忆"，见 config.policy.memory.recallMinIntervalMs）
@@ -470,7 +471,17 @@ async function handleEvent(type, d) {
   })();
   const linkNote = linkparse.contextNote(scope);
   const memNote = memItems.length ? memory.render(memItems) : '';
-  const extraNote = [linkNote, memNote].filter(Boolean).join('\n');
+  // 🆕 2026-10-07 点播式知识（方案 A）：**放在这里 = "已经决定要回话之后"**
+  //    ⚠️ 位置是关键：外部接口实测 1~5 秒，绝不能挪到"该不该回话"的前面去。
+  //    ⚠️ fail-open：取不到就是空串，什么都不影响（knowledge.js 内部全兜住了）。
+  let knNote = '';
+  try {
+    knNote = await knowledge.lookup(brain.extractText(d), cfg.policy.knowledge);
+    if (knNote) console.log('  ├ [kb] 查到一段事实（' + knNote.length + ' 字）');
+  } catch (e) {
+    knNote = '';                                  // 再兜一层：知识模块出错绝不影响回话
+  }
+  const extraNote = [linkNote, memNote, knNote].filter(Boolean).join('\n');
   if (memItems.length) console.log(`  ├ [mem] 注入 ${memItems.length} 条记忆（${memNote.length} 字）`);
   const gen = await brain.generateReply(scope, d, extraNote);
 

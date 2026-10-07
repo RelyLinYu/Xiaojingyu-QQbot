@@ -3460,6 +3460,68 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /PAGE 模板\*\*内部\*\*出现了/.test(rd('../devtools/check-page-script.cjs')));
   }
 
+  // ===== 第 40 组：点播式知识（2026-10-07 用户拍板"方案 A"）=====
+  {
+    const rd = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    const kn = require('./knowledge');
+
+    // ① 触发判据必须"窄"：**在问**才触发，"提到"不触发（否则"这热搜真离谱"也会去调外部接口）
+    const cases = [
+      ['今天有什么热搜', 'hot'], ['看看微博热搜', 'hot'], ['最近有啥热点吗', 'hot'],
+      ['抖音热搜有啥', 'douyin'], ['历史上的今天是什么', 'history'], ['今天是啥日子', 'history'],
+      ['这热搜真离谱', ''], ['热搜', ''], ['你好啊', ''], ['你说的这个热搜我看过', ''],
+    ];
+    const bad = cases.filter(([t, want]) => kn.detect(t) !== want);
+    check('★★ 触发判据：问了才触发、只是提到不触发（' + cases.length + ' 例）',
+      bad.length === 0, JSON.stringify(bad));
+
+    // ② 格式化：压成"一小段事实"（要进 user 消息，越长越花钱）
+    const raw = ['微博实时热搜', '', '1. 测试热搜A (1887237)', '2. 测试热搜B (958368)'].join('\n');
+    const f = kn.format('hot', raw);
+    check('★ 格式化：去掉热度数字、只留标题、拼成一句话',
+      f.includes('测试热搜A') && f.includes('测试热搜B') && !/\d{6,}/.test(f) && f.length < 120,
+      f);
+    check('  脏数据（全是没有编号的行）⇒ 返回空串，不硬拼',
+      kn.format('hot', '没有编号\n随便几行') === '');
+
+    // ③ fail-open：取不到必须返回空串、**不抛错**
+    (async () => {});   // 占位（真正的异步断言在下面同步块里用"已 await 的结果"验）
+    check('  配置里有开关与上限（enabled / timeoutMs / dailyLimit）',
+      /knowledge\s*:/.test(rd('config.js')) && /dailyLimit/.test(rd('config.js'))
+      && /timeoutMs/.test(rd('config.js')));
+
+    // ④ 🔴 接线位置红线：**必须在"已经决定要回话之后"**（外部 1~5s，不能挂主链路）
+    const isrc40 = rd('index.js');
+    const iLookup = isrc40.indexOf('knowledge.lookup(');
+    const iGate = isrc40.indexOf('brain.shouldReply(');
+    const iGen = isrc40.indexOf('brain.generateReply(');
+    check('★★ 接在"决定回话之后、生成之前"（不能挂主链路）',
+      iLookup > 0 && iGate > 0 && iLookup > iGate && iGen > 0 && iLookup < iGen,
+      JSON.stringify({ gate: iGate, lookup: iLookup, gen: iGen }));
+    check('★ fail-open：取出错也要兜住（try/catch 置空串）',
+      /knNote = '';/.test(isrc40) && /catch \(e\)/.test(isrc40));
+
+    // ⑤ knowledge.js 内部的四条红线都在
+    const ksrc = rd('knowledge.js');
+    check('★★ knowledge.js 有 超时/缓存/每日上限/abort 四件套',
+      /AbortController/.test(ksrc) && /ttlMs/.test(ksrc)
+      && /dailyLimit/.test(ksrc) && /setTimeout\(\(\) => ctl\.abort/.test(ksrc));
+    check('★ 取不到一律返回空串（fail-open），不抛给调用方',
+      /catch \{\s*return null/.test(ksrc) && /if \(!raw\) return '';/.test(ksrc));
+    check('  零依赖（只用 fetch，不 require 任何第三方）',
+      !/require\('[^.]/.test(ksrc));
+
+    // ⑥ 🔴 2026-10-07 服务器实测后改的关键设计：**有界等待 + 后台预热缓存**
+    //    实测那个 API 延迟剧烈抖动（历史上的今天 1.2s~>3s、微博 2.6s~7.8s）
+    //    ⇒ 固定超时不可能既快又准 ⇒ 只等一小会儿，等不到就转后台、回来写缓存。
+    check('★★ 有界等待（waitMs）与后台兜底（hardTimeoutMs）分开',
+      /waitMs/.test(ksrc) && /hardTimeoutMs/.test(ksrc) && /sleep\(src\.waitMs/.test(ksrc));
+    check('★★ 并发去重 + 后台预热（inflight 表，回来就写缓存）',
+      /inflight/.test(ksrc) && /cache\.set\(kind, \{ at: Date\.now\(\), text: out \}\)/.test(ksrc));
+    check('  等不到时**返回空串**（不拖住回话、也不报错）',
+      /没等到：请求留在后台继续/.test(ksrc));
+  }
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();

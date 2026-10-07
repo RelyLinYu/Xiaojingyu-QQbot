@@ -654,6 +654,20 @@ module.exports = {
     //    budget 记不到钱，「钱的上限」就瞎了 —— 这时次数限制是唯一的闸门。**所以别删。**
     dailyCallLimit: 1600,
 
+    // ===== 🆕 点播式知识（2026-10-07 用户拍板"方案 A"）=====
+    //  群里**有人问**「今天有什么热搜」「历史上的今天」时，才去取一次（免费开源 API，无需 key）。
+    //  🔴 四条红线（改动前先读 knowledge.js 顶部注释）：
+    //    ① 只在"已经决定要回话之后"调用（外部接口实测 1~5s，挂前面会让每次回话都变慢）；
+    //    ② 缓存（热搜 10 分钟 / 历史上的今天 6 小时）；
+    //    ③ 超时 3 秒 + 每日上限 100 次；
+    //    ④ fail-open —— 取不到就返回空串、照常回话，**不抛错、不因为外部挂了就不回**。
+    knowledge: {
+      enabled: process.env.KNOWLEDGE === '0' ? false : true,
+      base: process.env.KNOWLEDGE_BASE || 'https://60s.viki.moe',
+      timeoutMs: Number(process.env.KNOWLEDGE_TIMEOUT_MS) || 3000,
+      dailyLimit: Number(process.env.KNOWLEDGE_DAILY_LIMIT) || 100,
+    },
+
     // ===== ⭐ 链接解析：群里出现 GitHub / B站 链接就自动回一张卡片 =====
     //
     // ⚠️ 这是**唯一一处绕过 L0 硬规则**的功能 —— 用户明确要求「无需 @，采集到就回复」。
