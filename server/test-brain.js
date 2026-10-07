@@ -3255,7 +3255,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         const tpl = lw.slice(st + sm.length, en);
         const js = /<script>([\s\S]*)<\/script>/.exec(tpl)[1].replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"PW"');
         const els = {};
-        const getEl = (id) => els[id] || (els[id] = { id, innerHTML: '', textContent: '', style: {}, className: '', dataset: {} });
+        // ⚠️ 2026-10-07：页面新增了音效开关（会在元素上 addEventListener）
+        //    ⇒ 元素桩必须带 addEventListener，否则脚本在 vm 里抛错、断言假失败（这已是第三次踩）
+        const getEl = (id) => els[id] || (els[id] = {
+          id, innerHTML: '', textContent: '', style: {}, className: '', dataset: {},
+          tagName: 'DIV', addEventListener: () => {},
+        });
         const sb = {
           console, JSON, Date, Math, Number, String, Array, Object, RegExp, Error, isNaN, parseInt, parseFloat,
           document: {
@@ -3432,6 +3437,18 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       && !/<details data-page="settings" open>[\s\S]{0,80}<summary>🐟/.test(rd('tools/page.js')));
     check('  「原始日志」仍是默认**展开**（那是另一处要求，别被一起改掉）',
       /<details data-page="raw" open>/.test(rd('tools/page.js')));
+
+    // 🆕 2026-10-07 用户：「界面整体看着太老套了，能不能做高级一点，点击交互音效什么的，
+    //    还有展开收拢动画之类的」⇒ 锁住这几样（免得以后重构时被丢掉）
+    const pg = rd('tools/page.js');
+    check('★★ 展开/收拢有动画（reveal 关键帧 + 图标旋转）',
+      /@keyframes reveal/.test(pg) && /details\[open\] > summary::before/.test(pg));
+    check('★★ 有点击音效，且是**现场合成**（不加载音频文件、零资源）',
+      /AudioContext/.test(pg) && /createOscillator/.test(pg) && /SFX\.click/.test(pg));
+    check('★ 音效可一键关（开关按钮 + 记住选择）',
+      /id="sfxBtn"/.test(pg) && /localStorage/.test(pg));
+    check('★ 尊重系统"减少动效"设置（prefers-reduced-motion）',
+      /prefers-reduced-motion/.test(pg));
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

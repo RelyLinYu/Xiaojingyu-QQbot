@@ -132,6 +132,74 @@ const PAGE = (opts) => `<!doctype html>
   #toast { position:fixed; left:50%; bottom:74px; transform:translateX(-50%); background:#111a2e;
            border:1px solid var(--line); color:var(--txt); padding:9px 14px; border-radius:999px;
            font-size:12.5px; display:none; z-index:50; max-width:92vw; }
+  /* ============================================================
+     2026-10-07 视觉升级（用户：「这个界面整体看着太老套了，能不能做高级一点，
+     点击交互音效什么的，还有展开收拢动画之类的」）
+     ⚠️ 这一层是"皮肤"：只覆盖观感与动效，**不改任何结构与逻辑**（类名/ DOM 都不动）。
+     ============================================================ */
+  :root { --r-lg:16px; --r-md:12px; --r-sm:10px;
+          --acc1:#60a5fa; --acc2:#818cf8;
+          --sh-1:0 1px 2px rgba(0,0,0,.35);
+          --sh-2:0 12px 32px -18px rgba(0,0,0,.85); }
+  body { background:
+      radial-gradient(1200px 620px at 12% -12%, rgba(37,99,235,.20), transparent 62%),
+      radial-gradient(900px 520px at 100% 0%, rgba(129,140,248,.15), transparent 58%),
+      var(--bg);
+    background-attachment:fixed; }
+  header { box-shadow:0 10px 30px -22px #000; }
+  h1 { font-size:17px; letter-spacing:.03em;
+       background:linear-gradient(92deg,#e0ecff,#a5b4fc); -webkit-background-clip:text;
+       background-clip:text; color:transparent; }
+  .card, details, .gcard { border-radius:var(--r-lg); box-shadow:var(--sh-2); }
+  .card { transition:transform .18s cubic-bezier(.2,.7,.2,1), border-color .18s ease, box-shadow .18s ease; }
+  .card:hover { transform:translateY(-2px); border-color:#2b3d61; }
+  .card b { font-size:20px; letter-spacing:.01em; }
+  /* 展开/收拢：图标旋转 + 内容渐入（关闭用原生瞬时，避免测量高度） */
+  details > summary, .gcard > summary { list-style:none; transition:color .15s ease; }
+  details > summary:hover, .gcard > summary:hover { color:#cfe0ff; }
+  details > summary::before { content:'▸'; color:#93c5fd; font-weight:700;
+    display:inline-block; width:14px; transition:transform .22s cubic-bezier(.2,.7,.2,1); }
+  details[open] > summary::before { transform:rotate(90deg); }
+  details > summary::-webkit-details-marker { display:none; }
+  details[open] > *:not(summary), .gcard[open] > *:not(summary) {
+    animation:reveal .26s cubic-bezier(.2,.7,.2,1) both; }
+  @keyframes reveal { from { opacity:0; transform:translateY(-7px); } to { opacity:1; transform:none; } }
+  /* 按钮微交互 */
+  button { border-radius:var(--r-sm); box-shadow:var(--sh-1);
+    transition:transform .12s ease, filter .16s ease, box-shadow .16s ease, background .16s ease, border-color .16s ease; }
+  button:hover { filter:brightness(1.13); }
+  button:active { transform:translateY(1px) scale(.985); }
+  button.primary { background:linear-gradient(180deg,#2563eb,#1d4ed8); border-color:#3b82f6;
+    box-shadow:0 8px 22px -12px #2563eb; }
+  button.danger { background:linear-gradient(180deg,#b91c1c,#7f1d1d); border-color:#dc2626; }
+  /* 输入控件聚焦光环 */
+  input, textarea, select { transition:border-color .15s ease, box-shadow .15s ease; }
+  input:focus, textarea:focus, select:focus { outline:none; border-color:#3b82f6;
+    box-shadow:0 0 0 3px rgba(59,130,246,.18); }
+  /* 底部标签栏：活动态光条 */
+  nav#tabs { border-top:1px solid rgba(255,255,255,.07); box-shadow:0 -14px 34px -22px #000; }
+  nav#tabs a { position:relative; transition:color .15s ease; }
+  nav#tabs a:hover { color:#cfe0ff; }
+  nav#tabs a.on { background:transparent; color:#dbeafe; }
+  nav#tabs a.on::after { content:''; position:absolute; left:16%; right:16%; top:0; height:2px;
+    border-radius:2px; background:linear-gradient(90deg,transparent,var(--acc1),transparent);
+    box-shadow:0 0 14px rgba(96,165,250,.75); }
+  /* 切换页面：入场动画 */
+  main { animation:pageIn .28s cubic-bezier(.2,.7,.2,1) both; }
+  @keyframes pageIn { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:none; } }
+  /* 提示条滑入 */
+  #toast { animation:toastIn .22s ease both; }
+  @keyframes toastIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+  #upd, #build, .card b { font-variant-numeric:tabular-nums; }
+  /* 滚动条 */
+  *::-webkit-scrollbar { width:10px; height:10px; }
+  *::-webkit-scrollbar-thumb { background:#243352; border-radius:9px;
+    border:2px solid transparent; background-clip:content-box; }
+  *::-webkit-scrollbar-thumb:hover { background:#33486f; background-clip:content-box; }
+  /* ♿ 尊重"减少动效"系统设置 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration:.001ms !important; transition-duration:.001ms !important; }
+  }
 </style></head>
 <body>
 <header>
@@ -139,6 +207,8 @@ const PAGE = (opts) => `<!doctype html>
   <span id="svc" class="pill">…</span>
   <span id="build" class="pill" style="background:#1e3a8a;color:#bfdbfe">v?</span>
   <span id="upd" class="pill">…</span>
+  <!-- 🆕 2026-10-07 音效开关（用户要点击音效；默认开，选择记在 localStorage） -->
+  <button id="sfxBtn" class="sm" title="点击音效开关" style="margin-left:auto">🔊</button>
 </header>
 <div id="offbar"></div>
 <div id="errbar"></div>
@@ -417,6 +487,7 @@ async function setPower(on){
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({on}),
   });
   const j = await r.json();
+  if (j.ok) SFX.ok(); else SFX.err();
   toast(j.ok ? ('✅ 已' + (on?'开机':'关机') + '（几秒内生效）') : ('❌ ' + (j.why||'失败')));
   setTimeout(()=>load(true), 2500);
 }
@@ -610,10 +681,11 @@ async function exSave() {
       body: JSON.stringify({ items: items }),
     });
     var j = await r.json();
-    if (!j.ok) { exNote(j.why || '保存失败', true); return; }
+    if (!j.ok) { exNote(j.why || '保存失败', true); SFX.err(); return; }
     EX = (j.status && j.status.items) || [];
     exRender();
     exNote('✅ 已保存 ' + EX.length + ' 组，立刻生效');
+    SFX.ok();
     toast('示范已保存（' + EX.length + ' 组）');
   } catch (e) { exNote('保存失败：' + e.message, true); }
 }
@@ -629,6 +701,82 @@ async function exReset() {
     exNote('✅ 已恢复默认');
   } catch (e) { exNote('恢复失败：' + e.message, true); }
 }
+
+// ===== 🆕 2026-10-07 点击音效（用户：「点击交互音效什么的」）=====
+// 🔴 用 **Web Audio 现场合成**，**不加载任何音频文件**（保持"零依赖、零静态资源"）：
+//    一个很短的正弦/三角波 + 极快衰减，音量压得很低（约 0.03），只是"嗒"一下的确认感。
+// ⚠️ 浏览器要求"先有用户手势"才能出声 ⇒ 我们在**第一次点击**时才创建 AudioContext（点击本身就是手势）。
+// ⚠️ 开关状态存 localStorage；默认**开**（用户明确要了），但他随时能一键关。
+var SFX = (function () {
+  var ctx = null, on = true;
+  try { on = localStorage.getItem('sfx') !== '0'; } catch (e) { on = true; }
+  function ac() {
+    if (!ctx) {
+      var C = window.AudioContext || window.webkitAudioContext;
+      if (!C) return null;
+      try { ctx = new C(); } catch (e) { return null; }
+    }
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+    return ctx;
+  }
+  function blip(freq, dur, type, vol) {
+    if (!on) return;
+    var a = ac(); if (!a) return;
+    try {
+      var o = a.createOscillator(), g = a.createGain();
+      o.type = type || 'triangle';
+      o.frequency.value = freq;
+      var t = a.currentTime;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vol == null ? 0.035 : vol, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+      o.connect(g); g.connect(a.destination);
+      o.start(t); o.stop(t + dur + 0.02);
+    } catch (e) { /* 出声失败绝不影响功能 */ }
+  }
+  return {
+    click:  function () { blip(880, 0.055, 'triangle', 0.032); },
+    tab:    function () { blip(640, 0.07, 'sine', 0.038); },
+    open:   function () { blip(520, 0.09, 'sine', 0.03); },
+    ok:     function () { blip(784, 0.09, 'sine', 0.05);
+                          setTimeout(function () { blip(1175, 0.13, 'sine', 0.042); }, 72); },
+    err:    function () { blip(210, 0.17, 'sawtooth', 0.03); },
+    isOn:   function () { return on; },
+    set:    function (v) {
+      on = !!v;
+      try { localStorage.setItem('sfx', on ? '1' : '0'); } catch (e) {}
+      var b = document.getElementById('sfxBtn');
+      if (b) { b.textContent = on ? '🔊' : '🔇'; b.title = on ? '点击音效：开（点我关掉）' : '点击音效：关（点我打开）'; }
+      return on;
+    },
+  };
+})();
+
+// 全局点击音（事件委托，只挂一次）：按钮/标签/折叠标题 各响一种
+document.addEventListener('click', function (ev) {
+  var t = ev.target;
+  if (!t || !t.closest) return;
+  if (t.closest('#sfxBtn')) return;                       // 开关自己处理
+  if (t.closest('nav#tabs a')) { SFX.tab(); return; }
+  if (t.closest('button, a')) { SFX.click(); return; }
+}, true);
+
+// 折叠展开/收起时响一声（keyboard 操作也覆盖）
+document.addEventListener('toggle', function (ev) {
+  if (ev.target && ev.target.tagName === 'DETAILS') SFX.open();
+}, true);
+
+// 音效开关按钮（本脚本在 body 末尾，此时按钮已经存在）
+(function () {
+  var b = document.getElementById('sfxBtn');
+  // ⚠️ 防一手：非浏览器环境（自测的 vm 沙箱）里元素桩可能没有 addEventListener ⇒ 不能让它抛错
+  if (!b || typeof b.addEventListener !== 'function') return;
+  SFX.set(SFX.isOn());
+  b.addEventListener('click', function () {
+    var now = SFX.set(!SFX.isOn());
+    if (now) SFX.click();               // 打开时给一声，让用户听到效果
+  });
+})();
 
 (function initPages(){
   document.body.setAttribute("data-page", CUR);
