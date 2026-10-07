@@ -3652,6 +3652,15 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     //    ⇒ 两条都要锁住：① `reset()` 必须先**改名备份**再删；② 记住"验证脚本不许碰破坏性接口"。
     check('★★ examples.reset() 会先备份再删（用户数据不可再生）',
       /renameSync\(FILE, FILE \+ '\.reset-'/.test(rd('examples.js')));
+
+    // 🔴 2026-10-07 用户问「为什么人设 0 字」：空人设的语义是"用代码默认"，
+    //    显示成"0 字"会让人以为"没存上" ⇒ 卡片要显示**生效的那份有多大**。
+    check('★★ 预设有"用默认"时显示生效字数（不再只显示 0 字）',
+      /usesDefault/.test(rd('presets.js')) && /personaEffectiveChars/.test(rd('presets.js'))
+      && /用默认/.test(rd('tools/page.js')));
+    const dflt = ps.list().find((x) => x.usesDefault);
+    check('  空人设的预设会带上"生效字数"（默认 646 字级别）',
+      !dflt || dflt.personaEffectiveChars > 100, JSON.stringify(dflt && dflt.personaEffectiveChars));
     check('★★ 面板有预设卡片 + 点击切换',
       /psList/.test(rd('tools/page.js')) && /psActivate/.test(rd('tools/page.js'))
       && /data-ps=/.test(rd('tools/page.js')) && /renderPresets/.test(rd('tools/page.js')));

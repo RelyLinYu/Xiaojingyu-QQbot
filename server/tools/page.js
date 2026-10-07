@@ -976,10 +976,15 @@ function renderPresets(j) {
   el.innerHTML = '<div class="psgrid">' + items.map(function (it) {
     const on = it.active ? ' on' : '';
     const tag = it.active ? '<span class="ptag">● 正在使用</span>' : '<span class="pmeta">点一下切到它</span>';
+    // 🔴 空人设 = "用代码里的默认人设" ⇒ 显示「用默认（646 字）」，别显示成"0 字"
+    //    （用户看到"人设 0 字"直接问「为什么人设 0 字」—— 那是我的显示没讲清楚）
+    const pTxt = it.usesDefault
+      ? '人设 <b>用默认</b>（' + it.personaEffectiveChars + ' 字）'
+      : '人设 <b>' + it.personaChars + ' 字</b>';
     return '<div class="pcard2' + on + '" data-ps="' + esc(it.id) + '" data-psname="' + esc(it.name) + '">' +
       '<b>' + esc(it.name) + '</b>' +
-      '<div class="pmeta">人设 ' + it.personaChars + ' 字 · 示范 ' + it.exampleCount + ' 组<br>' +
-        esc(it.preview || '（空人设 = 用代码默认）') + '…</div>' +
+      '<div class="pmeta">' + pTxt + ' · 示范 ' + it.exampleCount + ' 组<br>' +
+        esc(it.preview || '（空）') + '…</div>' +
       '<div class="prow">' + tag +
         '<span style="flex:1"></span>' +
         '<button class="sm" data-psrename="' + esc(it.id) + '">改名</button>' +

@@ -89,12 +89,23 @@ function currentSet() {
 }
 
 function summarize(it) {
+  const stored = it.persona || '';
+  // 🔴 2026-10-07（用户问「为什么人设 0 字」）：空人设的语义是"**用代码里的默认人设**"，
+  //    但显示成"0 字"看起来像"什么都没存" ⇒ 改成显示**生效的那份有多长 + 前 40 字**。
+  let eff = stored;
+  let usesDefault = false;
+  if (!stored) {
+    usesDefault = true;
+    try { eff = require('./config').persona.systemPrompt || ''; } catch { eff = ''; }
+  }
   return {
     id: it.id,
     name: it.name,
-    personaChars: (it.persona || '').length,
+    personaChars: stored.length,
+    personaEffectiveChars: eff.length,
+    usesDefault: usesDefault,
     exampleCount: Array.isArray(it.examples) ? it.examples.length : 0,
-    preview: (it.persona || '').replace(/\s+/g, ' ').slice(0, 40),
+    preview: String(eff).replace(/\s+/g, ' ').slice(0, 40),
     updatedAt: it.updatedAt || it.createdAt || '',
   };
 }
