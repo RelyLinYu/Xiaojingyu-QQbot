@@ -110,6 +110,18 @@ const PAGE = (opts) => `<!doctype html>
   .exrow { display:grid; grid-template-columns:1fr 1fr 104px 40px; gap:8px; align-items:center; margin:6px 0; }
   .exrow input, .exrow select { width:100%; box-sizing:border-box; }
   .exbar { display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  /* 🆕 2026-10-07 用量趋势柱状图（纯 CSS，零依赖、不引图表库） */
+  .ubars { display:flex; align-items:flex-end; gap:4px; height:132px; margin:6px 0 4px; }
+  .ubar { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center;
+          min-width:0; height:100%; }
+  .ubar i { display:block; width:100%; border-radius:5px 5px 2px 2px; min-height:3px;
+            background:linear-gradient(180deg,#60a5fa,#2563eb);
+            transition:height .35s cubic-bezier(.2,.7,.2,1); }
+  .ubar i.hot { background:linear-gradient(180deg,#fbbf24,#d97706); }   /* 接近次数上限标黄 */
+  .ubar i.over { background:linear-gradient(180deg,#f87171,#b91c1c); }  /* 撞满标红 */
+  .ubar span { font-size:9.5px; color:var(--dim); margin-top:4px; white-space:nowrap; }
+  .ubar u { font-size:9.5px; color:#93c5fd; text-decoration:none; margin-bottom:3px; }
+  .ubar.today i { box-shadow:inset 0 0 0 1px #93c5fd; }
   @media (max-width:640px) { .exrow { grid-template-columns:1fr 40px; } .exrow select { grid-column:1; } }
   nav#tabs { position:fixed; left:0; right:0; bottom:0; z-index:30;
     display:flex; background:rgba(11,18,32,.97); backdrop-filter:blur(8px);
@@ -254,6 +266,21 @@ const PAGE = (opts) => `<!doctype html>
   <section data-page="overview">
     <h2>额度与用量</h2>
     <div class="grid" id="budget"></div>
+  </section>
+
+  <section data-page="overview">
+    <h2>📈 用量趋势</h2>
+    <div class="card">
+      <div class="exbar" style="margin:0 0 8px">
+        <button class="sm" onclick="loadUsage(7)">最近 7 天</button>
+        <button class="sm" onclick="loadUsage(14)">14 天</button>
+        <button class="sm" onclick="loadUsage(30)">30 天</button>
+        <span id="useNote" class="hint" style="margin:0"></span>
+      </div>
+      <div id="useChart"></div>
+      <p class="hint">柱子 = 当天**模型调用次数**（到顶 = 撞了 1600 那道闸）；柱子上面小字 = 当天**花费（元）**。
+        日额度 **¥3** 是"钱"那道闸 —— 两者哪个先撞，看这张图就知道。</p>
+    </div>
   </section>
 
   <section data-page="overview">
@@ -659,6 +686,8 @@ try { load(true); } catch (e) {
 }
 // 🆕 语气示范表格：进页面就把当前生效的那份读出来（没配过则显示"用的是默认"）
 try { exLoad(); } catch (e) { /* 读不到不影响别的 */ }
+// 🆕 用量趋势：默认画最近 14 天
+try { loadUsage(14); } catch (e) { /* 读不到不影响别的 */ }
 // 🔴 分页面（2026-10-06 用户要求「做几个分页面，别全挤在一起」）：
 //    同一份 HTML 里给每个区块打了 data-page，这里按 body[data-page] 显隐 + 高亮标签栏。
 //    ⚠️ 用 CSS 显隐而不是"多套模板" —— 保证**只有一份模板**（避免又踩"两份拷贝"的坑）。
@@ -831,7 +860,47 @@ document.addEventListener('toggle', function (ev) {
   });
 })();
 
-(function initPages(){
+// ===== 🆕 2026-10-07 用量趋势（用户要的"用量趋势曲线"）=====
+// 纯 CSS 柱状图（不引图表库、零依赖）：高度按"这批里的最大值"归一化。
+// ⚠️ 只用字符串拼接，**不用模板字符串/反引号**（模板里的反引号会把 PAGE 截断 —— 白屏事故根因）。
+var USE_LIMIT = 1600;      // 每日次数上限（画"到顶"用；会从 /api/state 里更新）
+
+function renderUsage(days) {
+  var el = document.getElementById('useChart');
+  if (!el) return;
+  if (!days || !days.length) { el.innerHTML = '<p class="hint">还没有数据（机器人每 10 分钟记一笔）</p>'; return; }
+  var max = 1;
+  for (var i = 0; i < days.length; i++) if (days[i].calls > max) max = days[i].calls;
+  var today = days[days.length - 1].date;
+  var bars = days.map(function (d) {
+    var pct = Math.max(2, Math.round((d.calls / max) * 100));
+    var cls = (d.calls >= USE_LIMIT) ? 'over' : (d.calls >= USE_LIMIT * 0.8 ? 'hot' : '');
+    var isToday = (d.date === today) ? ' today' : '';
+    return '<div class="ubar' + isToday + '" title="' + d.date + '：' + d.calls + ' 次 · ¥' + Number(d.spent).toFixed(2) + '">' +
+      '<u>' + (d.calls || '') + '</u>' +
+      '<i class="' + cls + '" style="height:' + pct + '%"></i>' +
+      '<span>' + d.md + '</span>' +
+      '</div>';
+  }).join('');
+  el.innerHTML = '<div class="ubars">' + bars + '</div>';
+}
+
+async function loadUsage(n) {
+  try {
+    var r = await fetch('/api/usage?days=' + (n || 14) + '&p=' + encodeURIComponent(P));
+    var j = await r.json();
+    renderUsage(j.days || []);
+    var sum = 0, sumSpent = 0;
+    (j.days || []).forEach(function (d) { sum += d.calls; sumSpent += d.spent; });
+    var note = document.getElementById('useNote');
+    if (note) note.textContent = '这 ' + (j.days || []).length + ' 天：' + sum + ' 次调用 · ¥' + sumSpent.toFixed(2);
+  } catch (e) {
+    var el = document.getElementById('useChart');
+    if (el) el.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
+  }
+}
+
+function initPages(){
   document.body.setAttribute("data-page", CUR);
   var tabs = document.querySelectorAll("#tabs a");
   for (var i = 0; i < tabs.length; i++) {
@@ -847,7 +916,12 @@ document.addEventListener('toggle', function (ev) {
       : CUR === "settings" ? "改完点它自己的「保存」"
       : CUR === "raw" ? "技术日志，排查时才看" : "";
   }
-})();
+}
+
+// 🆕 2026-10-07：**显式调用**（原来写成 (function initPages(){ … })()
+// ⇒ 只要有人拿 function initPages(){ 当锚点插代码，就会被那个前导的 ( 包进括号里 ⇒ 语法错。
+//   这个坑今天踩了三次（黑屏、白屏之外的那两次"Unexpected token var"），所以直接拆掉这层壳。）
+initPages();
 </script>
 </body></html>`;
 

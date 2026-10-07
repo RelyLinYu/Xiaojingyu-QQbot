@@ -2734,7 +2734,10 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     const lsrc = read('tools/page.js');
     const lwsrc = read('tools/logweb.js');
     check('★ budget.js 的启动横幅显示"今日 N/上限 次调用（终身累计 M 次）"',
-      /今日 \$\{state\.dayCalls\}\/\$\{cfg\.policy\.dailyCallLimit\} 次调用（终身累计 \$\{state\.calls\} 次）/.test(bsrc));
+      // 🔴 2026-10-07 改：横幅要打**有效上限**（面板可改），不能打代码默认值 ——
+      //    否则面板设 3000、横幅写 1600，看起来像"设置没生效"（我差点被这个误导）
+      /今日 \$\{state\.dayCalls\}\/\$\{settings\.num\('dailyCalls'/.test(bsrc)
+      && /次调用（终身累计 \$\{state\.calls\} 次）/.test(bsrc));
     check('★ `[ai]` 日志行用的是账本口径 dayCalls（不是本文件的 callCount）',
       /今日第 \$\{st\.dayCalls\}\/\$\{st\.dailyCallLimit\} 次/.test(isrc));
     check('★ 日志网页卡片用 dayCalls 显示"今日调用"（不再显示终身累计）',
@@ -3458,6 +3461,66 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     // 🔴 这个"模板内反引号"坑咬过我三次 ⇒ 闸门里必须有专门检查（这里锁住闸门本身）
     check('★★ 页面闸门有"模板内不许出现反引号"的专项检查',
       /PAGE 模板\*\*内部\*\*出现了/.test(rd('../devtools/check-page-script.cjs')));
+  }
+
+  // ===== 第 41 组：用量趋势（2026-10-07 用户要的"用量趋势曲线"）=====
+  {
+    const rd = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    const usage = require('./usage');
+
+    // ① 纯函数：从 journal 文本倒推每日用量（喂假日志，不碰真文件）
+    const fake = [
+      '2026-10-05T09:00:00+08:00 h node[1]: [budget] 今日 ¥0.5000 / ¥3　累计 ¥5.0000 / ¥30（5000 次调用）',
+      '2026-10-05T23:00:00+08:00 h node[1]: [ai] x in=1 out=1 (今日第 412/1600 次 · 今日剩¥2.1000 · 累计剩¥11.0)',
+      '2026-10-06T23:59:00+08:00 h node[1]: [ai] x in=1 out=1 (今日第 995/1600 次 · 今日剩¥1.7000 · 累计剩¥9.0)',
+      '2026-10-07T13:00:00+08:00 h node[1]: 这行没有用量信息',
+    ].join('\n');
+    const parsed = usage.parseJournalText(fake, { dailyLimitYuan: 3 });
+    check('★★ 纯函数：能从 journal 倒推每日调用次数与花费',
+      parsed['2026-10-06'] && parsed['2026-10-06'].calls === 995
+      && Math.abs(parsed['2026-10-06'].spent - 1.3) < 0.001,
+      JSON.stringify(parsed));
+    check('  同一天取"更大的值"（当天末尾的数才是当天的量）',
+      parsed['2026-10-05'] && parsed['2026-10-05'].calls === 412
+      && Math.abs(parsed['2026-10-05'].spent - 0.9) < 0.001,
+      JSON.stringify(parsed['2026-10-05']));
+    check('★★ 横幅里的"（N 次调用）"是**终身累计**，绝不能当成当天次数',
+      // 假日志里那行横幅写着 5000 次调用（累计口径）⇒ 当天次数必须来自 [ai] 行的"今日第 412 次"
+      parsed['2026-10-05'].calls !== 5000);
+    check('  没有用量信息的行被忽略',
+      Object.keys(parsed).length === 2);
+
+    // ② 只增不减：重启后数字变小不能覆盖（否则曲线会莫名回退）
+    usage._write({ '2026-10-07': { calls: 700, spent: 1.5 } });
+    usage.record({ dayCalls: 3, daySpent: 0.1 }, new Date('2026-10-07T13:45:00').getTime());
+    const last = usage.summary(1, new Date('2026-10-07T13:45:00').getTime())[0];
+    check('★★ 只增不减（小值不覆盖大值，避免重启后曲线回退）',
+      last.calls === 700 && Math.abs(last.spent - 1.5) < 0.001, JSON.stringify(last));
+
+    // ③ 缺失的天补 0（曲线不能断）
+    const s3 = usage.summary(3, new Date('2026-10-07T13:45:00').getTime());
+    check('  缺失的天补 0（柱状图不会缺格）',
+      s3.length === 3 && s3[0].calls === 0 && s3[2].calls === 700);
+
+    // ④ 测试模式保护：绝不写真实 data/usage.json（读也不能去读文件 —— 这个坑在 settings.js 踩过）
+    check('★★ 测试模式不落盘，且读也走内存（XLJ_NO_PERSIST）',
+      process.env.XLJ_NO_PERSIST === '1' && /XLJ_NO_PERSIST/.test(rd('usage.js'))
+      && /XLJ_NO_PERSIST === '1'\) return cache/.test(rd('usage.js')));
+
+    // ⑤ 接线（逻辑对但没接 = 没做）
+    const isrc41 = rd('index.js');
+    check('★★ index.js 接了：启动回填 + 定期记录（unref 定时器）',
+      /usage\.backfill\(/.test(isrc41) && /usage\.record\(/.test(isrc41)
+      && /10 \* 60 \* 1000/.test(isrc41) && /unref/.test(isrc41));
+    check('★★ 面板接口只读 + 图表接线（写=机器人进程，读=面板，别抢写）',
+      /\/api\/usage/.test(rd('tools/logweb.js')) && /loadUsage/.test(rd('tools/page.js'))
+      && /renderUsage/.test(rd('tools/page.js')));
+    check('  零依赖（只用 node 内置模块）',
+      (() => {
+        const m = rd('usage.js').match(/require\('([^']+)'\)/g) || [];
+        const builtin = ['fs', 'path', 'child_process', 'zlib', 'crypto', 'http', 'https'];
+        return m.every((x) => builtin.some((b) => x.indexOf("'" + b + "'") > 0));
+      })());
   }
 
 

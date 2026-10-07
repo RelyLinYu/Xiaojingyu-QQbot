@@ -748,6 +748,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 🆕 2026-10-07 用量趋势（用户要的"用量趋势曲线"）：只读 `data/usage.json`
+  //    ⚠️ 写它的是**机器人进程**（只有它知道当天真实用量）；面板**只读**，避免两个进程抢写。
+  if (url.pathname === '/api/usage') {
+    const n = Number(url.searchParams.get('days')) || 14;
+    let days = [];
+    try { days = require('../usage').summary(n); } catch (e) { days = []; }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, days: days }));
+    return;
+  }
+
   // 🆕 开关机（写 data/power.json —— 机器人那边用 mtime 同步，几秒内生效）
   if (url.pathname === '/api/power' && req.method === 'POST') {
     const body = await readBody(req);

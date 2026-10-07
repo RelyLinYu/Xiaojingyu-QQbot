@@ -772,6 +772,26 @@ console.log('[小蓝鲸] 启动中…');
 console.log('[小蓝鲸] 模型:', cfg.ai.replyModel, '@', cfg.ai.baseUrl);
 console.log('[小蓝鲸] 判断模型:', cfg.ai.judgeModel, '| 日额度:', cfg.policy.dailyCallLimit);
 
+// 🆕 2026-10-07 用量趋势（用户要的"用量趋势曲线"）：两条腿
+//   ① **回填**：启动 25 秒后从 journal 抓最近 14 天，倒推出每日用量 ⇒ 曲线一上线就有内容
+//   ② **累积**：每 10 分钟把"今天"的快照写进 data/usage.json ⇒ 从这里往后数据是准的
+//   🔴 全部包 try + 定时器 unref：这个功能**绝不能影响回话**（它是纯观测）
+{
+  const usage = require('./usage');
+  const t1 = setTimeout(() => {
+    try {
+      const r = usage.backfill({ service: 'xiaolanjing', days: 14, dailyLimitYuan: cfg.budget.dailyLimitYuan });
+      console.log('[usage] 回填：' + (r.filled || 0) + ' 天（共 ' + (r.days || 0) + ' 天在库里）' + (r.why ? ' · ' + r.why : ''));
+    } catch (e) { console.warn('[usage] 回填失败（不影响运行）：' + e.message); }
+    try { const b = budget.status(); usage.record({ dayCalls: b.dayCalls, daySpent: b.daySpent }); } catch (e) { /* 忽略 */ }
+  }, 25000);
+  if (t1 && t1.unref) t1.unref();
+  const t2 = setInterval(() => {
+    try { const b = budget.status(); usage.record({ dayCalls: b.dayCalls, daySpent: b.daySpent }); } catch (e) { /* 忽略 */ }
+  }, 10 * 60 * 1000);
+  if (t2 && t2.unref) t2.unref();
+}
+
 // 🆕 开机/关机状态**一定要在启动时就打出来** ——
 //    否则"它怎么不理人"会被当成故障排查半天，其实就是关着机。
 {

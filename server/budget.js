@@ -79,7 +79,9 @@ function load() {
     rollover(true);
     console.log(`[budget] 今日 ¥${state.daySpent.toFixed(4)} / ¥${cfg.budget.dailyLimitYuan}　`
       + `累计 ¥${state.spentYuan.toFixed(4)} / ¥${cfg.budget.totalLimitYuan}　`
-      + `今日 ${state.dayCalls}/${cfg.policy.dailyCallLimit} 次调用（终身累计 ${state.calls} 次）`);
+      // 🔴 2026-10-07：横幅要打**有效上限**（面板可改），别打代码默认值 ——
+      //    否则面板设 3000、横幅还写 1600，看起来像"设置没生效"（我差点被这个误导）
+      + `今日 ${state.dayCalls}/${settings.num('dailyCalls', cfg.policy.dailyCallLimit)} 次调用（终身累计 ${state.calls} 次）`);
   } catch (e) {
     console.warn('[budget] 读取失败，从零开始:', e.message);
   }

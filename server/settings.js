@@ -20,7 +20,15 @@
 const fs = require('fs');
 const path = require('path');
 
-const APP_DIR = process.env.APP_DIR || path.join(__dirname, '..');
+// 🔴🔴 2026-10-07 修一个**潜伏很久的真 bug**：数据目录必须和 budget/power/memory 用**同一个算法**。
+//   原来这里是 `process.env.APP_DIR || path.join(__dirname, '..')`，而 **bot 服务没有设 APP_DIR**
+//   （只有 logweb 的 unit 里设了）⇒ 机器人算出来是 `/opt/data`、面板算出来是 `/opt/xiaolanjing/data`
+//   ⇒ **两边读写的根本不是同一个文件**：用户在面板改的次数上限 / 人设 / 示范，**机器人从来没看到过**。
+//   证据：面板显示上限 3000，而机器人日志一直打 `今日第 N/1600 次`（代码默认值）。
+//   ⇒ 现在统一成 `process.env.APP_DIR || __dirname`：
+//       · 服务器是**扁平布局**（模块就在 /opt/xiaolanjing 下）⇒ `__dirname` 就是应用根 ✅
+//       · 本地是 `server/` 子目录 ⇒ 数据落在 server/data（与 budget.js / power.js / memory.js 一致）✅
+const APP_DIR = process.env.APP_DIR || __dirname;
 const DATA_DIR = path.join(APP_DIR, 'data');
 const FILE = path.join(DATA_DIR, 'settings.json');
 const ENV_FILE = path.join(APP_DIR, '.env');

@@ -15,7 +15,10 @@
 const fs = require('fs');
 const path = require('path');
 
-const APP_DIR = process.env.APP_DIR || path.join(__dirname, '..');
+// 🔴 数据目录算法必须和 budget/power/memory/settings 一致（2026-10-07 修：
+//   原来用 `__dirname/..`，而 bot 服务没设 APP_DIR ⇒ 机器人读 `/opt/data`、面板读 `/opt/xiaolanjing/data`
+//   ⇒ **用户在面板改的语气示范，机器人从来没看到过**）
+const APP_DIR = process.env.APP_DIR || __dirname;
 const DATA_DIR = path.join(APP_DIR, 'data');
 const FILE = path.join(DATA_DIR, 'examples.json');
 
