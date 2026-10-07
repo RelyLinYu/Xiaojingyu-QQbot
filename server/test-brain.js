@@ -3669,6 +3669,27 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★★ 切换预设后要同时刷新"人设区 + 示范表"（否则表格是旧的）',
       /try \{ exLoad\(\); \}/.test(rd('tools/page.js'))
       && /function psActivate[\s\S]{0,600}exLoad\(\)/.test(rd('tools/page.js')));
+
+    // 🔴🔴 2026-10-07 用户：「还是这个灰色默认框……**禁止使用默认输入框**，要美化」
+    //    真因：皮肤层写的是 `input[type=text]`，而**没写 type 属性的 `<input>` 匹配不到**
+    //    （属性选择器不匹配"属性不存在"）⇒ 预设名那个框保持了浏览器原生灰底。
+    //    ⇒ 三层都要有：① 页面里每个 input 显式写 type；② CSS 兜底 `input:not([type])`；③ 下面的断言。
+    const pgI = rd('tools/page.js');
+    const badInput = [];
+    (function () {
+      const re = /<input\s([^>]*)>/g;
+      let m;
+      while ((m = re.exec(pgI))) {
+        const attrs = m[1];
+        if (!/type\s*=/.test(attrs) && !/^\s*id="' \+ id \+ '"/.test(attrs)) badInput.push(attrs.slice(0, 60));
+      }
+    })();
+    check('★★ 页面里每个 <input> 都必须显式写 type（禁止默认输入框）',
+      badInput.length === 0, JSON.stringify(badInput));
+    check('★★ CSS 兜底覆盖没写 type 的 input（input:not([type])）',
+      /input:not\(\[type\]\)/.test(pgI));
+    check('  输入框有统一的 placeholder 颜色（不然默认灰很突兀）',
+      /input::placeholder/.test(pgI));
   }
 
 

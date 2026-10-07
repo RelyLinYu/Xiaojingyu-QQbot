@@ -92,9 +92,15 @@ const PAGE = (opts) => `<!doctype html>
   .dec { margin-top:3px; color:var(--dim); font-size:12.5px; }
   .ans { background:#0d1729; border-left:3px solid var(--ok); padding:7px 10px;
          border-radius:0 8px 8px 0; margin:6px 0 2px; color:#d1fae5; }
-  input[type=text], input[type=number], input[type=password] { font:inherit; color:var(--txt);
+  /* 🔴🔴 2026-10-07（用户：「还是这个灰色默认框……禁止使用默认输入框」）：
+     原来这里只写 input[type=text]，而**没写 type 属性的 input 是匹配不到的**
+     （属性选择器不会匹配"属性不存在"）⇒ 预设名那个框保持了浏览器原生外观（灰底）。
+     ⇒ 现在**显式带上 input:not([type])**（兜底），并且页面里所有 input 都要求写 type（有断言锁）。*/
+  input[type=text], input[type=number], input[type=password], input[type=search], input:not([type]) {
+         font:inherit; color:var(--txt);
          background:#0d1729; border:1px solid var(--line); border-radius:8px; padding:7px 9px; min-width:0; }
   input:focus { outline:1px solid var(--link); }
+  input::placeholder { color:#64748b; }
   button { font:inherit; color:var(--txt); background:#1e293b; border:1px solid #334155;
            border-radius:9px; padding:8px 12px; cursor:pointer; }
   button:active { transform:translateY(1px); }
@@ -230,7 +236,7 @@ const PAGE = (opts) => `<!doctype html>
      大文本框/下拉框改成和圆角卡片同一套观感（柔和底色 + 内高光 + 聚焦光环 + 更贴合的圆角），
      并去掉浏览器那个生硬的右下角拉伸柄。
      ============================================================ */
-  textarea, input[type=text], input[type=number], input[type=password], select {
+  textarea, input[type=text], input[type=number], input[type=password], input[type=search], input:not([type]), select {
     background:linear-gradient(180deg, #101c33, #0d1729);
     border:1px solid #26365a; border-radius:12px; padding:10px 12px;
     box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
@@ -305,7 +311,7 @@ const PAGE = (opts) => `<!doctype html>
     <summary>🎭 人设预设（点卡片就能切换性格）</summary>
     <div class="card">
       <div class="exbar" style="margin:0 0 10px">
-        <input id="psName" placeholder="给这套性格起个名字（如：甜系傲娇 / 冷静毒舌）" style="flex:1;min-width:180px">
+        <input type="text" id="psName" placeholder="给这套性格起个名字（如：甜系傲娇 / 冷静毒舌）" maxlength="20" style="flex:1;min-width:180px">
         <button class="primary sm" onclick="psCapture()">＋ 把当前人设+示范存成预设</button>
       </div>
       <div id="psList"></div>
