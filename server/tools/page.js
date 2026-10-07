@@ -176,22 +176,22 @@ const PAGE = (opts) => `<!doctype html>
   </details>
 
   <!-- 🆕 2026-10-06 用户要的「示范显化 / 可编辑」：
-       鱼的语气主要由这些示范决定（比人设文字影响更大）⇒ 做成面板可改。 -->
-  <section data-page="settings">
-    <h2>🐟 语气示范（教它怎么说话）</h2>
-    <div class="card">
-      <p class="hint">左边是「群友说」，右边是「鱼回」。<b>决定鱼语气的其实就是这些</b>（比人设那段文字影响更大）。</p>
-      <div id="exList"></div>
-      <div class="exbar">
-        <button class="sm" onclick="exAdd()">+ 加一组</button>
-        <button class="sm primary" onclick="exSave()">保存全部</button>
-        <button class="sm" onclick="exReset()">恢复默认</button>
-        <span id="exNote" class="hint" style="margin:0"></span>
-      </div>
-      <p class="hint">⚠️ 保存后会**立刻生效**（不用重启）。但示范属于 prompt 前缀 ⇒ **每改一次，模型缓存失效一次**（贵一点）。
-        建议：改完先去上面「🧪 试聊」试两句，满意就别再来回改。</p>
+       鱼的语气主要由这些示范决定（比人设文字影响更大）⇒ 做成面板可改。
+       2026-10-06 晚（用户）：「给示范卡片加收展功能，默认收，也就是跟其他卡片一样」
+       ⇒ 从 <section>+<h2> 改成 <details>+<summary>（和「参数设置」同款），**默认收起**（不加 open）。 -->
+  <details data-page="settings">
+    <summary>🐟 语气示范（教它怎么说话，点开修改）</summary>
+    <p class="hint">左边是「群友说」，右边是「鱼回」。<b>决定鱼语气的其实就是这些</b>（比人设那段文字影响更大）。</p>
+    <div id="exList"></div>
+    <div class="exbar">
+      <button class="sm" onclick="exAdd()">+ 加一组</button>
+      <button class="sm primary" onclick="exSave()">保存全部</button>
+      <button class="sm" onclick="exReset()">恢复默认</button>
+      <span id="exNote" class="hint" style="margin:0"></span>
     </div>
-  </section>
+    <p class="hint">⚠️ 保存后会**立刻生效**（不用重启）。但示范属于 prompt 前缀 ⇒ **每改一次，模型缓存失效一次**（贵一点）。
+      建议：改完先去上面「🧪 试聊」试两句，满意就别再来回改。</p>
+  </details>
 
   <section data-page="settings">
     <h2>🧪 试聊（只给看，不发群）</h2>

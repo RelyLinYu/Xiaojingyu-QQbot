@@ -2404,8 +2404,14 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         /底细/.test(p) && /DeepSeek/.test(p));
     }
 
-    check('★ lean 版没失控（< 650 字；248 → 433 → 572）',
+    check('★ lean 版没失控（< 650 字；248 → 433 → 572 → 646）',
       lean.length < 650, String(lean.length));
+
+    // 🔴 2026-10-07 用户报「他说自己不能识图」：真因是**人设从没告诉它"你能看图"**
+    //    （识图是把图变成文字描述塞进消息，模型只看到文字 ⇒ 它按"纯文本 AI"自我认知答"看不了"）
+    //    ⇒ 人设里必须留着这条自我认知，否则它会一本正经地否认自己的能力。
+    check('★★ 人设里必须写着"你能看懂图"（否则它会自称看不了图）',
+      /【看图】/.test(lean) && /能看懂图/.test(lean) && /我看不了图/.test(lean));
     check('  lean 仍然远短于 full（保持精简版的意义）',
       lean.length < full.length * 0.6, `${lean.length} vs ${full.length}`);
     check('  两套词都还在（切换 promptStyle 不会丢规则）',
@@ -3418,6 +3424,14 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /lookupByTime/.test(rd('tools/logweb.js')) && /how = 'time2'/.test(rd('tools/logweb.js')));
     check('  且空白昵称不再被直接丢掉（仍进全局时间轴）',
       /if \(!w\) continue;/.test(rd('tools/logweb.js')));
+
+    // 🔴 2026-10-06 用户：「给示范卡片加收展功能，默认收，也就是跟其他卡片一样」
+    //    ⇒ 示范得是 <details>+<summary>（同「参数设置」），且**不加 open**（默认收起）
+    check('★★ 示范卡片可收起、且默认收（跟参数设置同款）',
+      /<details data-page="settings">[\s\S]{0,80}<summary>🐟 语气示范/.test(rd('tools/page.js'))
+      && !/<details data-page="settings" open>[\s\S]{0,80}<summary>🐟/.test(rd('tools/page.js')));
+    check('  「原始日志」仍是默认**展开**（那是另一处要求，别被一起改掉）',
+      /<details data-page="raw" open>/.test(rd('tools/page.js')));
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
