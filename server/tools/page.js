@@ -200,6 +200,32 @@ const PAGE = (opts) => `<!doctype html>
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration:.001ms !important; transition-duration:.001ms !important; }
   }
+  /* ============================================================
+     2026-10-07（用户：「这个框不好看」）—— 把"原生输入框味"收拾掉：
+     大文本框/下拉框改成和圆角卡片同一套观感（柔和底色 + 内高光 + 聚焦光环 + 更贴合的圆角），
+     并去掉浏览器那个生硬的右下角拉伸柄。
+     ============================================================ */
+  textarea, input[type=text], input[type=number], input[type=password], select {
+    background:linear-gradient(180deg, #101c33, #0d1729);
+    border:1px solid #26365a; border-radius:12px; padding:10px 12px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+  }
+  textarea { padding:14px; font-size:13.5px; line-height:1.85; letter-spacing:.01em;
+             resize:vertical; min-height:360px; }
+  textarea:hover, input:hover, select:hover { border-color:#33456e; }
+  textarea:focus, input:focus, select:focus {
+    border-color:#4b7bd6; box-shadow:inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 3px rgba(59,130,246,.16); }
+  /* 去掉 Chrome/Safari 自带的拉伸柄（那个小三角最显廉价） */
+  textarea::-webkit-resizer { background:transparent; }
+  select { appearance:none; -webkit-appearance:none; padding-right:30px;
+    background-image:linear-gradient(45deg,transparent 50%,#8ea0bb 50%),
+                     linear-gradient(135deg,#8ea0bb 50%,transparent 50%);
+    background-position:calc(100% - 16px) 50%, calc(100% - 11px) 50%;
+    background-size:5px 5px, 5px 5px; background-repeat:no-repeat; }
+  /* 示范表格：删除按钮改成"幽灵按钮"，别每行一块大红 */
+  .exrow button.danger { background:transparent; border-color:rgba(239,68,68,.45); color:#fca5a5;
+    box-shadow:none; }
+  .exrow button.danger:hover { background:rgba(239,68,68,.14); filter:none; }
 </style></head>
 <body>
 <header>
@@ -418,6 +444,8 @@ function renderSettings(s){
     return '<div class="frow' + tall + '"><label for="' + id + '">' + esc(it.label) + '</label>' +
       (k === 'personaText'
         ? '<textarea id="' + id + '" data-key="' + k + '" rows="20" placeholder="留空=用代码里的默认人设">' + esc(val) + '</textarea>'
+          // 🆕 2026-10-07 用户嫌那个框"不好看"⇒ 顺手给它一点信息装饰（字数 + 估算 token，他能直接感知成本）
+          + '<div class="hint pnmeta" id="pnCount"></div>'
         : '<input id="' + id + '" data-key="' + k + '" ' +
           // ⚠️⚠️ 密码分支的收尾 > **必须留着**（这个收尾符被吃掉过两次，害得「保存」变纯文本）
           (it.secret ? 'type="password" placeholder="留空=不改；粘贴新的会覆盖" value="">' :
@@ -428,6 +456,24 @@ function renderSettings(s){
     // 🆕 2026-10-06 用户问：人设不是还有 14 组示例吗？⇒ 说清这个框管到哪、以及示例仍在生效
     + '<p class="hint">人设 = <b>上面这个大框（system 人设）</b> + <b>14 组示范（examples，写在代码里、<u>仍然生效</u>，这个框改不到它）</b>。'
     + '清空保存 = 回到默认人设。</p>';
+  personaInit();     // 🆕 文字计数（字 + 估算 token）
+}
+
+// 🆕 2026-10-07：人设框的文字计数（本项目实测过换算比：**1 字 ≈ 0.567 token**）
+function personaInit(){
+  var ta = document.getElementById('set_personaText');
+  var box = document.getElementById('pnCount');
+  // ⚠️ 防御：非浏览器环境（自测的 vm 沙箱）元素桩可能没有 addEventListener ⇒ 不能让它抛错
+  if (!ta || !box || typeof ta.addEventListener !== 'function') return;
+  var upd = function () {
+    var n = (ta.value || '').length;
+    var tok = Math.round(n * 0.567);
+    box.textContent = n + ' 字 · 约 ' + tok + ' token'
+      + (n > 1400 ? '　⚠️ 偏长了，建议精简（每次对话都要重发）' : '');
+    box.style.color = n > 1400 ? '#fca5a5' : '';
+  };
+  ta.addEventListener('input', upd);
+  upd();
 }
 
 async function saveOne(key){
