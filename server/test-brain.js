@@ -3590,6 +3590,52 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       JSON.stringify(two && two.notes));
   }
 
+  // ===== 第 43 组：人设预设（2026-10-07 用户「把当前人设+示范做成预设卡片，点卡片切换」）=====
+  {
+    const rd = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    const ps = require('./presets');
+
+    // ① 存一个（内容取"当前生效的人设+示范"）
+    const c = ps.capture('测试预设A');
+    check('★ 能把当前人设+示范存成预设', c.ok === true && c.item.personaChars >= 0 && c.item.exampleCount > 0,
+      JSON.stringify(c));
+    check('  重名/空名被拒', ps.capture('测试预设A').ok === false && ps.capture('  ').ok === false);
+
+    // ② 切换 = 真的写回两个真源（人设 settings + 示范 examples）
+    const a = ps.activate(c.item.id);
+    check('★★ 切换会写回"人设 + 示范"两个真源（复用现有链路，不另立一套）',
+      a.ok === true && (a.did || []).length === 2, JSON.stringify(a));
+    check('  不存在的 id 被拒（不抛错）', ps.activate('nope').ok === false && ps.remove('nope').ok === false);
+
+    // ③ active 标记靠"内容比对"得出（他手改之后自然就不是 active 了）
+    check('★★ 内容一致的那张被标成 active（不用额外存状态）',
+      ps.list().some((x) => x.active === true));
+
+    // ④ 改名与删除
+    check('  改名成功', ps.rename(c.item.id, '测试预设B').ok === true);
+    check('  删除成功', ps.remove(c.item.id).ok === true && ps.list().every((x) => x.name !== '测试预设B'));
+
+    // ⑤ 安全和隔离
+    check('★★ 原子写 + 改前备份 + 上限校验（同 settings/examples 的做法）',
+      /renameSync/.test(rd('presets.js')) && /copyFileSync/.test(rd('presets.js'))
+      && /MAX_ITEMS/.test(rd('presets.js')) && /XLJ_NO_PERSIST/.test(rd('presets.js')));
+    check('★ 数据目录算法与其他模块一致（APP_DIR 或 __dirname，别再分裂）',
+      /process\.env\.APP_DIR \|\| __dirname/.test(rd('presets.js')));
+
+    // ⑥ 接线：接口 + 面板（逻辑对但没接 = 没做）
+    check('★★ 面板接口 /api/presets（读 + capture/activate/rename/remove）',
+      /\/api\/presets/.test(rd('tools/logweb.js'))
+      && /act === 'capture'/.test(rd('tools/logweb.js'))
+      && /act === 'activate'/.test(rd('tools/logweb.js'))
+      && /act === 'remove'/.test(rd('tools/logweb.js')));
+    // 🔴 我第一次忘了 JSON.parse（`readBody` 返回**字符串**）⇒ 所有 POST 都回"未知操作"
+    check('★★ 预设接口会解析请求体（readBody 返回的是字符串，不是对象）',
+      /JSON\.parse\(\(await readBody\(req\)\) \|\| '\{\}'\)/.test(rd('tools/logweb.js')));
+    check('★★ 面板有预设卡片 + 点击切换',
+      /psList/.test(rd('tools/page.js')) && /psActivate/.test(rd('tools/page.js'))
+      && /data-ps=/.test(rd('tools/page.js')) && /renderPresets/.test(rd('tools/page.js')));
+  }
+
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);

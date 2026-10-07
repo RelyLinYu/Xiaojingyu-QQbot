@@ -748,6 +748,35 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 🆕 2026-10-07 人设预设（用户：「可以把当前的人设提示词+示范做成一个人设预设，
+  //    存成预设卡片，然后点击卡片可以切换不同的人设预设」）
+  //    读：GET /api/presets → { items:[{id,name,personaChars,exampleCount,preview,active}] }
+  //    写：POST /api/presets { action:'capture'|'activate'|'rename'|'remove', id?, name? }
+  //    ⚠️ `activate` 是**真的切换**：把人设写进 settings.personaText、示范写进 data/examples.json
+  //       （复用现有真源，不另立一套 ⇒ 切完"人设框/示范表"里立刻能看到新内容）
+  if (url.pathname === '/api/presets') {
+    const ps = require('../presets');
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(Object.assign({ ok: true }, ps.status())));
+      return;
+    }
+    // ⚠️ `readBody` 返回的是**原始字符串**（不是对象）—— 我第一次直接当成对象用
+    //    ⇒ `body.action` 永远 undefined ⇒ **所有 POST 都回「未知操作」**（线上实测抓到）
+    let body = {};
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
+    const act = String(body.action || '');
+    let r;
+    if (act === 'capture') r = ps.capture(body.name);
+    else if (act === 'activate') r = ps.activate(String(body.id || ''));
+    else if (act === 'rename') r = ps.rename(String(body.id || ''), body.name);
+    else if (act === 'remove') r = ps.remove(String(body.id || ''));
+    else r = { ok: false, why: '未知操作' };
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(Object.assign({ ok: r.ok }, r, { status: ps.status() })));
+    return;
+  }
+
   // 🆕 2026-10-07 用量趋势（用户要的"用量趋势曲线"）：只读 `data/usage.json`
   //    ⚠️ 写它的是**机器人进程**（只有它知道当天真实用量）；面板**只读**，避免两个进程抢写。
   if (url.pathname === '/api/usage') {

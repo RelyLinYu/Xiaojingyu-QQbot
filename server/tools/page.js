@@ -78,6 +78,17 @@ const PAGE = (opts) => `<!doctype html>
   .tag.yes { background:rgba(16,185,129,.18); color:#6ee7b7; }
   /* 🆕 处理细节（收到图/动图抽帧…）：一行小字，淡淡的，不抢"决策"的戏 */
   .note { font-size:11px; color:#7c8aa5; margin:2px 0 4px; }
+  /* 🆕 2026-10-07 人设预设卡片（点卡片 = 切换） */
+  .psgrid { display:flex; flex-wrap:wrap; gap:10px; }
+  .pcard2 { flex:1 1 220px; max-width:340px; border:1px solid #26365a; border-radius:14px; padding:11px 13px;
+            background:linear-gradient(180deg,#131f38,#0f1a30); cursor:pointer;
+            transition:transform .16s cubic-bezier(.2,.7,.2,1), border-color .16s, box-shadow .16s; }
+  .pcard2:hover { transform:translateY(-2px); border-color:#4b7bd6; box-shadow:0 6px 18px rgba(0,0,0,.28); }
+  .pcard2.on { border-color:#34d399; box-shadow:inset 0 0 0 1px rgba(52,211,153,.5); }
+  .pcard2 b { font-size:14px; }
+  .pcard2 .pmeta { font-size:11px; color:var(--dim); margin:5px 0 7px; }
+  .pcard2 .prow { display:flex; gap:6px; }
+  .pcard2 .ptag { font-size:11px; color:#6ee7b7; }
   .dec { margin-top:3px; color:var(--dim); font-size:12.5px; }
   .ans { background:#0d1729; border-left:3px solid var(--ok); padding:7px 10px;
          border-radius:0 8px 8px 0; margin:6px 0 2px; color:#d1fae5; }
@@ -287,6 +298,21 @@ const PAGE = (opts) => `<!doctype html>
         日额度 <b id="useDailyTxt">…</b> 是"钱"那道闸 —— 两者哪个先撞，看这张图就知道。</p>
     </div>
   </section>
+
+  <!-- 🆕 2026-10-07 人设预设（用户：「把当前的人设提示词+示范做成一个人设预设，存成预设卡片，
+       然后点击卡片可以切换不同的人设预设」）-->
+  <details data-page="settings" class="pcard">
+    <summary>🎭 人设预设（点卡片就能切换性格）</summary>
+    <div class="card">
+      <div class="exbar" style="margin:0 0 10px">
+        <input id="psName" placeholder="给这套性格起个名字（如：甜系傲娇 / 冷静毒舌）" style="flex:1;min-width:180px">
+        <button class="primary sm" onclick="psCapture()">＋ 把当前人设+示范存成预设</button>
+      </div>
+      <div id="psList"></div>
+      <p class="hint">一个预设 = <b>整套性格</b>（人设提示词 ＋ 语气示范）。<b>点卡片 = 切换</b>，立刻生效、不用重启。
+        ⚠️ 切换属于 prompt 前缀，改一次会让模型缓存失效一次（贵一点点）。</p>
+    </div>
+  </details>
 
   <section data-page="overview">
     <h2>开关机</h2>
@@ -700,6 +726,8 @@ try { load(true); } catch (e) {
 try { exLoad(); } catch (e) { /* 读不到不影响别的 */ }
 // 🆕 用量趋势：默认画最近 14 天
 try { loadUsage(14); } catch (e) { /* 读不到不影响别的 */ }
+// 🆕 人设预设：进页面就列出卡片
+try { psLoad(); } catch (e) { /* 读不到不影响别的 */ }
 // 🔴 分页面（2026-10-06 用户要求「做几个分页面，别全挤在一起」）：
 //    同一份 HTML 里给每个区块打了 data-page，这里按 body[data-page] 显隐 + 高亮标签栏。
 //    ⚠️ 用 CSS 显隐而不是"多套模板" —— 保证**只有一份模板**（避免又踩"两份拷贝"的坑）。
@@ -928,6 +956,109 @@ async function loadUsage(n) {
     if (el) el.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
   }
 }
+
+// ===== 🆕 2026-10-07 人设预设（用户要的「存成预设卡片，点卡片切换」）=====
+// ⚠️ 只用字符串拼接，不用模板字符串/反引号（模板里的反引号会把 PAGE 截断）
+async function psApi(payload) {
+  const opt = payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : {};
+  const r = await fetch('/api/presets?p=' + encodeURIComponent(P), opt);
+  return await r.json();
+}
+
+function renderPresets(j) {
+  const el = document.getElementById('psList');
+  if (!el) return;
+  const items = (j && j.items) || [];
+  if (!items.length) {
+    el.innerHTML = '<p class="hint">还没有预设。点上面的按钮，把<b>现在这套性格</b>存成第一张卡片。</p>';
+    return;
+  }
+  el.innerHTML = '<div class="psgrid">' + items.map(function (it) {
+    const on = it.active ? ' on' : '';
+    const tag = it.active ? '<span class="ptag">● 正在使用</span>' : '<span class="pmeta">点一下切到它</span>';
+    return '<div class="pcard2' + on + '" data-ps="' + esc(it.id) + '" data-psname="' + esc(it.name) + '">' +
+      '<b>' + esc(it.name) + '</b>' +
+      '<div class="pmeta">人设 ' + it.personaChars + ' 字 · 示范 ' + it.exampleCount + ' 组<br>' +
+        esc(it.preview || '（空人设 = 用代码默认）') + '…</div>' +
+      '<div class="prow">' + tag +
+        '<span style="flex:1"></span>' +
+        '<button class="sm" data-psrename="' + esc(it.id) + '">改名</button>' +
+        '<button class="sm danger" data-psdel="' + esc(it.id) + '">删</button>' +
+      '</div></div>';
+  }).join('') + '</div>';
+}
+
+async function psLoad() {
+  try {
+    renderPresets(await psApi(null));
+  } catch (e) {
+    const el = document.getElementById('psList');
+    if (el) el.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
+  }
+}
+
+async function psCapture() {
+  const inp = document.getElementById('psName');
+  const name = inp ? inp.value.trim() : '';
+  try {
+    const j = await psApi({ action: 'capture', name: name });
+    if (!j.ok) { setErr(j.why || '存失败'); return; }
+    if (inp) inp.value = '';
+    setErr('');
+    renderPresets(j.status);
+  } catch (e) { setErr('存失败：' + e.message); }
+}
+
+async function psActivate(id) {
+  try {
+    const j = await psApi({ action: 'activate', id: id });
+    if (!j.ok) { setErr(j.why || '切换失败'); return; }
+    setErr('');
+    renderPresets(j.status);
+    load(true);          // 让人设框 / 示范表也跟着刷新成新内容
+  } catch (e) { setErr('切换失败：' + e.message); }
+}
+
+async function psRename(id, old) {
+  const n = prompt('预设名字：', old || '');
+  if (n === null) return;
+  try {
+    const j = await psApi({ action: 'rename', id: id, name: n });
+    if (!j.ok) { setErr(j.why || '改名失败'); return; }
+    setErr('');
+    renderPresets(j.status);
+  } catch (e) { /* 忽略 */ }
+}
+
+async function psRemove(id) {
+  try {
+    const j = await psApi({ action: 'remove', id: id });
+    if (!j.ok) { setErr(j.why || '删除失败'); return; }
+    setErr('');
+    renderPresets(j.status);
+  } catch (e) { /* 忽略 */ }
+}
+
+// 预设卡片的点击：点卡片 = 切换；点"改名/删" = 不切换（事件委托）
+document.addEventListener('click', function (ev) {
+  var t = ev.target;
+  if (!t || !t.closest) return;
+  var del = t.closest('[data-psdel]');
+  if (del) {
+    ev.stopPropagation();
+    if (confirm('删掉这个预设？（不影响当前正在用的人设）')) psRemove(del.getAttribute('data-psdel'));
+    return;
+  }
+  var rn = t.closest('[data-psrename]');
+  if (rn) {
+    ev.stopPropagation();
+    var card = rn.closest('.pcard2');
+    psRename(rn.getAttribute('data-psrename'), card ? card.getAttribute('data-psname') : '');
+    return;
+  }
+  var c = t.closest('[data-ps]');
+  if (c && !c.classList.contains('on')) psActivate(c.getAttribute('data-ps'));
+});
 
 function initPages(){
   document.body.setAttribute("data-page", CUR);
