@@ -222,6 +222,13 @@ const PAGE = (opts) => `<!doctype html>
                      linear-gradient(135deg,#8ea0bb 50%,transparent 50%);
     background-position:calc(100% - 16px) 50%, calc(100% - 11px) 50%;
     background-size:5px 5px, 5px 5px; background-repeat:no-repeat; }
+  /* 🔴 2026-10-07（用户：「文字背景同色」）：下拉**展开后的选项列表**是浏览器/系统自己画的，
+     不受 select 自身 background 的影响 ⇒ **必须显式给 option 上色**，
+     否则就会出现「浅色弹层 + 我们的浅色文字 = 看不见」。
+     （只在 :root 上写 color-scheme:dark 不够 —— 部分平台的弹层不吃它，所以必须显式给 option 上色。） */
+  select { color:var(--txt); }
+  select option, select optgroup { background-color:#0d1729; color:#e6edf7; }
+  select option:checked, select option:checked:hover { background-color:#1d4ed8; color:#fff; }
   /* 示范表格：删除按钮改成"幽灵按钮"，别每行一块大红 */
   .exrow button.danger { background:transparent; border-color:rgba(239,68,68,.45); color:#fca5a5;
     box-shadow:none; }

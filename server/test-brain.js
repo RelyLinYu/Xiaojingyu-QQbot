@@ -3449,6 +3449,15 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /id="sfxBtn"/.test(pg) && /localStorage/.test(pg));
     check('★ 尊重系统"减少动效"设置（prefers-reduced-motion）',
       /prefers-reduced-motion/.test(pg));
+
+    // 🔴 2026-10-07 用户报「文字背景同色」：下拉**展开后的选项列表**是浏览器/系统画的，
+    //    只给 select 上色不够 ⇒ 必须显式给 option 上色，否则浅色弹层 + 浅色文字 = 看不见
+    check('★★ 下拉选项也上了色（否则弹层里"文字背景同色"看不见）',
+      /select option/.test(pg) && /background-color:#0d1729/.test(pg));
+
+    // 🔴 这个"模板内反引号"坑咬过我三次 ⇒ 闸门里必须有专门检查（这里锁住闸门本身）
+    check('★★ 页面闸门有"模板内不许出现反引号"的专项检查',
+      /PAGE 模板\*\*内部\*\*出现了/.test(rd('../devtools/check-page-script.cjs')));
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

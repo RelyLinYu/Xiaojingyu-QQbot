@@ -22,6 +22,23 @@ const tpl = src.slice(st + startMark.length, en);
 const m = /<script>([\s\S]*)<\/script>/.exec(tpl);
 if (!m) { console.log('❌ PAGE 里找不到 <script> 块'); process.exit(1); }
 
+// 🔴🔴 2026-10-07 加（**这个坑已经咬过我三次**）：模板字符串**内部**（含注释、CSS、JS）
+//    一旦再出现反引号，模板就会被提前截断 ⇒ 表现为"某行莫名其妙的语法错 / PAGE 返回非字符串"。
+//    ⇒ 专门数一遍：PAGE 区段里**只该有 2 个反引号**（开头一个、结尾一个）；
+//      有了这条，诊断会直接说"你多打了个反引号"，不用再去猜语法错。
+{
+  let n = 0;
+  for (let k = 0; k < tpl.length; k++) if (tpl[k] === TICK) n++;
+  if (n > 0) {
+    console.log('❌ PAGE 模板**内部**出现了 ' + n + ' 个反引号（必须为 0）—— 它会把模板字符串提前截断！');
+    tpl.split('\n').forEach((l, k) => {
+      if (l.includes(TICK)) console.log('   L' + (k + 1) + ': ' + l.trim().slice(0, 110));
+    });
+    console.log('   ⇒ 把那几行的反引号去掉（注释里要举例就直接写字，别用反引号）');
+    process.exit(1);
+  }
+}
+
 // 服务端插值 → 字符串字面量（还原浏览器实际收到的内容）
 const rendered = m[1].replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"PW"');
 try {
