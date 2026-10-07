@@ -78,6 +78,60 @@ function humanizeDecision(body) {
   return s.trim();
 }
 
+// 🆕 2026-10-07（用户：「都是动图和下载是什么，群里不都是纯文本对话吗」）：
+//   这类行是**处理细节**（"图下载好了""动图抽了几帧""视频跳过了"），
+//   跟"要不要回、回什么"**没关系** ⇒ 🔴 **不能占"决策"的位置**。
+//   原来它们会被当成 decision（卡片上读起来像"回了 🌐 下载 OK 60KB…"），
+//   既误导又难懂 ⇒ 现在单独收进 `notes`（渲染成一行淡淡的说明），并**翻成人话**。
+const NOTE_RES = [
+  /^🖼/, /^📷/, /^🎬/, /^🎞/, /^封面/, /^卡片已生成/, /^下载/, /^跳过/, /^视频/,
+];
+// ⚠️ 必须**先剥前导空白再剥树形符** —— `DECISION_PREFIX` 只匹配"行首紧跟树形符"，
+//    而日志里传进来的是 `   ├ 🖼 …`（前面有缩进空格）⇒ 只 replace 剥不掉 ⇒ 判定全部失效。
+//    （这个 bug 被自测当场抓到：isNote 对着 `  ├ 🖼 动图…` 返回 false。）
+function noteText(s) {
+  return String(s == null ? '' : s).replace(/^\s+/, '').replace(DECISION_PREFIX, '').trim();
+}
+function isNote(s) {
+  const t = noteText(s);
+  return NOTE_RES.some((re) => re.test(t));
+}
+// 把处理细节翻成人话（**保留原意、去掉行话**；认不出来就原样返回）
+// ⚠️ 别依赖"日志用哪个表情" —— 先剥掉前导表情，再按**内容**匹配
+//    （我第一次就是写死了 🎬，而线上那行实际是 🖼 动图… ⇒ 翻译规则全部落空，自测当场抓到）
+function humanizeNote(body) {
+  const s = noteText(body);
+  const b = s.replace(/^(?:🖼|📷|🎬|🎞|🌐)\s*/, '');
+  let m;
+  if ((m = /^动图：共\s*(\d+)\s*帧/.exec(b))) return '🎞️ 动图（' + m[1] + ' 帧），抽了 4 帧来看 —— 识图接口只看得到第一帧';
+  if ((m = /^下载 OK\s*([\d.]+\s*\w+)?/.exec(b))) return '📷 收到一张图' + (m[1] ? '（' + m[1].trim() + '）' : '');
+  if (/^识别成功/.test(b)) return '📷 看懂这张图了';
+  if (/^命中缓存/.test(b)) return '📷 这张图之前看过';
+  if ((m = /^有图片，但跳过识别（(.+?)）/.exec(b))) return '📷 收到图，但没识别（' + m[1] + '）';
+  if ((m = /^识别失败[:：]\s*(.+)$/.exec(b))) return '📷 图没看清（' + m[1] + '）';
+  if (/^模型返回空描述/.test(b)) return '📷 图里没看出内容';
+  // 引用图片时复用旧描述 —— 有信息量但太长，只留"用了之前看到的描述" + 前 30 字
+  if (/^引用的是一条\**图片\**消息/.test(b)) {
+    const desc = (b.split(/[:：]/).slice(1).join('：') || '').trim().slice(0, 30);
+    return '📷 引用了一张图' + (desc ? '（用的是之前看到的：' + desc + '…）' : '（用的是之前看到的描述）');
+  }
+  // 同一家族的另一种说法（真实 journal 里量到的第二变体）
+  if (/^本群刚发过图/.test(b)) {
+    const desc = (b.split(/[:：]/).slice(1).join('：') || '').trim().slice(0, 30);
+    return '📷 用了刚发过的那张图' + (desc ? '（' + desc + '…）' : '');
+  }
+  if ((m = /^跳过（(.+?)）/.exec(b))) return '🎬 视频跳过（' + m[1] + '）';
+  return s;
+}
+
+// 🆕 这些细节**纯属计时/内部步骤**，对用户没有任何信息量 ⇒ 直接不进 notes
+//    （真实 journal 实测出来的：「🖼 模型返回（1.0s）」×44 条，纯噪音）
+const NOTE_DROP_RES = [/^模型返回/];
+function isDroppedNote(body) {
+  const b = noteText(body).replace(/^(?:🖼|📷|🎬|🎞|🌐)\s*/, '');
+  return NOTE_DROP_RES.some((re) => re.test(b));
+}
+
 // ---------- 主入口 ----------
 // 输入：journal 文本（多行）
 // 输出：{ convos: [...], raw: [...] }
@@ -130,6 +184,7 @@ function parseConversations(journalText, opts = {}) {
         text: (inMsg[4] || '').trim(),
         time: p.time,
         decision: '',
+        notes: [],           // 🆕 处理细节（图/视频/封面…），和"决策"分开，别混在一起
         replies: [],
         wantReply: false,
       };
@@ -140,6 +195,13 @@ function parseConversations(journalText, opts = {}) {
     // ② 决策行（⚠️ 用 trimmed —— 日志里树形符号前面有缩进）
     if (cur && /^[├└│]/.test(trimmed(body))) {
       if (isNoise(body)) continue;                 // 英文噪音，直接丢
+      // 🆕 处理细节（图/视频/封面…）⇒ 单独收，**绝不占决策位**
+      if (isNote(body)) {
+        if (isDroppedNote(body)) continue;         // 纯计时/内部步骤，不进 notes
+        const n = humanizeNote(body);
+        if (n && cur.notes.indexOf(n) < 0) cur.notes.push(n);   // 去重（同一张图会打好几行）
+        continue;
+      }
       const d = humanizeDecision(body);
       if (!d) continue;
       if (NO_REPLY_RE.test(d)) {
@@ -202,4 +264,6 @@ module.exports = {
   _parseLine: parseLine,
   _isNoise: isNoise,
   _humanizeDecision: humanizeDecision,
+  _isNote: isNote,
+  _humanizeNote: humanizeNote,
 };

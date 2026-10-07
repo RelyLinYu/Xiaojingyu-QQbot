@@ -3532,6 +3532,65 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
   }
 
 
+  // ===== 第 42 组：处理细节不占"决策"位 + 翻成人话（2026-10-07 用户「都是动图和下载是什么」）=====
+  {
+    const rd = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    const convo = require('./tools/convo.js');
+
+    // ① 分类：图/动图/封面 是"处理细节"，不是决策
+    check('★★ 图/动图/封面 算处理细节（不该占"决策"位）',
+      convo._isNote('  ├ 🖼 下载 OK 60KB') === true
+      && convo._isNote('  ├ 🎬 动图：共 75 帧') === true
+      && convo._isNote('  ├ 封面 1920×1080 → #480px') === true
+      && convo._isNote('  ├ 不回（该成员冷却中）') === false
+      && convo._isNote('  ├ ✓ 你好') === false);
+
+    // ② 翻人话：去掉行话，且**不依赖日志用哪个表情**（线上那行实际是 🖼 动图…）
+    const h1 = convo._humanizeNote('  ├ 🖼 动图：共 75 帧 → 取第 0/25/49/74 帧拼成 512×512（API 原本只认第一帧）');
+    const h2 = convo._humanizeNote('  ├ 🎬 动图：共 75 帧 → 取第 0/25/49/74 帧');
+    check('★★ 动图那行翻成人话（"75 帧 / 抽 4 帧"），且 🖼🎬 两种前缀都能认',
+      /75 帧/.test(h1) && /4 帧/.test(h1) && !/第 0\/25/.test(h1) && h1 === h2, h1);
+    check('★ 下载那行翻成人话（只说"收到一张图（60KB）"）',
+      /收到一张图/.test(convo._humanizeNote('  ├ 🖼 下载 OK 60KB · image/jpeg · 1280×1280')));
+
+    // ③ 端到端：决策位必须干净、细节进 notes
+    const log = [
+      '2026-10-07T13:59:14.000+08:00 h node[1]: [群] GROUP_MESSAGE_CREATE | 某某: 【图片】狗跳舞',
+      '2026-10-07T13:59:14.200+08:00 h node[1]:   ├ 🖼 动图：共 75 帧 → 取第 0/25/49/74 帧拼成 512×512',
+      '2026-10-07T13:59:15.000+08:00 h node[1]: [send:group] ✓ (叉腰) 说谁呢',
+    ].join('\n');
+    const one = convo.parseConversations(log, {})[0];
+    check('★★ 决策位干净、细节单列（用户看到的错位就是这里）',
+      one && !/帧/.test(one.decision || '') && (one.notes || []).length === 1
+      && /75 帧/.test(one.notes[0]),
+      JSON.stringify({ d: one && one.decision, n: one && one.notes }));
+
+    // ④ 面板把 notes 渲染出来（逻辑对但没接 = 没做）
+    check('★ 面板渲染了 notes（淡淡的单独一行）',
+      /c\.notes/.test(rd('tools/page.js')) && /\.note\s*\{/.test(rd('tools/page.js')));
+
+    // ⑤ 真实 journal 里量出来的两类噪音：纯计时行丢掉、重复项去重
+    const log2 = [
+      '2026-10-07T11:00:00.000+08:00 h node[1]: [群] GROUP_MESSAGE_CREATE | 某某: 【图片】某图',
+      '2026-10-07T11:00:00.300+08:00 h node[1]:   ├ 🖼 下载 OK 149KB · image/jpeg · 1280×1280',
+      '2026-10-07T11:00:00.600+08:00 h node[1]:   ├ 🖼 模型返回（1.0s）',
+      '2026-10-07T11:00:01.000+08:00 h node[1]:   ├ 🖼 识别成功（1.1s）：一只猫',
+      '2026-10-07T11:00:01.400+08:00 h node[1]:   ├ 🖼 命中缓存',
+      '2026-10-07T11:00:01.800+08:00 h node[1]:   ├ 🖼 命中缓存',
+      '2026-10-07T11:00:02.000+08:00 h node[1]:   ├ 不回（未命中关键词且未抽样中（省钱））',
+    ].join('\n');
+    const two = convo.parseConversations(log2, {})[0];
+    // 这份假日志里有三步不同的细节（下载 / 识别成功 / 命中缓存）⇒ 3 条是对的；
+    // 关键是：**纯计时行被丢掉**、**重复的"命中缓存"只留一条**
+    check('★★ 纯计时行（模型返回 1.0s）不进 notes、重复项去重',
+      two && (two.notes || []).length === 3
+      && !/模型返回/.test((two.notes || []).join(''))
+      && (two.notes || []).filter((x) => /之前看过/.test(x)).length === 1
+      && /收到一张图/.test((two.notes || []).join('')),
+      JSON.stringify(two && two.notes));
+  }
+
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();

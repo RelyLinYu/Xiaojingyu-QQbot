@@ -76,6 +76,8 @@ const PAGE = (opts) => `<!doctype html>
          background:#1e293b; color:var(--dim); margin-right:6px; }
   .tag.no { background:rgba(148,163,184,.15); }
   .tag.yes { background:rgba(16,185,129,.18); color:#6ee7b7; }
+  /* 🆕 处理细节（收到图/动图抽帧…）：一行小字，淡淡的，不抢"决策"的戏 */
+  .note { font-size:11px; color:#7c8aa5; margin:2px 0 4px; }
   .dec { margin-top:3px; color:var(--dim); font-size:12.5px; }
   .ans { background:#0d1729; border-left:3px solid var(--ok); padding:7px 10px;
          border-radius:0 8px 8px 0; margin:6px 0 2px; color:#d1fae5; }
@@ -633,7 +635,11 @@ function renderGroups(list){
       }
       const ans = (c.replies && c.replies.length)
         ? c.replies.map(t => '<div class="ans">' + esc(t) + '</div>').join('') : '';
-      return '<div class="msg">' + q + dec + ans + '</div>';
+      // 🆕 2026-10-07：处理细节（收到图/动图抽帧/视频跳过…）单独一行、淡淡的 ——
+      //    用户问过「都是动图和下载是什么」⇒ ① 从"决策"位置挪出来 ② 已翻成人话
+      const notes = (c.notes && c.notes.length)
+        ? '<div class="note">' + c.notes.map(t => esc(t)).join(' · ') + '</div>' : '';
+      return '<div class="msg">' + q + dec + notes + ans + '</div>';
     }).join('');
 
     return '<details class="gcard" open>' + sum + edit + '<div class="msgs">' + msgs + '</div></details>';
