@@ -119,7 +119,15 @@ function reset() {
   const noPersist = process.env.XLJ_NO_PERSIST === '1';
   if (noPersist) { cache = null; return { ok: true, persisted: false }; }
   try {
-    if (fs.existsSync(FILE)) fs.unlinkSync(FILE);
+    if (fs.existsSync(FILE)) {
+      // 🔴🔴 2026-10-07 改（真实事故）：原来直接 unlink ⇒ **用户手改的那份被永久删掉**。
+      //   我自己在"部署验证脚本"里调了一次 reset，把他删过一条的 13 组编辑弄丢了（不可再生）。
+      //   ⇒ 现在**先改名留一份带时间戳的备份**，再删；"误点恢复默认"从此可挽回。
+      try {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        fs.renameSync(FILE, FILE + '.reset-' + stamp);
+      } catch { try { fs.unlinkSync(FILE); } catch { /* 忽略 */ } }
+    }
     cache = null;
     return { ok: true, persisted: true };
   } catch (e) {

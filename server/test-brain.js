@@ -3610,6 +3610,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     // ③ active 标记靠"内容比对"得出（他手改之后自然就不是 active 了）
     check('★★ 内容一致的那张被标成 active（不用额外存状态）',
       ps.list().some((x) => x.active === true));
+    // 🔴 内容相同的预设存了两张时，**只能标记一张**（否则两张都显示"正在使用"，看着像 bug）
+    const c2 = ps.capture('测试预设A2');            // 与 A 内容完全相同
+    check('★★ 内容相同的预设只标最新那张为"使用中"',
+      ps.list().filter((x) => x.active === true).length === 1,
+      JSON.stringify(ps.list().map((x) => [x.name, x.active])));
+    if (c2.ok) ps.remove(c2.item.id);
 
     // ④ 改名与删除
     check('  改名成功', ps.rename(c.item.id, '测试预设B').ok === true);
@@ -3631,6 +3637,21 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     // 🔴 我第一次忘了 JSON.parse（`readBody` 返回**字符串**）⇒ 所有 POST 都回"未知操作"
     check('★★ 预设接口会解析请求体（readBody 返回的是字符串，不是对象）',
       /JSON\.parse\(\(await readBody\(req\)\) \|\| '\{\}'\)/.test(rd('tools/logweb.js')));
+
+    // 🔴 2026-10-07 线上报错「setErr is not defined」：`setErr` 是 **`load()` 内部的局部函数**，
+    //    我在顶层（预设那段）调用它 ⇒ ReferenceError ⇒ 红条弹出。
+    //    ⇒ 顶层一律用**顶层的** `showErr`；这条断言防止再有人（我）踩进来。
+    const pgc = rd('tools/page.js');
+    const psSeg = pgc.slice(pgc.indexOf('async function psApi'), pgc.indexOf('function initPages(){'));
+    check('★★ 顶层代码不许调用 load 内部的 setErr（要用顶层 showErr）',
+      psSeg.length > 500 && !/setErr\(/.test(psSeg) && /showErr\(/.test(psSeg)
+      && /^function showErr\(/m.test(pgc));
+
+    // 🔴🔴 2026-10-07 真实事故：我在"部署验证脚本"里调了一次 `/api/examples/reset`，
+    //    而 `reset()` 是**直接 unlink** ⇒ 用户手改的那份示范（13 组）被**永久删掉**。
+    //    ⇒ 两条都要锁住：① `reset()` 必须先**改名备份**再删；② 记住"验证脚本不许碰破坏性接口"。
+    check('★★ examples.reset() 会先备份再删（用户数据不可再生）',
+      /renameSync\(FILE, FILE \+ '\.reset-'/.test(rd('examples.js')));
     check('★★ 面板有预设卡片 + 点击切换',
       /psList/.test(rd('tools/page.js')) && /psActivate/.test(rd('tools/page.js'))
       && /data-ps=/.test(rd('tools/page.js')) && /renderPresets/.test(rd('tools/page.js')));

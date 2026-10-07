@@ -101,12 +101,16 @@ function summarize(it) {
 
 function list() {
   const { persona, examples } = currentSet();
-  const now = { persona, examples };
-  return read().items.map((it) => {
+  const items = read().items;
+  const matchOf = (it) => (it.persona || '') === persona
+    && JSON.stringify(it.examples || []) === JSON.stringify(examples || []);
+  // ⚠️ 可能有多张内容相同的预设（把同一套性格存了两次）⇒ **只把最新那张标成"使用中"**
+  //    （否则会出现两张卡片同时显示"正在使用"，看着像 bug）
+  let activeIdx = -1;
+  items.forEach((it, i) => { if (matchOf(it)) activeIdx = i; });
+  return items.map((it, i) => {
     const s = summarize(it);
-    // 内容完全一致 ⇒ 这张就是"当前正在用"的
-    s.active = (it.persona || '') === now.persona
-      && JSON.stringify(it.examples || []) === JSON.stringify(now.examples || []);
+    s.active = (i === activeIdx);
     return s;
   });
 }

@@ -1002,21 +1002,21 @@ async function psCapture() {
   const name = inp ? inp.value.trim() : '';
   try {
     const j = await psApi({ action: 'capture', name: name });
-    if (!j.ok) { setErr(j.why || '存失败'); return; }
+    if (!j.ok) { showErr(j.why || '存失败'); return; }
     if (inp) inp.value = '';
-    setErr('');
+    showErr('');
     renderPresets(j.status);
-  } catch (e) { setErr('存失败：' + e.message); }
+  } catch (e) { showErr('存失败：' + e.message); }
 }
 
 async function psActivate(id) {
   try {
     const j = await psApi({ action: 'activate', id: id });
-    if (!j.ok) { setErr(j.why || '切换失败'); return; }
-    setErr('');
+    if (!j.ok) { showErr(j.why || '切换失败'); return; }
+    showErr('');
     renderPresets(j.status);
     load(true);          // 让人设框 / 示范表也跟着刷新成新内容
-  } catch (e) { setErr('切换失败：' + e.message); }
+  } catch (e) { showErr('切换失败：' + e.message); }
 }
 
 async function psRename(id, old) {
@@ -1024,8 +1024,8 @@ async function psRename(id, old) {
   if (n === null) return;
   try {
     const j = await psApi({ action: 'rename', id: id, name: n });
-    if (!j.ok) { setErr(j.why || '改名失败'); return; }
-    setErr('');
+    if (!j.ok) { showErr(j.why || '改名失败'); return; }
+    showErr('');
     renderPresets(j.status);
   } catch (e) { /* 忽略 */ }
 }
@@ -1033,8 +1033,8 @@ async function psRename(id, old) {
 async function psRemove(id) {
   try {
     const j = await psApi({ action: 'remove', id: id });
-    if (!j.ok) { setErr(j.why || '删除失败'); return; }
-    setErr('');
+    if (!j.ok) { showErr(j.why || '删除失败'); return; }
+    showErr('');
     renderPresets(j.status);
   } catch (e) { /* 忽略 */ }
 }
