@@ -3521,6 +3521,14 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         const builtin = ['fs', 'path', 'child_process', 'zlib', 'crypto', 'http', 'https'];
         return m.every((x) => builtin.some((b) => x.indexOf("'" + b + "'") > 0));
       })());
+
+    // ⑥ 🔴 2026-10-07 用户报「这 1600 不会跟着改」：趋势图的说明与阈值必须是**生效值**
+    const pgU = rd('tools/page.js');
+    check('★★ 趋势图的阈值/说明跟着"生效值"走（不能写死 1600）',
+      /function applyLimits/.test(pgU) && /applyLimits\(j\.budget\)/.test(pgU)
+      && /USE_LIMIT = lim/.test(pgU) && /useLimitTxt/.test(pgU));
+    check('★★ 页面里不出现 Markdown 星号（HTML 里会原样显示成星号）',
+      !/<p class="hint">[^<]*\*\*[^<]*<\/p>/.test(pgU));
   }
 
 

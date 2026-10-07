@@ -278,8 +278,11 @@ const PAGE = (opts) => `<!doctype html>
         <span id="useNote" class="hint" style="margin:0"></span>
       </div>
       <div id="useChart"></div>
-      <p class="hint">柱子 = 当天**模型调用次数**（到顶 = 撞了 1600 那道闸）；柱子上面小字 = 当天**花费（元）**。
-        日额度 **¥3** 是"钱"那道闸 —— 两者哪个先撞，看这张图就知道。</p>
+      <!-- 🔴 2026-10-07（用户：「这 1600 不会跟着改」）：**这里的数字必须从 /api/state 的生效值来**，
+           绝不能写死 —— 写死的话，他在设置里改成 3000、这段还在说 1600，等于自己打自己的脸。
+           ⚠️ 另外：HTML 里不能写 Markdown 的星号（两个星号包起来的加粗语法会原样显示成星号，用户就是这么发现的）⇒ 用 b 标签。 -->
+      <p class="hint">柱子 = 当天<b>模型调用次数</b>（到顶 = 撞了 <b id="useLimitTxt">…</b> 那道闸）；柱子上面小字 = 当天<b>花费（元）</b>。
+        日额度 <b id="useDailyTxt">…</b> 是"钱"那道闸 —— 两者哪个先撞，看这张图就知道。</p>
     </div>
   </section>
 
@@ -319,7 +322,7 @@ const PAGE = (opts) => `<!doctype html>
       <button class="sm" onclick="exReset()">恢复默认</button>
       <span id="exNote" class="hint" style="margin:0"></span>
     </div>
-    <p class="hint">⚠️ 保存后会**立刻生效**（不用重启）。但示范属于 prompt 前缀 ⇒ **每改一次，模型缓存失效一次**（贵一点）。
+    <p class="hint">⚠️ 保存后会<b>立刻生效</b>（不用重启）。但示范属于 prompt 前缀 ⇒ <b>每改一次，模型缓存失效一次</b>（贵一点）。
       建议：改完先去上面「🧪 试聊」试两句，满意就别再来回改。</p>
   </details>
 
@@ -331,7 +334,7 @@ const PAGE = (opts) => `<!doctype html>
                onkeydown="if(event.key==='Enter'){sandboxSend();}">
         <button class="primary" onclick="sandboxSend()">试一句</button>
       </div>
-      <p class="hint">走的是**和线上同一套**人设与判据；⚠️ 是**真实模型调用**（会计入账本），但**不会发到任何群**，也不占机器人的冷却/上下文。</p>
+      <p class="hint">走的是<b>和线上同一套</b>人设与判据；⚠️ 是<b>真实模型调用</b>（会计入账本），但<b>不会发到任何群</b>，也不占机器人的冷却/上下文。</p>
       <div id="sbOut"></div>
     </div>
   </section>
@@ -437,6 +440,9 @@ async function load(manual){
 
     // 每一步单独兜底 —— 某一块出错不该让整页变成空白（之前就是这样，还只弹了个会消失的提示）
     try { renderBudget(j.budget); } catch (e) { setErr('额度渲染失败：' + e.message); }
+    // 🆕 2026-10-07：额度一变，趋势图的黄/红阈值与那段说明里的数字也跟着变
+    //    （用户原话「这 1600 不会跟着改」—— 写死的上限比没有上限更误导人）
+    try { applyLimits(j.budget); loadUsage(lastUsageDays); } catch (e) { /* 不影响其它区块 */ }
     try { renderSettings(j.settings); } catch (e) { setErr('设置渲染失败：' + e.message); }
     try { renderGroups(j.convos); } catch (e) { setErr('对话渲染失败：' + e.message); }
     try { document.getElementById('log').textContent = j.log || '(空)'; } catch (e) {}
@@ -863,7 +869,23 @@ document.addEventListener('toggle', function (ev) {
 // ===== 🆕 2026-10-07 用量趋势（用户要的"用量趋势曲线"）=====
 // 纯 CSS 柱状图（不引图表库、零依赖）：高度按"这批里的最大值"归一化。
 // ⚠️ 只用字符串拼接，**不用模板字符串/反引号**（模板里的反引号会把 PAGE 截断 —— 白屏事故根因）。
-var USE_LIMIT = 1600;      // 每日次数上限（画"到顶"用；会从 /api/state 里更新）
+var USE_LIMIT = 1600;      // 每日次数上限（**初值只是兜底**，每次 load() 都会用 /api/state 的生效值刷新）
+var USE_DAILY = 3;         // 每日金额上限（同上）
+var lastUsageDays = 14;    // 用户当前选的趋势区间（额度刷新时按原区间重画）
+
+// 🔴 2026-10-07（用户：「这 1600 不会跟着改」）：把"生效值"灌进来 ——
+//    柱状图的黄/红阈值、以及那段说明文字里的数字，**都必须跟着设置页走**。
+function applyLimits(b) {
+  if (!b) return;
+  var lim = Number(b.dailyCallLimit);
+  if (lim > 0) USE_LIMIT = lim;
+  var day = Number(b.dailyLimit || b.dailyLimitYuan);      // 金额上限（/api/state 里叫 dailyLimit）
+  if (day > 0) USE_DAILY = day;
+  var a = document.getElementById('useLimitTxt');
+  if (a) a.textContent = USE_LIMIT + ' 次';
+  var c = document.getElementById('useDailyTxt');
+  if (c) c.textContent = '¥' + USE_DAILY;
+}
 
 function renderUsage(days) {
   var el = document.getElementById('useChart');
@@ -886,8 +908,9 @@ function renderUsage(days) {
 }
 
 async function loadUsage(n) {
+  lastUsageDays = Number(n) || lastUsageDays || 14;      // 记住用户选的区间（额度刷新时原样重画）
   try {
-    var r = await fetch('/api/usage?days=' + (n || 14) + '&p=' + encodeURIComponent(P));
+    var r = await fetch('/api/usage?days=' + lastUsageDays + '&p=' + encodeURIComponent(P));
     var j = await r.json();
     renderUsage(j.days || []);
     var sum = 0, sumSpent = 0;
