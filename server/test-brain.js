@@ -3664,6 +3664,11 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★★ 面板有预设卡片 + 点击切换',
       /psList/.test(rd('tools/page.js')) && /psActivate/.test(rd('tools/page.js'))
       && /data-ps=/.test(rd('tools/page.js')) && /renderPresets/.test(rd('tools/page.js')));
+    // 🔴 2026-10-07 用户「这里还是13条，不匹配」：切换预设会**同时改人设和示范**，
+    //    但原来只刷设置区、**没刷语气示范表** ⇒ 表格停在旧内容（看着像"数字不匹配"）。
+    check('★★ 切换预设后要同时刷新"人设区 + 示范表"（否则表格是旧的）',
+      /try \{ exLoad\(\); \}/.test(rd('tools/page.js'))
+      && /function psActivate[\s\S]{0,600}exLoad\(\)/.test(rd('tools/page.js')));
   }
 
 

@@ -1020,7 +1020,12 @@ async function psActivate(id) {
     if (!j.ok) { showErr(j.why || '切换失败'); return; }
     showErr('');
     renderPresets(j.status);
-    load(true);          // 让人设框 / 示范表也跟着刷新成新内容
+    // 🔴 2026-10-07 修（用户：「这里还是13条，不匹配」）：
+    //   切换预设会同时改**人设**和**示范**，但原来只刷设置区（人设/额度/对话），
+    //   **没刷语气示范表** ⇒ 表格停在旧内容（他看到的"13 条"就是这么来的 —— 文件其实是 14 条）。
+    //   ⇒ 三个都要刷：设置区（含人设框）+ 示范表 + 预设卡片。
+    try { load(true); } catch (e) { /* 忽略 */ }
+    try { exLoad(); } catch (e) { /* 忽略 */ }
   } catch (e) { showErr('切换失败：' + e.message); }
 }
 
