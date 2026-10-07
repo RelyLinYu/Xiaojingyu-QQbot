@@ -30,7 +30,7 @@ const SOURCES = {
     path: '/v2/weibo?encoding=text',
     ttlMs: 10 * 60 * 1000,
     waitMs: 2500,          // 用户最多等这么久
-    hardTimeoutMs: 9000,   // 等不到就转后台，最多跑到这里（回来写缓存）
+    hardTimeoutMs: 20000,  // 等不到就转后台，最多跑到这里（回来写缓存）
     title: '微博实时热搜',
     maxLines: 8,
   },
@@ -38,7 +38,7 @@ const SOURCES = {
     path: '/v2/douyin?encoding=text',
     ttlMs: 10 * 60 * 1000,
     waitMs: 2000,
-    hardTimeoutMs: 6000,
+    hardTimeoutMs: 20000,
     title: '抖音热搜',
     maxLines: 8,
   },
@@ -46,7 +46,7 @@ const SOURCES = {
     path: '/v2/today_in_history?encoding=text',
     ttlMs: 6 * 60 * 60 * 1000,
     waitMs: 1500,
-    hardTimeoutMs: 5000,
+    hardTimeoutMs: 15000,
     title: '历史上的今天',
     maxLines: 5,
   },
@@ -62,10 +62,38 @@ const TOPIC_RES = [
 ];
 const ASK_RE = /[？?]|什么|啥|多少|哪些|看看|讲讲|说说|来点|有没有|咋样|怎么样|是啥|有什么/;
 
+// 归一化：去掉 @、名字里的装饰、标点、空白 —— 用来判"裸主题"
+function bareKey(text) {
+  return String(text || '')
+    .replace(/<@[^>]+>/g, '')
+    .replace(/@/g, '')                                // 手打的 @ 也去掉（`<@openid>` 上面已处理）
+    .replace(/[蓝色大肥鱼小蓝鲸鲸少女嘉然]/g, '')   // 顺带把"叫它"的字去掉
+    .replace(/[\s\u3000，。！？、~,.!?：:；;「」【】（）()]/g, '');
+}
+
+// 裸主题词：**整句就是在喊这个主题**（如「历史上的今天」）——
+// 🔴 2026-10-07 服务器日志抓到的洞：用户直接发「历史上的今天」这五个字，
+//    我的判据要求"带疑问词"⇒ 没触发 ⇒ 鱼答"我一时没对上号"（明明能查却不查）。
+//    ⇒ 补一条：归一化后**正好等于**某个主题词，也算"在要"。
+const BARE_TOPICS = [
+  ['历史上的今天', 'history'], ['今天是什么日子', 'history'], ['今天是啥日子', 'history'],
+  ['抖音热搜', 'douyin'], ['抖音热榜', 'douyin'],
+  ['微博热搜', 'hot'], ['微博热榜', 'hot'], ['今日热搜', 'hot'], ['今天的热搜', 'hot'],
+  ['热搜', 'hot'], ['热榜', 'hot'], ['热点', 'hot'],
+];
+
 function detect(text) {
   const s = String(text || '');
   if (!s || s.length > 200) return '';
-  if (!ASK_RE.test(s)) return '';          // 不是"在问" ⇒ 不触发
+  // ① 裸主题（整句 = 主题词）⇒ 直接算"在要"
+  const bare = bareKey(s);
+  if (bare && bare.length <= 12) {
+    for (const [word, kind] of BARE_TOPICS) {
+      if (bare === bareKey(word)) return kind;
+    }
+  }
+  // ② 否则要求"在问"（带疑问/请求语气），避免「这热搜真离谱」也去调外部接口
+  if (!ASK_RE.test(s)) return '';
   for (const t of TOPIC_RES) {
     if (t.re.test(s)) return t.kind;
   }
@@ -174,13 +202,22 @@ async function lookup(text, opts) {
 }
 
 // 发起一次抓取（并发去重），成功就写缓存；**永不抛错**
-function startFetch(kind, url, hardMs) {
-  const src = SOURCES[kind];
+// isWarm=true 时打日志（后台预热要留痕 —— 否则"到底热上了没"根本看不出来）
+function startFetch(kind, url, hardMs, isWarm) {
+  const t0 = Date.now();
   const p = fetchText(url, hardMs)
     .then((raw) => {
-      if (!raw) return '';
+      if (!raw) {
+        if (isWarm) console.log('[kb] 预热失败：' + kind + '（没拿到内容 ' + (Date.now() - t0) + 'ms）');
+        return '';
+      }
       const out = format(kind, raw);
-      if (out) cache.set(kind, { at: Date.now(), text: out });
+      if (!out) {
+        if (isWarm) console.log('[kb] 预热失败：' + kind + '（解析不出条目）');
+        return '';
+      }
+      cache.set(kind, { at: Date.now(), text: out });
+      if (isWarm) console.log('[kb] 预热完成：' + kind + '（' + out.length + ' 字，' + (Date.now() - t0) + 'ms）');
       return out;
     })
     .catch(() => '')
@@ -189,18 +226,71 @@ function startFetch(kind, url, hardMs) {
   return p;
 }
 
+// ---------- 后台预热（2026-10-07 加）----------
+// 🔴 为什么需要它：服务器日志实测（13:27:10「抖音热搜有啥」→ 回复只用了 2 秒、
+//    没有 [kb] 行）⇒ **冷缓存 + 只等 2.5 秒没等到 ⇒ 空手回话**，鱼只好编"我没刷到"。
+//    而"有界等待"这次不能靠调大（会拖慢回话）⇒ **正解是让缓存先热起来**：
+//    后台定期把热榜刷进缓存 ⇒ **第一次问就命中、0 毫秒**。
+//    ⚠️ 预热**不计入"每日上限"**（那是给"被人问"用的防刷闸）：预热跑在定时器上，
+//      频率天然有界（每 10 分钟一轮），而且 API 免费。
+const warmState = { started: false, rounds: 0, lastAt: 0, lastLog: '' };
+
+function warmOnce(opts) {
+  const o = opts || {};
+  const base = o.base || BASE_DEFAULT;
+  const now = Date.now();
+  const todo = [];
+  for (const [kind, src] of Object.entries(SOURCES)) {
+    const hit = cache.get(kind);
+    // 只在"缓存缺失或已过 ttl 的一半"时刷（避免白刷）
+    if (!hit || now - hit.at > src.ttlMs * 0.5) todo.push(kind);
+  }
+  if (!todo.length) return 0;
+  for (const kind of todo) {
+    if (inflight.has(kind)) continue;
+    startFetch(kind, base + SOURCES[kind].path, SOURCES[kind].hardTimeoutMs || 15000, true);
+  }
+  warmState.rounds += 1;
+  warmState.lastAt = now;
+  warmState.lastLog = todo.join(',');
+  // ⚠️ 后台预热要**留痕**：不然"到底有没有在预热、热上了没"根本看不出来
+  //    （2026-10-07 我就是靠"douyin 没进缓存"才查出它要 4~12 秒）
+  if (!o.quiet) console.log('[kb] 预热：' + warmState.lastLog + '（后台抓取，不计入每日上限）');
+  return todo.length;
+}
+
+// 启动预热：**等一会儿再开始**（别和启动时的其它初始化抢资源），之后定时刷新。
+// ⚠️ 定时器一律 `unref()` —— 不阻止进程退出（本项目 budget.js 的余额刷新也是这个写法）。
+function startWarm(opts) {
+  if (warmState.started) return false;
+  if (opts && opts.enabled === false) return false;
+  warmState.started = true;
+  const everyMs = Number(opts && opts.everyMs) || 10 * 60 * 1000;
+  const first = setTimeout(() => {
+    try { warmOnce(opts); } catch (e) { /* 预热失败绝不影响主流程 */ }
+  }, Number(opts && opts.firstDelayMs) || 20000);
+  if (first && typeof first.unref === 'function') first.unref();
+  const timer = setInterval(() => {
+    try { warmOnce(opts); } catch (e) { /* 同上 */ }
+  }, everyMs);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+  return true;
+}
+
 // ---------- 给自测/排查用 ----------
 function _stats() {
-  return { day: dayStamp, dayCalls, cached: Array.from(cache.keys()) };
+  return { day: dayStamp, dayCalls, cached: Array.from(cache.keys()), warm: warmState };
 }
 function _reset() {
-  cache.clear(); dayStamp = ''; dayCalls = 0;
+  cache.clear(); inflight.clear(); dayStamp = ''; dayCalls = 0;
+  warmState.started = false; warmState.rounds = 0; warmState.lastAt = 0; warmState.lastLog = '';
 }
 function _setDayForTest(stamp, calls) {
   dayStamp = stamp; dayCalls = calls || 0;
 }
 
 module.exports = {
-  lookup, detect, format, SOURCES, BASE_DEFAULT,
+  lookup, detect, format, SOURCES, BASE_DEFAULT, bareKey,
+  warmOnce, startWarm,
   _stats, _reset, _setDayForTest,
 };

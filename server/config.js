@@ -666,6 +666,11 @@ module.exports = {
       base: process.env.KNOWLEDGE_BASE || 'https://60s.viki.moe',
       timeoutMs: Number(process.env.KNOWLEDGE_TIMEOUT_MS) || 3000,
       dailyLimit: Number(process.env.KNOWLEDGE_DAILY_LIMIT) || 100,
+      // 🆕 后台预热（2026-10-07 加）：冷缓存会让"第一次问"等不到、鱼只好编
+      //    ⇒ 起步 20 秒后先刷一轮，之后每 10 分钟检查/刷新（**不计入 dailyLimit**）。
+      warm: process.env.KNOWLEDGE_WARM === '0' ? false : true,
+      warmEveryMs: Number(process.env.KNOWLEDGE_WARM_MS) || 10 * 60 * 1000,
+      warmFirstDelayMs: 20000,
     },
 
     // ===== ⭐ 链接解析：群里出现 GitHub / B站 链接就自动回一张卡片 =====

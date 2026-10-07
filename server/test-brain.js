@@ -3466,10 +3466,13 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     const kn = require('./knowledge');
 
     // ① 触发判据必须"窄"：**在问**才触发，"提到"不触发（否则"这热搜真离谱"也会去调外部接口）
+    //    ⚠️ 2026-10-07 更新：**裸主题词也算"在要"**（用户直接发「历史上的今天」就期望它答，
+    //       服务器日志实测过这个洞）⇒ 原先"「热搜」不该触发"的期望改成"应该触发"。
     const cases = [
       ['今天有什么热搜', 'hot'], ['看看微博热搜', 'hot'], ['最近有啥热点吗', 'hot'],
       ['抖音热搜有啥', 'douyin'], ['历史上的今天是什么', 'history'], ['今天是啥日子', 'history'],
-      ['这热搜真离谱', ''], ['热搜', ''], ['你好啊', ''], ['你说的这个热搜我看过', ''],
+      ['热搜', 'hot'], ['历史上的今天', 'history'],        // 裸主题 ⇒ 触发（已按实测修正）
+      ['这热搜真离谱', ''], ['你好啊', ''], ['你说的这个热搜我看过', ''],
     ];
     const bad = cases.filter(([t, want]) => kn.detect(t) !== want);
     check('★★ 触发判据：问了才触发、只是提到不触发（' + cases.length + ' 例）',
@@ -3507,7 +3510,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /AbortController/.test(ksrc) && /ttlMs/.test(ksrc)
       && /dailyLimit/.test(ksrc) && /setTimeout\(\(\) => ctl\.abort/.test(ksrc));
     check('★ 取不到一律返回空串（fail-open），不抛给调用方',
-      /catch \{\s*return null/.test(ksrc) && /if \(!raw\) return '';/.test(ksrc));
+      /\.catch\(\(\) => ''\)/.test(ksrc) && /if \(!raw\) \{/.test(ksrc) && /return '';/.test(ksrc));
     check('  零依赖（只用 fetch，不 require 任何第三方）',
       !/require\('[^.]/.test(ksrc));
 
@@ -3520,6 +3523,24 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /inflight/.test(ksrc) && /cache\.set\(kind, \{ at: Date\.now\(\), text: out \}\)/.test(ksrc));
     check('  等不到时**返回空串**（不拖住回话、也不报错）',
       /没等到：请求留在后台继续/.test(ksrc));
+
+    // ⑦ 🔴 2026-10-07 服务器日志抓到的两个洞（都修了，这里锁住）：
+    //    洞 1：用户直接发「历史上的今天」这五个字 ⇒ 我的判据要求"带疑问词" ⇒ **没触发**
+    //    洞 2：冷缓存 + 只等 2.5 秒 ⇒ 空手回话（鱼只好编"我没刷到"）⇒ **加后台预热**
+    const bare = [
+      ['历史上的今天', 'history'], ['@蓝色大肥鱼 历史上的今天', 'history'],
+      ['抖音热搜', 'douyin'], ['微博热搜', 'hot'], ['热搜', 'hot'],
+      ['这热搜真离谱', ''], ['你好', ''],
+    ];
+    const badBare = []; 
+    for (const [t, want] of bare) { if (kn.detect(t) !== want) badBare.push(t + '→' + kn.detect(t)); }
+    check('★★ 裸主题词也能触发（「历史上的今天」这种不带疑问词的）',
+      badBare.length === 0, JSON.stringify(badBare));
+    check('★★ 有后台预热（冷缓存会让第一次问空手，预热让它命中）',
+      /function warmOnce/.test(ksrc) && /function startWarm/.test(ksrc)
+      && /knowledge\.startWarm\(/.test(rd('index.js')));
+    check('  预热用 unref 定时器（不阻止进程退出）+ 有开关',
+      /unref/.test(ksrc) && /warm:/.test(rd('config.js')));
   }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);

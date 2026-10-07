@@ -18,6 +18,8 @@ const qqmedia = require('./qqmedia');
 const emotion = require('./emotion');   // 🆕 情绪观察器（只观察、不注入，见 config.policy.emotionObserve）
 const memory = require('./memory');     // 🆕 记忆（全群共享便签本，见 config.policy.memory）
 const knowledge = require('./knowledge'); // 🆕 点播式知识（热搜/历史上的今天，见 config.policy.knowledge）
+// 🆕 后台预热缓存：不然"第一次问"常常正好卡在冷缓存上（服务器实测抓到过，见 knowledge.js 注释）
+knowledge.startWarm(cfg.policy.knowledge);
 
 // 🆕 记忆注入的节流表：scope -> 上次注入时间
 //    （防"每条消息都塞记忆"，见 config.policy.memory.recallMinIntervalMs）
