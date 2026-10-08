@@ -264,32 +264,47 @@ L0 全是纯正则（长度、冷却、@ 判定、静默时段），**零成本*
 
 ### 部署
 
+**服务器上一条命令**（脚本会装 Node、拷代码、自检、生成 `.env` 与两个 systemd 服务）：
+
 ```bash
-cp .env.example .env
-# 填入 AppID / AppSecret / API Key / 主人 openid / 日志页密码
-chmod 600 .env
-node server/test-brain.js | tail -2      # 应显示：779 通过 / 0 失败
-sudo systemctl restart xiaolanjing
+# ① 本地：把整个仓库传到服务器
+scp -r .\deploy.sh .\server root@<你的服务器IP>:/root/xiaolanjing-upload/
+# ② 服务器：一键部署（会依次问你 AppID / AppSecret / API Key / 日志页密码）
+sudo bash /root/xiaolanjing-upload/deploy.sh
 ```
 
-> ⚠️ **不要直接跑 `deploy.sh`** —— 它目前**不完整**：只拷 7 个核心文件
-> （`config` / `auth` / `gateway` / `brain` / `qqapi` / `index` / `budget`），
-> 其余 12 个被 `require` 的模块（`vision` / `linkparse` / `power` / `memory` / `emotion` /
-> `gif` / `qqmedia` / `sendqueue` / `settings` / `examples` / `presets` / `usage`）一个都不拷，
-> **全新部署照样启动即崩**（`Cannot find module`）。
-> 首次部署请照 [项目文档第八章](docs/项目文档.md) 手动来。
+脚本第 3 步是**整目录拷代码**，第 4 步紧接着跑**部署自检**
+（`tools/ops/verify-deploy.cjs`：把每个 `require('./x')` 解析一遍 + 每个文件过一遍 `node --check`），
+**少一个文件就红并中止部署** —— 不会再出现"装完了却 `Cannot find module` 起不来"。
+
+> 🆕 2026-10-08 重写。旧版是**手写文件名白名单**：早期漏 `budget.js`、
+> 补到 7 个之后**仍然漏着 12 个模块**（实测崩在 `Cannot find module './settings'`）——
+> 也就是说"照 README 跑 deploy.sh"从来就不可能成功。**人的记性靠不住，所以改成机器对账。**
+> 细节见 [项目文档 15.1](docs/项目文档.md)。
+
+#### 🔴 跑完脚本，还有两件事**只能你本人做**（脚本代替不了）
+
+| # | 做什么 | 不做会怎样 |
+|---|---|---|
+| ① | **群主**：手机 QQ → 群设置 → 机器人 → 打开「**获取群内全部消息**」 | 机器人**只能看到 @ 它的消息** —— 链接解析 / 识图 / B站卡片这些"不用 @ 也干活"的功能**全废**，而且**不报错** |
+| ② | 把自己设成**主人**：先在群里发一句话 → `sudo node /opt/xiaolanjing/tools/ops/find-openid.cjs` → 复制你那串 32 位 ID → 按输出提示写进 `.env` → 重启 | 「只服从主人」的规则**静默失效**（`isOwner()` 永远 false），你查不出为什么 |
+
+> ⚠️ ② 里**不能填 QQ 号** —— QQ 平台只给 `member_openid`，而且这个 ID **按机器人应用隔离**
+> （换个机器人，同一个人就是另一串）。这也是为什么必须先跑起来才能知道自己的 ID。
 
 > 📌 服务器上是**扁平布局**（`/opt/xiaolanjing/*.js`），所以在那上面跑自测是
-> `cd /opt/xiaolanjing && node test-brain.js`（没有 `server/` 前缀）。
+> `cd /opt/xiaolanjing && node test-brain.js`（没有 `server/` 前缀），
+> 部署自检是 `node /opt/xiaolanjing/tools/ops/verify-deploy.cjs /opt/xiaolanjing`。
 
 ### 🔴 必踩的坑
 
 | 坑 | 症状 | 正解 |
 |---|---|---|
-| **主人标识填 QQ 号** | 主人规则**静默失效**、无任何报错 | 必须填 `member_openid`（QQ 不提供 QQ 号） |
+| **主人标识填 QQ 号** | 主人规则**静默失效**、无任何报错 | 必须填 `member_openid`（QQ 不提供 QQ 号），用 `tools/ops/find-openid.cjs` 挖 |
 | **Windows CRLF 污染 `.env`** | 配置"明明写了"却读成空 | 用 `printf \| sudo tee`，别用 nano 粘贴 |
 | **"机器人只看到 @ 消息"** | 某些群不 @ 就不回 | 这是**群主**在**手机 QQ 群设置 → 机器人**里开的「获取群内全部消息」，**不是代码问题** |
 | **手动 `node` 读不到 `.env`** | 看到的是默认值，不是线上值 | `.env` 是 systemd 注入的；手动跑要自己先解析 `.env` |
+| **只放行 SSH 端口** | 面板打不开 | 机器人本体**不需要任何入站端口**；但面板要用 `8080`，得去云控制台入方向放行 |
 
 ### 推送前必跑（如果你要改代码）
 
