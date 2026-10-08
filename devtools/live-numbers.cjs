@@ -7,18 +7,21 @@
 //    只盯着我"记得"的那几处不算检查 —— 得把页面上**每一处**数字都摊开看，
 //    否则漏掉的恰好是写死的那一处（我上次就漏了"14 组示范"）。
 //
-//  跑法： $env:XLJ_PW="<密码>"; node devtools/live-numbers.cjs
+//  跑法： $env:XLJ_HOST="http://<服务器IP>:8080"; $env:XLJ_PW="<密码>"; node devtools/live-numbers.cjs
 // ============================================================
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const HOST = 'http://101.200.78.81:8080';
+
+// 🔴 真实地址只能从环境变量来（同 live-audit.cjs 的说明：曾把公网 IP 硬编码进公开仓库）
+const HOST = (process.env.XLJ_HOST || '').replace(/\/+$/, '');
 const PW = process.env.XLJ_PW || '';
 const PORT = 9229;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+if (!HOST) { console.log('⚠️ 请设 $env:XLJ_HOST="http://<服务器IP>:8080"'); process.exit(0); }
 if (!PW) { console.log('⚠️ 请设 $env:XLJ_PW="<面板密码>"'); process.exit(0); }
 if (!fs.existsSync(EDGE)) { console.log('⚠️ 本机没有 Edge，跳过'); process.exit(0); }
 

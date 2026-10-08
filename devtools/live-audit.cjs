@@ -12,7 +12,7 @@
 //    ③ 提示里的"示范 N 组"**是否等于** /api/examples 实际返回的组数（对账，不是看有没有写死）
 //    ④ 额度四张卡片的数字 是否等于 /api/state 返回值（对账）
 //
-//  跑法： node devtools/live-audit.cjs
+//  跑法： $env:XLJ_HOST="http://<服务器IP>:8080"; $env:XLJ_PW="<面板密码>"; node devtools/live-audit.cjs
 //  退出码：0 = 全部对上；1 = 有对不上的
 // ============================================================
 const fs = require('fs');
@@ -20,11 +20,19 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const HOST = 'http://101.200.78.81:8080';
+
+// 🔴 真实地址**只能从环境变量来，绝不写进仓库**。
+//
+// 2026-10-08 抓出来的事故：这个文件（和 live-numbers.cjs）曾把服务器**公网 IP
+// 硬编码**在源码里，而仓库是**公开**的 —— 等于把地址挂在网上给人看。
+// ⚠️ 而且它是 `--worktree` 档审计抓到的，`--staged` 档**看不见历史遗留** ⇒
+//    推送前两道都要跑（见 README「推送前必跑」）。
+const HOST = (process.env.XLJ_HOST || '').replace(/\/+$/, '');
 const PW = process.env.XLJ_PW || '';
 const PORT = 9227;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+if (!HOST) { console.log('⚠️ 未提供地址：请设 $env:XLJ_HOST=\"http://<服务器IP>:8080\" 再跑'); process.exit(0); }
 if (!PW) { console.log('⚠️ 未提供密码：请设 $env:XLJ_PW=\"<面板密码>\" 再跑'); process.exit(0); }
 if (!fs.existsSync(EDGE)) { console.log('⚠️ 本机没有 Edge，跳过'); process.exit(0); }
 

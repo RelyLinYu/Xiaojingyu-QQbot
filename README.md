@@ -295,12 +295,20 @@ sudo systemctl restart xiaolanjing
 
 ```powershell
 git add -A
-node devtools/audit-remote-sanitize.cjs --staged   # 必须 ✅✅ 脱敏彻底
-git status --short                                  # 看一眼没混进临时文件
+node devtools/audit-remote-sanitize.cjs --staged    # 必须 ✅✅ 脱敏彻底
+node devtools/audit-remote-sanitize.cjs --worktree  # 🔴 两道都要跑，见下面的原因
+git status --short                                   # 看一眼没混进临时文件
 git commit -F 提交信息.txt
 git push origin main
-git rev-parse HEAD ; git rev-parse origin/main       # 两个值相等才算推上去
+git rev-parse HEAD ; git rev-parse origin/main        # 两个值相等才算推上去
 ```
+
+> 🔴 **为什么脱敏审计必须跑两道**（2026-10-08 真实事故）：
+> `--staged` 只看**这次要提交的文件**，所以**看不见仓库里已有的遗留**。
+> 那次就是这么漏的 —— `devtools/live-audit.cjs` 和 `live-numbers.cjs` 里
+> **硬编码了服务器公网 IP**，它们是**上一次提交**带进去的，
+> 于是 `--staged` 一路绿灯，直到事后跑 `--worktree`（扫整个工作区）才把它揪出来。
+> 而仓库是**公开**的 ⇒ 已经推上去的内容，事后改文件**补救不了历史**。
 
 ---
 
@@ -361,7 +369,7 @@ node server/test-brain.js
 
 | 文档 | 内容 |
 |---|---|
-| [**项目文档**](docs/项目文档.md) | **全部内容都在这一份** —— 目录结构 · 架构与数据流 · 行为规则 · 配置 · 部署 · 运维 · 排错 · **115 条踩坑记录** · 待办 |
+| [**项目文档**](docs/项目文档.md) | **全部内容都在这一份** —— 目录结构 · 架构与数据流 · 行为规则 · 配置 · 部署 · 运维 · 排错 · **116 条踩坑记录** · 待办 |
 | [防提示注入护栏-方案](docs/防提示注入护栏-方案.md) | 尚未施工的安全方案 |
 | [关键信息速查.模板](docs/关键信息速查.模板.md) | 占位符版速查表（真实版在本地 `private/`，不进仓库） |
 
