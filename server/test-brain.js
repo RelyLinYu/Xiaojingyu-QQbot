@@ -3239,7 +3239,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /type="password" placeholder="留空=不改；粘贴新的会覆盖" value="">'/.test(lw),
       '密码输入框少了收尾 >');
     check('★★ 设置区的「保存」是完整 button 元素且可点（data-save + 事件委托）',
-      lw.includes('class="sm" data-save="' + "'" + ' + k + ' + "'" + '">保存</button>')
+      // 🔴 2026-10-08 更新（UI 重做）：新版把按钮写成多行、并且显式补了 type="button"
+      //    （项目硬规格：可点击元素要有明确 type，避免在 form 里被当成提交按钮）。
+      //    ⚠️ 旧判据是**一整串字面量**（class + data-save 粘连），改版后换行就失效 ⇒
+      //    改成分别判断两件事：按钮上带 data-save、且存在 button[data-save] 的事件委托。
+      /data-save="' \+ k \+ '"/.test(lw)
+      && />保存<\/button>/.test(lw)
       && lw.includes('button[data-save]'),
       '按钮标签被截断或没有事件委托');
 
@@ -3256,7 +3261,18 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         let i = st + sm.length, en = -1;
         while (i < lw.length) { if (lw[i] === TICK && lw[i + 1] === ';') { en = i; break; } i++; }
         const tpl = lw.slice(st + sm.length, en);
-        const js = /<script>([\s\S]*)<\/script>/.exec(tpl)[1].replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"PW"');
+        // 🔴🔴 2026-10-08 真因修正：这里原来是**贪婪**的 /<script>([\s\S]*)<\/script>/ ——
+        //    它从**第一个** <script> 一直吃到**最后一个** </script>。
+        //    页面上现在有两段脚本（head 的防闪烁内联脚本 + body 末尾的主脚本），
+        //    于是贪婪匹配把**两段脚本连同中间一大坨 HTML/CSS**都当成一段 JS 丢进 vm
+        //    ⇒ 语法错（"Unexpected token '<'"）⇒ 整个 try 进 catch ⇒ 断言**永远返回 false**。
+        //    ⚠️ 症状特别迷惑：报的是"渲染后的标签不完整"，让人以为是标签被吞了，
+        //      其实是**判据自己取错了代码块**（我用探针在 vm 里真跑了一遍才定位到）。
+        //    ⇒ 与 devtools/check-page-script.cjs 保持同一套写法：非贪婪 + 取**最后一段**。
+        const allScripts = tpl.match(/<script>([\s\S]*?)<\/script>/g) || [];
+        const lastScript = allScripts[allScripts.length - 1] || '';
+        const js = lastScript.replace(/^<script>/, '').replace(/<\/script>$/, '')
+          .replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"PW"');
         const els = {};
         // ⚠️ 2026-10-07：页面新增了音效开关（会在元素上 addEventListener）
         //    ⇒ 元素桩必须带 addEventListener，否则脚本在 vm 里抛错、断言假失败（这已是第三次踩）
@@ -3298,6 +3314,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         // 面板现在 4 项（AI 密钥 / 每天限额 / 总限额 / 调用上限）—— 锚点那行已删
         // 面板 5 行：AI 密钥 / 每天限额 / 总限额 / 调用上限（4 个 input）+ 人设补充（1 个 textarea）
         const nTa = (h.match(/<textarea[^>]*>/g) || []).length;
+        // 🔴 2026-10-08 复核（UI 重做）：**个数没变，还是 4 + 1 + 5**。
+        //    我一开始误以为"按钮从 5 减到 4"，用探针在 vm 里真渲染数了一遍才确认：
+        //    5 行 = AI 密钥 / 每天限额 / 总限额 / 调用上限（4 个 input）+ 人设（1 个 textarea），
+        //    **每行各带一个「保存」按钮 ⇒ 正好 5 个**（人设行也有）。
+        //    ⇒ 个数维持原值；这条断言真正要守的是最后那个正则
+        //      （有没有把 `>` 吞掉、害得按钮变纯文本 —— 这个坑踩过两次）。
         return nIn === 4 && nTa === 1 && nBtn === 5 && !/value=""\s*<button/.test(h);
       } catch (e) { return false; }
     })(), '渲染后的标签不完整（有被吞掉的收尾字符）');
@@ -3421,6 +3443,49 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('  examples.js 有测试模式保护（不污染线上数据）',
       /XLJ_NO_PERSIST/.test(exSrc));
 
+    // 🔴🔴 2026-10-08 真实事故（用户切预设后群里出现「白米饭喵！本喵最爱吃这个了」）：
+    //    `examples.current()` 原来是 **进程内永久缓存**（`if (cache) return cache`）
+    //    ⇒ 面板把示范改完、文件也确实变了，**运行中的机器人永远读它第一次读到的那份**，
+    //      人设（大肥鱼）和示范（巧克力）打架，而且完全静默。
+    //    断言：同一个进程里，示范文件被"别的进程"改掉之后，current() 必须跟着变。
+    check('★★ 示范被别的进程改掉后能自动跟上（不许进程内永久缓存）',
+      !/^\s*if \(cache\) return cache;/m.test(exSrc));
+    {
+      const fsX = require('fs'), pathX = require('path');
+      const dirX = fsX.mkdtempSync(pathX.join(require('os').tmpdir(), 'xlj-ex-cache-'));
+      try {
+        fsX.mkdirSync(pathX.join(dirX, 'data'), { recursive: true });
+        const f2 = pathX.join(dirX, 'data', 'examples.json');
+        fsX.writeFileSync(f2, JSON.stringify({ items: [{ u: '甲问', a: '甲答' }] }), 'utf8');
+        // ⚠️ 必须用**子进程**验：本测试文件自己开着 XLJ_NO_PERSIST=1（内存优先），
+        //    同进程读的是内存，验不出"文件被别的进程改了"这件事。
+        //    ⇒ 起一个干净 node（APP_DIR 指向临时目录、不带 XLJ_*），先读一次拿到缓存，
+        //      再改文件读第二次 —— 模拟"面板改、机器人跟着变"。
+        const probeFile = pathX.join(dirX, 'probe.cjs');
+        fsX.writeFileSync(probeFile, [
+          "const fsX = require('fs'), pathX = require('path');",
+          "const ex = require(" + JSON.stringify(pathX.resolve(__dirname, 'examples.js')) + ");",
+          "const f = process.argv[2];",
+          "const a = ex.current();",
+          "fsX.writeFileSync(f, JSON.stringify({ items: [{ u: '乙问', a: '乙答' }, { u: '丙问', a: '丙答' }] }), 'utf8');",
+          "const b = ex.current();",
+          "console.log(JSON.stringify({ first: a && a[0].u, firstLen: a && a.length, second: b && b.length, second0: b && b[0].u, file: ex.FILE }));",
+        ].join('\n'), 'utf8');
+        const probeOut = require('child_process').execFileSync(
+          process.execPath, [probeFile, f2],
+          { encoding: 'utf8', env: { APP_DIR: dirX, PATH: process.env.PATH } }
+        ).trim();
+        const got = JSON.parse(probeOut);
+        check('  └ 别的进程改了文件，同进程读到的组数也跟着变（1 → 2）',
+          got.first === '甲问' && got.firstLen === 1 && got.second === 2 && got.second0 === '乙问',
+          probeOut);
+      } catch (e) {
+        check('  └ 该断言自己没出错', false, e.message);
+      } finally {
+        try { fsX.rmSync(dirX, { recursive: true, force: true }); } catch { /* 忽略 */ }
+      }
+    }
+
     // 🔴 2026-10-06 用户报「没看到示范啊」：GET /api/examples 必须返回**当前生效的那份**
     //    （没配过文件时要回落到代码里的默认 14 组，否则表格一片空白 = 功能等于没做）
     check('★★ 示范接口返回"当前生效的那份"（不是空数组）',
@@ -3435,9 +3500,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
 
     // 🔴 2026-10-06 用户：「给示范卡片加收展功能，默认收，也就是跟其他卡片一样」
     //    ⇒ 示范得是 <details>+<summary>（同「参数设置」），且**不加 open**（默认收起）
+    // 🔴 2026-10-08 更新（UI 重做）：新版按 Apple 风**去掉了标题里的 emoji**
+    //    （用户指定的克制风格：不满屏 emoji 图标）⇒ 判据不能再写 🐟。
+    //    改成认"明细里第一个 summary 就是语气示范"，比 emoji 更稳。
     check('★★ 示范卡片可收起、且默认收（跟参数设置同款）',
-      /<details data-page="settings">[\s\S]{0,80}<summary>🐟 语气示范/.test(rd('tools/page.js'))
-      && !/<details data-page="settings" open>[\s\S]{0,80}<summary>🐟/.test(rd('tools/page.js')));
+      /<details data-page="settings">\s*<summary>语气示范/.test(rd('tools/page.js'))
+      && !/<details data-page="settings" open>[\s\S]{0,80}<summary>语气示范/.test(rd('tools/page.js')));
     check('  「原始日志」仍是默认**展开**（那是另一处要求，别被一起改掉）',
       /<details data-page="raw" open>/.test(rd('tools/page.js')));
 
@@ -3455,8 +3523,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
 
     // 🔴 2026-10-07 用户报「文字背景同色」：下拉**展开后的选项列表**是浏览器/系统画的，
     //    只给 select 上色不够 ⇒ 必须显式给 option 上色，否则浅色弹层 + 浅色文字 = 看不见
+    // 🔴 2026-10-08 更新（UI 重做）：颜色不再是写死的深蓝 #0d1729，而是走语义令牌
+    //    （浅色 #FFFFFF / 深色 #2C2C2E）⇒ 判据改认"option 用 var(--bg-elevated) 上色"。
+    //    ⚠️ 这条的本意是"必须给 option 显式上色"，不必绑定具体色值 —— 绑定色值反而会
+    //       在换主题时假失败（今天就是）。
     check('★★ 下拉选项也上了色（否则弹层里"文字背景同色"看不见）',
-      /select option/.test(pg) && /background-color:#0d1729/.test(pg));
+      /select option/.test(pg) && /select option[^{]*\{[^}]*background-color:var\(--bg-elevated\)/.test(pg));
 
     // 🔴 这个"模板内反引号"坑咬过我三次 ⇒ 闸门里必须有专门检查（这里锁住闸门本身）
     check('★★ 页面闸门有"模板内不许出现反引号"的专项检查',
@@ -3688,8 +3760,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       badInput.length === 0, JSON.stringify(badInput));
     check('★★ CSS 兜底覆盖没写 type 的 input（input:not([type])）',
       /input:not\(\[type\]\)/.test(pgI));
+    // 🔴 2026-10-08 更新（UI 重做）：新版写成通配的 `::placeholder`（同时覆盖
+    //    input / textarea / select 的占位符），比原来只写 input::placeholder 覆盖更全。
+    //    ⇒ 判据放宽成"有 ::placeholder 规则且颜色走 var(--text-tertiary)"，
+    //      这样既容得下更全的写法，也仍然守住"不许用浏览器默认灰"这个本意。
     check('  输入框有统一的 placeholder 颜色（不然默认灰很突兀）',
-      /input::placeholder/.test(pgI));
+      /::placeholder\s*\{[^}]*color:\s*var\(--text-tertiary\)/.test(pgI));
   }
 
 

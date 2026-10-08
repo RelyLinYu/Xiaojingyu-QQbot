@@ -770,7 +770,15 @@ function sleep(ms) {
 // ---------- 启动 ----------
 console.log('[小蓝鲸] 启动中…');
 console.log('[小蓝鲸] 模型:', cfg.ai.replyModel, '@', cfg.ai.baseUrl);
-console.log('[小蓝鲸] 判断模型:', cfg.ai.judgeModel, '| 日额度:', cfg.policy.dailyCallLimit);
+// 🆕 2026-10-08 修：横幅原来打的是 `cfg.policy.dailyCallLimit`（config.js 里的**代码默认** 1600），
+//    面板把上限改成 3000 之后运行时判定是对的（走 settings.num），**横幅却还在打 1600** ⇒ 会误导排查。
+//    ⇒ 一律打**面板生效值**，并标出这值是"面板设的"还是"代码默认"。
+const effDailyCalls = (() => {
+  try { return Number(require('./settings').num('dailyCalls', cfg.policy.dailyCallLimit)) || cfg.policy.dailyCallLimit; }
+  catch { return cfg.policy.dailyCallLimit; }
+})();
+console.log('[小蓝鲸] 判断模型:', cfg.ai.judgeModel, '| 日额度:',
+  effDailyCalls, effDailyCalls === cfg.policy.dailyCallLimit ? '（代码默认）' : '（面板设定）');
 
 // 🆕 2026-10-07 用量趋势（用户要的"用量趋势曲线"）：两条腿
 //   ① **回填**：启动 25 秒后从 journal 抓最近 14 天，倒推出每日用量 ⇒ 曲线一上线就有内容
