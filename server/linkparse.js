@@ -15,6 +15,8 @@
 //      → 天然免疫提示注入
 // ============================================================
 const cfg = require('./config');
+// ⚠️ md5 只用于 B站的 wbi 签名（见下面"小程序卡片反查"），Node 内置，不算引第三方依赖
+const crypto = require('crypto');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
   + '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -764,6 +766,213 @@ async function fetchBilibili(url) {
   };
 }
 
+// ---------- 🆕 B站「小程序卡片」反查（2026-10-08）----------
+//
+// 🔴 治的是用户 2026-10-08 报的：「b站卡片**读取不到视频，只能走链接**」。
+//
+// 线上事件原文（data/events-2026-10-08.jsonl，2026-10-08T17:59:55）—— 群友从 B站 App
+// 分享到群里，QQ 给机器人的**整条消息里一个 URL 都没有**：
+//
+//   message_type: 3
+//   ark_data: { ark_name: "小程序", ark_type: "miniapp",
+//               fields: { source: "哔哩哔哩",
+//                         source_logo: "https://open.gtimg.cn/open/app_icon/00/95/17/76/…",
+//                         title: "家人们路边捡到个鱼",
+//                         preview: "https://qq.ugcimg.cn/v1/90l2fj452ueusetgle7i3le8f…" } }
+//
+// ⇒ findLinks 扫遍 ark_data 也扫不出链接 → 走到 L0 → 被「暂不支持的类型(卡片)」拒掉。
+//   线上日志就是那行：`└ 不回（暂不支持的类型(卡片)）`。
+//
+// ⚠️ 别和**另一种** B站卡片搞混：`ark_type: "tuwen"` 那种「图文H5」,
+//    fields 里带 `jump_url: https://b23.tv/xxxx` —— 那种 findLinks 本来就能解析，
+//    不归这里管（bilibiliCardTitle 会主动把它排除掉，免得抢了原来的活）。
+//
+// ✅ 出路：卡片里**唯一有用的是标题**，而它是视频标题的**原样拷贝**
+//    （实测「家人们路边捡到个鱼」= BV1PahH6SEL3 的标题，一字不差）
+//    ⇒ 拿标题去 B站搜，要求搜到**完全同名**的那条 → 还原出 bvid → 后面全走老路
+//      （同一张卡片、同一个视频直链，连"刚发过就不再发"的去重都能复用）。
+//
+// 📊 召回率实测（2026-10-08，拿线上 92 张真实卡片逐条打）：
+//    · 只按默认排序搜第 1 页            → **40%**
+//    · 同一标题按 totalrank/click/pubdate **各搜一页** → **90%**（83/92）
+//    ⇒ 三种排序是**从 40% 提到 90% 的关键**（默认排序会把完全同名的那条压到 20 名开外），
+//      不是"多打几次保险"，别图省事删掉。
+//    ⚠️ 剩下那 10% 多半是**已删除 / 番剧 / 直播回放 / 动态**这类没有正常视频页的东西 ——
+//      搜不到就**安静落回正常聊天流程**（不报错、不发卡、不占配额）。
+//
+// 🔒 安全：全程只对**平台自己**做只读搜索，不抓消息里给的 URL、结果也不喂模型
+//    （拼卡片走的是和别的平台一样的模板拼接）→ 依旧免疫提示注入、不花模型钱。
+
+// wbi 签名的置换表（B站前端写死的，官方接口校验用）
+const WBI_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+  33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
+  26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
+  20, 34, 44, 52,
+];
+
+// 标题归一化：**只用来判断"是不是同一条"**，别拿它去搜（搜索要用原始标题）
+//
+// ⚠️ 搜索结果里的 title 带着 `<em class="keyword">…</em>` 高亮（B站的老习惯），
+//    不剥掉的话"完全同名"永远匹配不上 —— 实测第一版就栽在这（命中率 0）。
+function normTitle(s) {
+  return String(s || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/[\s\u200B\u3000]/g, '')
+    .toLowerCase();
+}
+
+function wbiMixinKey(raw) {
+  let out = '';
+  for (const i of WBI_TAB) out += raw[i] || '';
+  return out.slice(0, 32);
+}
+
+let wbiCache = { key: '', at: 0 };
+
+// 拿 wbi 签名密钥（= nav 接口给的两张图的文件名拼起来过一遍置换表）
+//
+// ⚠️ 不登录也能拿（实测 code=0），但**每天轮换** → 缓存 1 小时，失败就抛给上层。
+async function getWbiKey() {
+  const cl = cfg.policy.linkParse?.cardLookup || {};
+  if (wbiCache.key && Date.now() - wbiCache.at < (cl.wbiTtlMs ?? 60 * 60 * 1000)) {
+    return wbiCache.key;
+  }
+  const r = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+    headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com' },
+    signal: AbortSignal.timeout(cl.timeoutMs ?? 6000),
+  });
+  if (!r.ok) throw new Error('nav HTTP ' + r.status);
+  const j = await r.json();
+  const base = (u) => String(u || '').split('/').pop().split('.')[0];
+  const key = wbiMixinKey(base(j?.data?.wbi_img?.img_url) + base(j?.data?.wbi_img?.sub_url));
+  if (key.length !== 32) throw new Error('nav 没给出 wbi 密钥');
+  wbiCache = { key, at: Date.now() };
+  return key;
+}
+
+// 给参数表签名：时间戳 + 键排序 + urlencode（B站只认这套顺序）+ md5
+function wbiSign(params, key) {
+  const all = { ...params, wts: Math.floor(Date.now() / 1000) };
+  const q = Object.keys(all).sort()
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(String(all[k]).replace(/[!'()*]/g, ''))}`)
+    .join('&');
+  return q + '&w_rid=' + crypto.createHash('md5').update(q + key).digest('hex');
+}
+
+// 搜索接口：不签名会被反爬挡下（实测返回一页 HTML 而不是 JSON）
+async function searchBilibiliVideos(keyword, order, key) {
+  const cl = cfg.policy.linkParse?.cardLookup || {};
+  const qs = wbiSign({ search_type: 'video', keyword, page: 1, order }, key);
+  const r = await fetch('https://api.bilibili.com/x/web-interface/wbi/search/type?' + qs, {
+    headers: {
+      'User-Agent': UA,
+      Referer: 'https://www.bilibili.com',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+    },
+    signal: AbortSignal.timeout(cl.timeoutMs ?? 6000),
+  });
+  if (!r.ok) throw new Error('搜索 HTTP ' + r.status);
+  const j = await r.json();
+  if (j?.code !== 0) throw new Error(`搜索被拒 code=${j?.code} ${j?.message || ''}`);
+  return Array.isArray(j?.data?.result) ? j.data.result : [];
+}
+
+// 播放量可能是数字、也可能是 "1.2万" 这种字符串
+function numOf(v) {
+  const n = Number(v);
+  if (Number.isFinite(n)) return n;
+  const m = String(v || '').match(/^([\d.]+)\s*万/);
+  return m ? Number(m[1]) * 1e4 : 0;
+}
+
+// "标题 → bvid" 的记忆：同一个视频被反复转发时不再重复搜
+const titleHits = new Map();
+
+async function findBilibiliByTitle(title, log = () => {}) {
+  const cl = cfg.policy.linkParse?.cardLookup;
+  if (!cl?.enabled) return null;
+  const want = normTitle(title);
+  if (!want) return null;
+
+  const ttl = cl.ttlMs ?? 12 * 60 * 60 * 1000;
+  const cached = titleHits.get(want);
+  if (cached && Date.now() - cached.ts < ttl) {
+    log(`标题反查命中记忆：${cached.bvid}`);
+    return cached.bvid;
+  }
+
+  let wkey;
+  try { wkey = await getWbiKey(); } catch (e) {
+    log(`拿不到 B站 wbi 密钥：${e.message || e}`);
+    return null;
+  }
+
+  const orders = Array.isArray(cl.orders) && cl.orders.length
+    ? cl.orders : ['totalrank', 'click', 'pubdate'];
+
+  for (const order of orders) {
+    let list;
+    try { list = await searchBilibiliVideos(title, order, wkey); } catch (e) {
+      log(`B站搜索失败（${order}）：${e.message || e}`);
+      continue;
+    }
+
+    // 🔴 **必须完全同名**才算。
+    //    模糊匹配会把"标题相似"的另一个视频发出去 —— 那比不发糟得多（等于造谣）。
+    const exact = list.filter((v) => /^BV[0-9A-Za-z]{10}$/.test(String(v?.bvid || ''))
+      && normTitle(v.title) === want);
+    if (!exact.length) continue;
+
+    // 同名多条（重投稿/合集）→ 取播放量最高的那条（最可能是被分享的那个）
+    if (exact.length > 1) {
+      exact.sort((a, b) => numOf(b.play) - numOf(a.play));
+      log(`搜到 ${exact.length} 条同名视频（${order}），取播放最高的 ${exact[0].bvid}`);
+    }
+    const bvid = String(exact[0].bvid);
+    titleHits.set(want, { bvid, ts: Date.now() });
+
+    // 超上限就删最旧的一条（不引 LRU 库，Map 的插入顺序就够用）
+    if (titleHits.size > (cl.maxCache ?? 500)) {
+      const oldest = titleHits.keys().next().value;
+      if (oldest !== undefined) titleHits.delete(oldest);
+    }
+    return bvid;
+  }
+  return null;
+}
+
+// 纯函数（**不发任何请求**）：这条消息是不是"没有链接的 B站小程序卡片"？是就返回标题。
+//
+// ⚠️ 之所以拆成纯函数：反查要打 B站搜索接口，**必须等限流闸门都过了再打**
+//    （在冷却期/静默时段里白打一次接口是纯浪费），所以 index.js 先问它、
+//    过了闸门才去 resolveBilibiliCard。
+function bilibiliCardTitle(msg) {
+  if (!cfg.policy.linkParse?.cardLookup?.enabled) return '';
+  // 卡片消息（3）才看 —— 别的类型没这套结构
+  if (Number(msg?.message_type) !== 3) return '';
+  const ad = msg.ark_data || {};
+  if (String(ad.ark_type) !== 'miniapp') return '';
+  const f = ad.fields || {};
+  // 带 URL 的形态（tuwen 的 jump_url 等）不归这里管 —— findLinks 本来就能处理，别抢它的活
+  if (f.jump_url || f.url) return '';
+  // 只认 B站的小程序卡片（source 就是 B站；别的平台的小程序卡片没有可靠的反查手段）
+  if (!/哔哩哔哩|bilibili/i.test(String(f.source || ''))) return '';
+  const t = String(f.title || '').trim();
+  return t.length >= 2 ? t : '';
+}
+
+// 反查 → 拼成一条和 findLinks 输出**同构**的"链接"，后面全走老路
+async function resolveBilibiliCard(title, log = () => {}) {
+  if (cfg.policy.linkParse?.platforms?.bilibili === false) return [];
+  const t = String(title || '').trim();
+  if (!t) return [];
+  const bvid = await findBilibiliByTitle(t, log);
+  if (!bvid) return [];
+  const url = `https://www.bilibili.com/video/${bvid}`;
+  return [{ url, host: hostOf(url), platform: 'bilibili', key: linkKey(url, 'bilibili'), fromCard: true }];
+}
+
 // ---------- 格式化 ----------
 
 // ISO 时间串的**容错**处理
@@ -1249,4 +1458,16 @@ module.exports = {
   // 🆕 抖音图文（note）那套：分享文案解析 + 视频/图文判定
   _parseDouyinShareText: parseDouyinShareText,
   _douyinTargetOf: douyinTargetOf,
+  // 🆕 B站「小程序卡片」反查（2026-10-08）
+  bilibiliCardTitle,
+  resolveBilibiliCard,
+  findBilibiliByTitle,
+  _normTitle: normTitle,
+  _wbiMixinKey: wbiMixinKey,
+  _wbiSign: wbiSign,
+  _numOf: numOf,
+  _WBI_TAB: WBI_TAB,
+  // 自测用：清掉两处记忆，保证每条断言都从干净状态开始
+  _resetCardLookup: () => { titleHits.clear(); wbiCache = { key: '', at: 0 }; },
+  _cardLookupCacheSize: () => titleHits.size,
 };

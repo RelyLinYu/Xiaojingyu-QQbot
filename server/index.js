@@ -242,7 +242,18 @@ async function handleEvent(type, d) {
   //      · 一旦收到自己的消息（或另一个机器人发的同款卡片），就会**自己解析自己 → 自己回自己**
   //     所以这里**必须**自己先挡一道。
   const links = d.author?.bot ? [] : linkparse.findLinks(d, cfg.policy.linkParse?.maxLinksPerMessage || 2);
-  if (links.length) {
+
+  // 🆕 4.5b B站「小程序卡片」—— 平台**不给 URL**，只能拿标题去 B站反查
+  //
+  // 背景：群友从 B站 App 分享的卡片是 `message_type=3 / ark_type=miniapp`，
+  //      里面只有 `title`（视频标题的原样拷贝）和一张封面，**一个 URL 都没有**，
+  //      所以 findLinks 扫不出来、原来会被 L0 按「暂不支持的类型(卡片)」拒掉。
+  //
+  // ⚠️ 这里**只做纯判断、不发请求** —— 反查要打 B站搜索接口（1~3 次），
+  //    得先过闸门（冷却 / 静默时段 / 连发上限）再打，否则在冷却期里就是白打。
+  const cardTitle = (!links.length && !d.author?.bot) ? linkparse.bilibiliCardTitle(d) : '';
+
+  if (links.length || cardTitle) {
     // ⚠️⚠️ 「被点名」必须和正常流程一样**绕过连发上限**（2026-09-22 实测踩到）：
     //     passHardRules 里是 `bypass = at || owner` —— @ 它、或主人说话，都不受
     //     maxConsecutive（3 分钟 2 次）约束。这条支路跑在它**前面**，得自己实现同样豁免。
@@ -251,14 +262,29 @@ async function handleEvent(type, d) {
     //     卡片死活出不来。而普通流程因为 @ 豁免了，所以看起来"它明明收到了却不解析"。
     const named = brain.isOwner(d) || brain.isAtRobot(type, d);
     const gate = linkparse.linkAllowed(scope);
+    const what = links.length
+      ? `${links.length} 条链接（${links[0].platform} 等）`
+      : '一张 B站小程序卡片';
     if (!gate.ok) {
-      console.log(`  ├ 🔗 看到 ${links.length} 条链接（${links[0].platform} 等），但先跳过（${gate.why}）`);
+      console.log(`  ├ 🔗 看到 ${what}，但先跳过（${gate.why}）`);
     } else if (!named && !brain.consecutiveOk(scope)) {
-      console.log('  ├ 🔗 看到链接，但先跳过（本群连发已达上限，且没被点名）');
+      console.log(`  ├ 🔗 看到 ${what}，但先跳过（本群连发已达上限，且没被点名）`);
     } else {
-      linkparse.markLink(scope);
-      await handleLink(d, links, scope, isGroup, openid);
-      return;
+      // 🆕 卡片才需要反查（链接不用）—— **过了闸门才发请求**
+      let found = links;
+      if (!found.length) {
+        found = await linkparse.resolveBilibiliCard(cardTitle, (m) => console.log(`  ├ 🔗 ${m}`));
+        if (!found.length) {
+          console.log('  ├ 🔗 B站小程序卡片：平台没给链接，用标题也没搜到完全同名的 → 当没看见（继续正常流程）');
+        } else {
+          console.log(`  ├ 🔗 B站小程序卡片 → 标题反查命中 ${found[0].url}`);
+        }
+      }
+      if (found.length) {
+        linkparse.markLink(scope);
+        await handleLink(d, found, scope, isGroup, openid);
+        return;
+      }
     }
   }
 
@@ -643,7 +669,22 @@ async function handleLink(d, links, scope, isGroup, openid) {
   const vcfg = cfg.policy.linkParse?.video;
   if (!isGroup || !vcfg?.enabled) return;
   const vtarget = parsed.find((p) => p.platform === 'bilibili' || p.platform === 'kuaishou');
-  if (!vtarget) return;
+  if (!vtarget) {
+    // 🆕 2026-10-08：抖音**永远发不出视频**（平台把直链藏在签名接口后面，见 linkparse.fetchDouyin）。
+    //
+    // 🔴 为什么必须在这里记一笔：不发视频**日志里什么都没有**，而群友紧接着可能就问
+    //    「视频呢？」—— 没有这笔记录，模型只能瞎猜（历史上就答过"我这边看不到视频画面"这种偏话）。
+    //    noteVideoSkip 本来就是治这个的（"刚发完卡片、被问却答错"）。
+    const only = parsed[0];
+    if (only && only.platform === 'douyin' && scope) {
+      const isNote = only.info?.kind === 'note';
+      linkparse.noteVideoSkip(scope, isNote
+        ? '这是抖音图文作品，本来就没有视频'
+        : '抖音把视频直链藏在签名接口后面，拿不到，只能发卡片');
+      console.log(`  ├ 🎬 抖音不尝试视频（${isNote ? '图文作品' : '平台不给直链'}）→ 已记一笔，被问到时如实回答`);
+    }
+    return;
+  }
   if (parsed.length > 1) {
     console.log(`  ├ ⚠️ 这条消息有 ${parsed.length} 个链接，视频只发第一个（${vtarget.platform}）—— 被动回复配额只有 5 条`);
   }

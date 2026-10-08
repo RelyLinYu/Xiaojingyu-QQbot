@@ -1480,6 +1480,164 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         lp.findLinks({ message_type: '102', content: 'x https://github.com/a/b' }, 2).length === 0);
     }
 
+    // ===== 🆕 B站「小程序卡片」反查（2026-10-08）=====
+    //
+    // 用户报「b站卡片读取不到视频，**只能走链接**」。根因：群友从 B站 App 分享的卡片
+    // 是 `message_type=3 / ark_type=miniapp`，**整条消息一个 URL 都没有** ——
+    // 下面这张 realCard 就是线上事件原文（data/events-2026-10-08.jsonl 17:59:55）抄下来的。
+    {
+      const realCard = {
+        message_type: 3,
+        ark_data: {
+          ark_name: '小程序',
+          ark_type: 'miniapp',
+          fields: {
+            source: '哔哩哔哩',
+            source_logo: 'https://open.gtimg.cn/open/app_icon/00/95/17/76/100951776_100_m.png',
+            title: '家人们路边捡到个鱼',
+            preview: 'https://qq.ugcimg.cn/v1/90l2fj452ueusetgle7i3le8faaa',
+          },
+          prompt: '[QQ小程序]家人们路边捡到个鱼',
+        },
+      };
+      check('★ 真机卡片：一条链接都找不出来（这就是"只能走链接"的根源）',
+        lp.findLinks(realCard, 2).length === 0, lp.findLinks(realCard, 2).map((x) => x.url));
+      check('★★ 但它能被认成"要反查的 B站小程序卡片"，并交出标题',
+        lp.bilibiliCardTitle(realCard) === '家人们路边捡到个鱼', lp.bilibiliCardTitle(realCard));
+
+      // ⚠️ 另一种 B站卡片（图文H5 / tuwen）**自带 jump_url** —— 那种老路径就解析得了，
+      //    反查不能抢它的活（抢了会变成"先搜一遍标题"这种多余且更慢的路径）
+      const tuwen = {
+        message_type: 3,
+        ark_data: { ark_type: 'tuwen', fields: { title: '【鬼武者】自动一闪', tag: '哔哩哔哩', jump_url: 'https://b23.tv/Eehd3im' } },
+      };
+      check('  带 jump_url 的图文卡片不归反查管',
+        lp.bilibiliCardTitle(tuwen) === '');
+      check('  └ 而老路径确实解析得出它的 b23.tv 链接',
+        lp.findLinks(tuwen, 2).length === 1, lp.findLinks(tuwen, 2).map((x) => x.url));
+
+      // 别的来源 / 别的类型一律不碰（不然"搜标题"会被滥用到不相干的消息上）
+      check('  位置卡片（map）不碰',
+        lp.bilibiliCardTitle({ message_type: 3, ark_data: { ark_type: 'map', fields: { address: 'x', desc: 'y' } } }) === '');
+      check('  别家的小程序卡片不碰（来源不是 B站）',
+        lp.bilibiliCardTitle({ message_type: 3, ark_data: { ark_type: 'miniapp', fields: { source: '网易云音乐', title: '某首歌' } } }) === '');
+      check('  普通文本消息不碰',
+        lp.bilibiliCardTitle({ message_type: 0, content: '看这个 https://b23.tv/x' }) === '');
+      check('  只有 1 个字的标题不碰（多半不是标题）',
+        lp.bilibiliCardTitle({ message_type: 3, ark_data: { ark_type: 'miniapp', fields: { source: '哔哩哔哩', title: '啊' } } }) === '');
+      check('  没标题不碰',
+        lp.bilibiliCardTitle({ message_type: 3, ark_data: { ark_type: 'miniapp', fields: { source: '哔哩哔哩' } } }) === '');
+      check('★ message_type 是字符串 "3" 也认（官方字段类型不稳，别只写 ===）',
+        lp.bilibiliCardTitle({ message_type: '3', ark_data: { ark_type: 'miniapp', fields: { source: '哔哩哔哩', title: '标题标题' } } }) === '标题标题');
+      check('  开关关掉就整个不认（退回旧行为）', (() => {
+        const real = cfg.policy.linkParse.cardLookup.enabled;
+        try { cfg.policy.linkParse.cardLookup.enabled = false; return lp.bilibiliCardTitle(realCard) === ''; }
+        finally { cfg.policy.linkParse.cardLookup.enabled = real; }
+      })());
+
+      // 标题归一化：搜索结果的 title 带 `<em class="keyword">` 高亮，
+      // 不剥掉的话"完全同名"永远匹配不上 —— 第一版就栽在这（命中率 0）
+      check('★★ 归一化要剥掉 <em> 高亮标签',
+        lp._normTitle('家人们<em class="keyword">路边</em>捡到个鱼') === lp._normTitle('家人们路边捡到个鱼'),
+        lp._normTitle('家人们<em class="keyword">路边</em>捡到个鱼'));
+      check('  归一化忽略空格 / 零宽空格 / 大小写',
+        lp._normTitle(' DeepSeek\u200B 大肥鱼 ') === lp._normTitle('deepseek大肥鱼'));
+
+      // wbi 置换表：拿 B站**真实返回过**的 nav 值当已知答案
+      // （签名错了接口不会报错，只会回一页 HTML —— 那是最难查的那种失败）
+      const RAW = '7cd084941338484aae1ad9425b84077c4932caff0ff746eab6f01bf08b70ac45';
+      check('★★ wbi 置换表算出来的密钥 == B站实际给的那个（已知答案）',
+        lp._wbiMixinKey(RAW) === 'ea1db124af3c7062474693fa704f4ff8', lp._wbiMixinKey(RAW));
+      check('  wbi 置换表是 64 项（B站改版本时这里会先红）', lp._WBI_TAB.length === 64);
+      const q = lp._wbiSign({ search_type: 'video', keyword: 'a', page: 1 }, 'KEY');
+      check('  wbiSign：参数按键排序 + 带时间戳 + 末尾 32 位 w_rid',
+        /^keyword=a&page=1&search_type=video&wts=\d+&w_rid=[0-9a-f]{32}$/.test(q), q);
+      check('  wbiSign 对密钥敏感（换个 key 结果就不同）',
+        q !== lp._wbiSign({ search_type: 'video', keyword: 'a', page: 1 }, 'KEY2'));
+
+      // 播放量可能是数字，也可能是 "1.2万"
+      check('  numOf 认得数字', lp._numOf(3456) === 3456);
+      check('  numOf 认得"1.2万"', lp._numOf('1.2万') === 12000, String(lp._numOf('1.2万')));
+      check('  numOf 垃圾输入给 0（不抛）', lp._numOf(null) === 0 && lp._numOf('abc') === 0);
+
+      // 🔴 反查逻辑本身（桩掉网络，零成本、可离线跑）
+      //
+      // 要证的是一条**行为红线**：只有**完全同名**才算命中。
+      // 模糊相似的结果绝不能发出去 —— 发错一个视频比不发糟得多（等于造谣）。
+      {
+        const realFetch = global.fetch;
+        let searchOrders = [];
+        global.fetch = async (url) => {
+          const u = String(url);
+          const json = (o) => ({ ok: true, status: 200, json: async () => o });
+          if (u.includes('/x/web-interface/nav')) {
+            return json({
+              code: 0,
+              data: {
+                wbi_img: {
+                  img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png',
+                  sub_url: 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png',
+                },
+              },
+            });
+          }
+          if (u.includes('/search/type')) {
+            const order = (u.match(/order=([a-z]+)/) || [])[1];
+            searchOrders.push(order);
+            const byOrder = {
+              // 默认排序里**没有完全同名的那条** —— 线上 60% 的卡片就是这种情况
+              totalrank: [
+                { bvid: 'BV1wHHy6pECG', title: '怎么还有人偷<em class="keyword">大肥鱼</em>的！', play: 100 },
+                { bvid: 'BV1bC411J7w5', title: '家人们路边捡到一条很大的鱼', play: 99999 },
+              ],
+              // 换"播放最多"排序才翻出正主
+              click: [{ bvid: 'BV1PahH6SEL3', title: '家人们<em class="keyword">路边</em>捡到个鱼', play: 1234 }],
+            };
+            return json({ code: 0, data: { result: byOrder[order] || [] } });
+          }
+          return realFetch(url);
+        };
+        try {
+          lp._resetCardLookup();
+          searchOrders = [];
+          const got = await lp.findBilibiliByTitle('家人们路边捡到个鱼');
+          check('★★ 默认排序没有完全同名的 → 自动换下一种排序再找', got === 'BV1PahH6SEL3', String(got));
+          check('  └ 确实按配置的两种排序各打了一页才命中',
+            searchOrders.length === 2, searchOrders.join(','));
+
+          const before = searchOrders.length;
+          const again = await lp.findBilibiliByTitle('家人们路边捡到个鱼');
+          check('  └ 第二次走"标题→bvid"记忆，不再打接口',
+            again === 'BV1PahH6SEL3' && searchOrders.length === before, `${again} / ${searchOrders.length}`);
+
+          lp._resetCardLookup();
+          searchOrders = [];
+          const miss = await lp.findBilibiliByTitle('这条标题在B站上根本不存在xyz');
+          check('★ 一条完全同名的都没有 → 返回 null（不许拿"像的"凑合）', miss === null, String(miss));
+          check('  └ 把所有排序都试过了才放弃（不是试一页就认输）',
+            searchOrders.length === cfg.policy.linkParse.cardLookup.orders.length, searchOrders.join(','));
+
+          // 反查失败时 resolveBilibiliCard 必须给**空数组**（上层靠它落回正常流程）
+          lp._resetCardLookup();
+          check('  反查不到 → 返回空数组（上层才好落回正常聊天流程）',
+            (await lp.resolveBilibiliCard('这条标题在B站上根本不存在xyz')).length === 0);
+
+          // 平台开关关掉时不该打接口
+          lp._resetCardLookup();
+          searchOrders = [];
+          const realPlat = cfg.policy.linkParse.platforms.bilibili;
+          try {
+            cfg.policy.linkParse.platforms.bilibili = false;
+            check('  B站平台开关关掉后，反查直接不干活',
+              (await lp.resolveBilibiliCard('家人们路边捡到个鱼')).length === 0 && searchOrders.length === 0);
+          } finally { cfg.policy.linkParse.platforms.bilibili = realPlat; }
+        } finally {
+          global.fetch = realFetch;
+          lp._resetCardLookup();
+        }
+      }
+    }
+
   }
 
   console.log('\n=== 20. ⭐ 识图（图片/表情包 → 可读文本）===');
