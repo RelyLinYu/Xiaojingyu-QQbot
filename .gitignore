@@ -62,3 +62,13 @@ desktop.ini
 *.tmp
 tmp/
 temp/
+
+# ---- 🔴 本地 UI 打样产物（2026-10-08）----
+# page.js 改 UI 时，devtools/preview-page.cjs 会在这里生成"可直接双击打开的打样页"，
+# theme-audit.cjs / shot-page.cjs 还会塞一个无头 Edge 的**用户目录**（里面是浏览器缓存，几百 MB）。
+# 都只在本地看，永不提交：
+#   · 打样页里的群名/对话是**假数据**（不涉真），但没必要进仓库；
+#   · Edge profile 更不该进（体积大、含浏览器指纹）。
+# ⚠️ 只忽略 _preview/ 这一个目录；preview-page / theme-audit / shot-page / assert-deliverable
+#    这四个脚本本身是**要提交**的开发工具（下次改 UI 还得用它们验收）。
+devtools/_preview/

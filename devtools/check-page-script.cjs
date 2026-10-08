@@ -19,8 +19,20 @@ while (i < src.length) { if (src[i] === TICK && src[i + 1] === ';') { en = i; br
 if (en < 0) { console.log('❌ PAGE 模板没有正常收尾'); process.exit(1); }
 
 const tpl = src.slice(st + startMark.length, en);
-const m = /<script>([\s\S]*)<\/script>/.exec(tpl);
-if (!m) { console.log('❌ PAGE 里找不到 <script> 块'); process.exit(1); }
+// 🔴 2026-10-08 修：页面上现在有**两个** <script> 了 ——
+//    head 里那个「防闪烁内联脚本」（同步设 html[data-theme]）+ body 末尾的主脚本。
+//    原来的正则 /<script>([\s\S]*)<\/script>/ 是**贪婪**的：它会从**第一个** <script> 开始、
+//    一直吃到**最后一个** </script> ⇒ 把两段脚本连同一大坨 HTML/CSS 全当成一段 JS 去解析，
+//    必然报 "Unexpected token '<'"（假警报，害我以为页面写坏了）。
+//    ⇒ 改成**逐个 <script> 块分别验**（每一块都得能解析），这才是真正要保证的事。
+const blocks = [];
+{
+  const re = /<script>([\s\S]*?)<\/script>/g;
+  let mm;
+  while ((mm = re.exec(tpl)) !== null) blocks.push(mm[1]);
+}
+if (!blocks.length) { console.log('❌ PAGE 里找不到 <script> 块'); process.exit(1); }
+console.log('   找到 ' + blocks.length + ' 段页面脚本（防闪烁内联 + 主脚本）');
 
 // 🔴🔴 2026-10-07 加（**这个坑已经咬过我三次**）：模板字符串**内部**（含注释、CSS、JS）
 //    一旦再出现反引号，模板就会被提前截断 ⇒ 表现为"某行莫名其妙的语法错 / PAGE 返回非字符串"。
@@ -40,22 +52,29 @@ if (!m) { console.log('❌ PAGE 里找不到 <script> 块'); process.exit(1); }
 }
 
 // 服务端插值 → 字符串字面量（还原浏览器实际收到的内容）
-const rendered = m[1].replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"PW"');
-try {
-  new vm.Script(rendered);
-  console.log('✅ 渲染后的页面脚本能解析（' + (rendered.split('\n').length) + ' 行）');
-} catch (e) {
-  console.log('❌ 渲染后的页面脚本语法错误：' + e.message);
-  const mm = /<anonymous>:(\d+)/.exec(e.stack || '');
-  if (mm) {
-    const lines = rendered.split('\n');
-    const n = Number(mm[1]);
-    for (let x = Math.max(0, n - 3); x < Math.min(lines.length, n + 2); x++) {
-      console.log(`   ${x + 1 === n ? '>>' : '  '} ${x + 1}: ${lines[x].slice(0, 140)}`);
+let blocksBad = 0, blocksLines = 0;
+for (let bi = 0; bi < blocks.length; bi++) {
+  // 服务端插值 → 字符串字面量（还原浏览器实际收到的内容）
+  const rendered = blocks[bi].replace(/\$\{JSON\.stringify\([^)]*\)\}/g, '"PW"');
+  blocksLines += rendered.split('\n').length;
+  try {
+    new vm.Script(rendered);
+    console.log('   ✅ 第 ' + (bi + 1) + ' 段能解析（' + rendered.split('\n').length + ' 行）');
+  } catch (e) {
+    blocksBad++;
+    console.log('❌ 第 ' + (bi + 1) + ' 段页面脚本语法错误：' + e.message);
+    const at = /<anonymous>:(\d+)/.exec(e.stack || '');
+    if (at) {
+      const lines = rendered.split('\n');
+      const n = Number(at[1]);
+      for (let x = Math.max(0, n - 3); x < Math.min(lines.length, n + 2); x++) {
+        console.log(`   ${x + 1 === n ? '>>' : '  '} ${x + 1}: ${lines[x].slice(0, 140)}`);
+      }
     }
   }
-  process.exit(1);
 }
+if (blocksBad) process.exit(1);
+console.log('✅ 渲染后的 ' + blocks.length + ' 段页面脚本都能解析（共 ' + blocksLines + ' 行）');
 
 // 🔴🔴 2026-10-06 补：**PAGE 必须真的返回一长串 HTML**。
 //    踩过的大坑：模板字符串**内部**的注释里出现了反引号（我写了一个带反引号的行）

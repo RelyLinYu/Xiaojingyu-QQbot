@@ -27,6 +27,12 @@ function walk(dir, out = []) {
   if (!fs.existsSync(abs)) return out;
   for (const name of fs.readdirSync(abs)) {
     const full = path.join(abs, name);
+    // 🔴 2026-10-08：跳过本地打样产物。
+    //    原因：devtools/shot-page.cjs / theme-audit.cjs 会拉一个**无头 Edge**，
+    //    它会在 devtools/_preview/_edge-profile/ 里塞进几百个**浏览器自带**的 .js。
+    //    那些不是我们的代码，却会被逐个 node --check（文件数从 52 涨到 78），
+    //    既慢，又随时可能因为浏览器自己的文件解析不过而**假报"语法错、不要部署"**（闸门失去可信度）。
+    if (name === '_preview') continue;
     const st = fs.statSync(full);
     if (st.isDirectory()) { walk(path.join(dir, name), out); continue; }
     if (!EXTS.includes(path.extname(name))) continue;
