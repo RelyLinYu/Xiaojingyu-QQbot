@@ -1348,7 +1348,26 @@ function renderDouyin(v) {
 }
 
 function renderKuaishou(v) {
-  return renderShortVideo(v, '快手', '快手');
+  const card = renderShortVideo(v, '快手', '快手');
+
+  // 🆕 2026-10-09：快手直链**可以像抖音一样直接贴在卡片里**。
+  //    实测（服务器上做过对照）：快手 CDN `*.kwimgs.com` 直链
+  //      · 不带 Referer → HTTP 200 video/mp4   ✅
+  //      · 带自己的 UA/Referer → HTTP 200      ✅
+  //    ⇒ 用户从 QQ 里直接点开就能下。
+  //
+  // 🔴 而 **B站不行**（所以 renderBilibili 特意不贴直链）：
+  //    B站 CDN `upos-*.bilivideo.com` **强制校验 Referer** ——
+  //      · 不带 Referer → HTTP **403**
+  //      · 带 Referer   → HTTP 200
+  //    用户在 QQ 里点开是浏览器直连，带不上 bilibili 的 Referer，拿到的一定是 403。
+  //    要做就得在服务器上挂中转代理，55MB 视频走 3M 带宽不划算 —— 不做。
+  //
+  // ⚠️ 直链是解析阶段顺手带出来的（`_mvUrl`，下划线=内部字段），不额外发请求。
+  // ⚠️ 措辞用"视频直链"而**不是**"无水印直链"：快手这条源**是否无水印我没有抽帧验证过**，
+  //    不写没验过的断言（抖音那行写"无水印"是因为我抽帧看过画面）。
+  if (!v._mvUrl) return card;
+  return card + ZWSP + '\n' + `[🎬 视频直链](${v._mvUrl})`;
 }
 
 function renderBilibili(b) {
