@@ -157,7 +157,12 @@ function matchCommand(msg, isPrivate) {
   return null;
 }
 
-// 回复文案（人设：甜系傲娇；都很短，不解释、不客套）
+// 回复文案。
+//
+// 🔴 2026-10-09 用户决定：**中性化，不绑人设**（原因同 config.js 里 ackTexts / pendingTexts）：
+//    人设现在可以切换，过程文案若写死"傲娇鱼娘"的口吻，一换人设就会打架。
+//    这里是**兜底值**（config.policy.power.* 有值就不会走到），但也一并中性化，
+//    免得哪天 config 被清空又冒出旧口吻。
 function replyFor(action, changed, who) {
   const c = cfg.policy.power || {};
   const pick = (arr, fallback) => {
@@ -166,12 +171,12 @@ function replyFor(action, changed, who) {
   };
   if (action === 'on') {
     return changed
-      ? pick(c.onTexts, ['开机了。别指望我多热情。'])
-      : pick(c.alreadyOnTexts, ['本来就开着呢。']);
+      ? pick(c.onTexts, ['已开机，可以正常对话了。'])
+      : pick(c.alreadyOnTexts, ['目前就是开机状态。']);
   }
   return changed
-    ? pick(c.offTexts, ['关机。别烦我。'])
-    : pick(c.alreadyOffTexts, ['早就关机了。']);
+    ? pick(c.offTexts, ['已关机，暂时不回复消息。'])
+    : pick(c.alreadyOffTexts, ['目前就是关机状态。']);
 }
 
 module.exports = {
