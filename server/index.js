@@ -593,6 +593,25 @@ async function handleEvent(type, d) {
 //       所以：卡片最多发 `maxLinksPerMessage`（默认 2）张，
 //       **视频整条消息最多发 1 个**（2 卡片 + 1 提示 + 1 视频 = 4 ≤ 5）。
 async function handleLink(d, links, scope, isGroup, openid) {
+  // 🆕 2026-10-09「已读回执」：抖音解析要 ~17 秒（起无头浏览器），卡片迟迟不来，
+  //    群友会以为机器人根本没读到这条链接。
+  //    实测耗时（2026-10-09 服务器）：B站 226ms · 快手 1~3s · 抖音 ~17s
+  //    ⇒ 默认**只有抖音**发这句（B站/快手秒出，发了反而怪）；想全平台发改 ackAllPlatforms。
+  //    ⚠️ 一条消息**只发一次** —— 被动回复配额 5 条，2 个抖音链接发两次会超。
+  {
+    const dc = cfg.policy.linkParse?.douyinDirect;
+    if (isGroup && links.length) {
+      const needAck = dc?.ackAllPlatforms ? true : links.some((l) => l.platform === 'douyin');
+      if (needAck) {
+        const pool = (Array.isArray(dc?.ackTexts) && dc.ackTexts.length)
+          ? dc.ackTexts : [dc?.ackTemplate || '🔗 链接收到了，正在解析，稍等一下…'];
+        const text = String(pool[Math.floor(Math.random() * pool.length)]);
+        const ok = await sendGroupMessage(openid, text, d.id);
+        console.log(`  ├ ⏳ 已发"已读"回执${ok ? '' : '（⚠️ 发送失败）'}：${text}`);
+      }
+    }
+  }
+
   // ① 先把所有链接都解析出来（解析失败的不占位置）
   const parsed = [];
   const seenId = new Set();
@@ -665,23 +684,39 @@ async function handleLink(d, links, scope, isGroup, openid) {
 
   // ③ 视频：**整条消息最多发一个**（配额只剩 1 条，且 videoBusy 本来就串行）
   //    取第一个"能出视频"的平台：B站 / 快手。
-  //    ⚠️ 抖音**没有直链**（见 linkparse.js 里 fetchDouyin 的注释），只会被跳过。
+  //    🆕 2026-10-09 下半场：用户原话「**短视频直接发出来啊，长视频给链接呗**」
+  //       ⇒ 抖音**已接入这条链路**：拿到直链的抖音视频在这里发出去；
+  //         但时长上限单独收紧到 `douyinMaxDurationSec`（默认 60 秒），
+  //         超长的仍然只在卡片里留一行无水印直链、不下载不转发。
   const vcfg = cfg.policy.linkParse?.video;
   if (!isGroup || !vcfg?.enabled) return;
-  const vtarget = parsed.find((p) => p.platform === 'bilibili' || p.platform === 'kuaishou');
+  const vtarget = parsed.find((p) =>
+    p.platform === 'bilibili'
+    || p.platform === 'kuaishou'
+    // 抖音：**只有真拿到直链才发**（没拿到就别占这条配额，卡片已经出过了）
+    || (p.platform === 'douyin' && p.info?.playUrl));
   if (!vtarget) {
-    // 🆕 2026-10-08：抖音**永远发不出视频**（平台把直链藏在签名接口后面，见 linkparse.fetchDouyin）。
+    // 🆕 2026-10-08 建 / 2026-10-09 修正：
+    //    · 08 日那版写的是「抖音**永远发不出视频**」—— 那是当时的结论；
+    //    · 09 日起已经能用无头浏览器拿到**无水印直链**了（见 douyin-direct.js），
+    //      直链贴在卡片最后一行。当前**刻意不转发视频文件**（用户 2026-10-09 拍板「先只回文字链」）。
     //
-    // 🔴 为什么必须在这里记一笔：不发视频**日志里什么都没有**，而群友紧接着可能就问
+    // 🔴 为什么仍要在这里记一笔：不发视频**日志里什么都没有**，而群友紧接着可能就问
     //    「视频呢？」—— 没有这笔记录，模型只能瞎猜（历史上就答过"我这边看不到视频画面"这种偏话）。
     //    noteVideoSkip 本来就是治这个的（"刚发完卡片、被问却答错"）。
+    //    ⚠️ 但记的内容**必须跟事实一致**：明明拿到了直链却记"拿不到"，模型就会照着答错。
     const only = parsed[0];
     if (only && only.platform === 'douyin' && scope) {
       const isNote = only.info?.kind === 'note';
-      linkparse.noteVideoSkip(scope, isNote
-        ? '这是抖音图文作品，本来就没有视频'
-        : '抖音把视频直链藏在签名接口后面，拿不到，只能发卡片');
-      console.log(`  ├ 🎬 抖音不尝试视频（${isNote ? '图文作品' : '平台不给直链'}）→ 已记一笔，被问到时如实回答`);
+      const hasDirect = !!only.info?.playUrl;
+      // 走到这里 = vtarget 没选中抖音。只有两种情况：图文（本来没视频）、或没拿到直链。
+      if (isNote) {
+        linkparse.noteVideoSkip(scope, '这是抖音图文作品，本来就没有视频');
+        console.log('  ├ 🎬 抖音图文：本来就没有视频 → 已记一笔');
+      } else if (!hasDirect) {
+        linkparse.noteVideoSkip(scope, '抖音这次没拿到直链（可能被限流），卡片里只有元信息');
+        console.log('  ├ 🎬 抖音没拿到直链（可能限流）→ 已记一笔，被问到时如实回答');
+      }
     }
     return;
   }
@@ -729,17 +764,23 @@ async function sendVideoPending(d, groupopenid, info, src, v) {
 
 async function sendVideo(d, info, groupOpenid, scope) {
   const v = cfg.policy.linkParse.video;
-  const tag = info.platform === 'kuaishou' ? '  ├ 🎬[快手]' : '  ├ 🎬';
+  const tag = info.platform === 'kuaishou' ? '  ├ 🎬[快手]'
+    : info.platform === 'douyin' ? '  ├ 🎬[抖音]' : '  ├ 🎬';
 
   if (videoBusy) { console.log(`${tag} 已有视频在处理，跳过这一个`); return; }
 
   // 时长太长的先挡掉（下载+上传太久，而且大概率超 30MB）
-  if (info.durationSec && info.durationSec > v.maxDurationSec) {
-    console.log(`${tag} 跳过（时长 ${info.durationSec}s > 上限 ${v.maxDurationSec}s）`);
+  // 🆕 抖音单独一档：用户要的是「短视频直接发、长视频给链接」，**60 秒**是抖音语境的分界线
+  const maxDur = info.platform === 'douyin'
+    ? (v.douyinMaxDurationSec || 60)
+    : v.maxDurationSec;
+  if (info.durationSec && info.durationSec > maxDur) {
+    console.log(`${tag} 跳过（时长 ${info.durationSec}s > 上限 ${maxDur}s）`);
     // 🆕 记下"为什么没发视频"，生成回复时才答得对
     if (scope) {
-      linkparse.noteVideoSkip(scope,
-        `时长 ${Math.round(info.durationSec / 60)} 分钟，超过上限 ${Math.round(v.maxDurationSec / 60)} 分钟，搬不动`);
+      linkparse.noteVideoSkip(scope, info.platform === 'douyin'
+        ? `时长 ${Math.round(info.durationSec)} 秒，超过抖音短视频上限 ${maxDur} 秒，只在卡片里给了直链`
+        : `时长 ${Math.round(info.durationSec / 60)} 分钟，超过上限 ${Math.round(maxDur / 60)} 分钟，搬不动`);
     }
     return;
   }
@@ -747,11 +788,15 @@ async function sendVideo(d, info, groupOpenid, scope) {
   videoBusy = true;
   const t0 = Date.now();
   try {
-    // ① 拿直链（快手和 B站 是两套完全不同的取法）
+    // ① 拿直链（三个平台三套取法）
     const maxBytes = v.maxMB * 1024 * 1024;
-    const src = info.platform === 'kuaishou'
-      ? await linkparse.getKuaishouVideoUrl(info, maxBytes)
-      : await linkparse.getBilibiliVideoUrl(info, maxBytes);
+    const src = info.platform === 'douyin'
+      // 抖音：直链**解析阶段就已经拿到了**（douyin-direct.js 的无头浏览器），这里直接用即可。
+      // ⚠️ 必须带 Referer —— douyinvod 有防盗链，不带会 403（同 B站 的道理）
+      ? { url: info.playUrl, size: info.playSize || 0, headers: { Referer: 'https://www.douyin.com/' } }
+      : info.platform === 'kuaishou'
+        ? await linkparse.getKuaishouVideoUrl(info, maxBytes)
+        : await linkparse.getBilibiliVideoUrl(info, maxBytes);
     if (!src) {
       console.log(`${tag} 拿不到直链（番剧 / 付费 / 已删除 都可能）`);
       if (scope) linkparse.noteVideoSkip(scope, '拿不到视频直链（可能是番剧/付费/已删除）');

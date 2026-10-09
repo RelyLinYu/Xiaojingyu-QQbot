@@ -17,6 +17,9 @@
 const cfg = require('./config');
 // ⚠️ md5 只用于 B站的 wbi 签名（见下面"小程序卡片反查"），Node 内置，不算引第三方依赖
 const crypto = require('crypto');
+// 🆕 抖音无水印直链（2026-10-09）—— 内部走**无头浏览器**（系统装的 chrome-headless-shell，
+//    不是 npm 包，零依赖铁律不破）。配置见 config.js 的 linkParse.douyinDirect。
+const douyinDirect = require('./douyin-direct');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
   + '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -1108,20 +1111,36 @@ async function fetchDouyin(url, shareText) {
   // ⚠️ 只对图文这么做。**视频抓不到时仍然安静跳过** ——
   //    否则私有/已删除/翻车的链接会一张接一张冒卡（参考"没钱了刷屏 285 次"那类事故）。
   if (t && t.kind === 'note') {
+    // 🆕 2026-10-09：图文（note）现在**也能拿到真实数据**了 ——
+    //    走无头浏览器取 detail 里的 `images[]`（实测 2 张图、14 秒）。
+    //    ⚠️⚠️ 必须放在下面"分享文案兜底"**之前**！否则当消息里只有链接、没带分享文案时，
+    //        会在那个 `return null` 提前退出，永远走不到这里
+    //        （2026-10-09 部署当天实测到的 bug：纯链接消息 0.6 秒就安静跳过了）
+    let directNote = null;
+    if (cfg.linkParse?.douyinDirect?.enabled !== false) {
+      try { directNote = await douyinDirect.fetchDirect(t.id, cfg.linkParse?.douyinDirect); } catch { }
+    }
+
     const st = parseDouyinShareText(shareText);
-    if (!st.author && !st.caption) {
-      console.log('  │  └ 抖音图文（note）：平台不给数据，分享文案里也提取不到 → 安静跳过');
+    if (!directNote && !st.author && !st.caption) {
+      console.log('  │  └ 抖音图文：无头浏览器没拿到、分享文案也提取不到 → 安静跳过');
       return null;
     }
-    console.log(`  │  └ 抖音图文（note）：平台不给数据 → 改用分享文案`
-      + `（作者「${st.author || '?'}」· 正文 ${st.caption ? st.caption.length + ' 字' : '无'}）`);
+    if (directNote) {
+      console.log(`  │  └ 抖音图文直链 OK（${directNote.images.length} 张图）`);
+    } else {
+      console.log(`  │  └ 抖音图文：无头浏览器没拿到 → 退回分享文案`
+        + `（作者「${st.author || '?'}」· 正文 ${st.caption ? st.caption.length + ' 字' : '无'}）`);
+    }
     return {
       platform: 'douyin',
       kind: 'note',
       id: t.id,
       title: st.caption || st.author || '抖音图文',
       author: st.author,
-      partial: true,      // 标记"这是分享文案拼的，不是抓来的"（卡片会如实说明）
+      partial: !directNote,   // 拿到真实数据就不再"部分"了
+      images: (directNote?.images || []).map((x) => x.url),
+      cover: directNote?.cover || '',
       htmlUrl: `https://www.iesdouyin.com/share/note/${t.id}/`,
     };
   }
@@ -1148,9 +1167,25 @@ async function fetchDouyin(url, shareText) {
   };
 
   const sec = parseIsoDuration(ld.duration);
+
+  // 🆕 无水印直链（2026-10-09）：要起无头浏览器，**约 11~15 秒**，是现在这张卡片的主要耗时。
+  //    拿不到就安静跳过 —— 只少一行直链，上面的元信息照常出。
+  let direct = null;
+  if (cfg.linkParse?.douyinDirect?.enabled !== false) {
+    try { direct = await douyinDirect.fetchDirect(id, cfg.linkParse?.douyinDirect); } catch { }
+    console.log(direct
+      ? `  │  └ 抖音直链 OK（${direct.playUrl ? '视频' : '图文 ' + direct.images.length + ' 图'}）`
+      : '  │  └ 抖音直链：没拿到（卡片照常发，只是不带直链）');
+  }
+
   return {
     platform: 'douyin',
     id,
+    // 🆕 无水印直链（就是上面刚取到的那个；拿不到就是空串，卡片少一行而已）
+    playUrl: direct?.playUrl || '',
+    // 体积（抖音会给 data_size）—— 上层据此判断能不能直接发进群
+    playSize: direct?.playSize || 0,
+    images: (direct?.images || []).map((x) => x.url),
     // ⚠️ 抖音的 name 结尾自带「 - 抖音」，得剪掉，否则卡片标题很脏
     title: String(ld.name || '').replace(/\s*[-–]\s*抖音\s*$/, '').trim(),
     author: ld.creator?.name || '',
@@ -1285,16 +1320,31 @@ function renderShortVideo(v, brand, siteName) {
 }
 
 function renderDouyin(v) {
+  // 🆕 无水印直链（2026-10-09）：用 Markdown 链接给出，和卡片其他链接风格一致，
+  //    点开就能看/存（比糊一条几百字符的裸 URL 清爽得多）。
+  const directLines = [];
+  if (v.playUrl) directLines.push(`[🎬 无水印视频直链](${v.playUrl})`);
+  if (v.images && v.images.length) {
+    const picks = v.images.slice(0, 3).map((u, i) => `[原图${i + 1}](${u})`);
+    directLines.push(`🖼 图文共 ${v.images.length} 张　${picks.join('　')}`);
+  }
+
   // 🆕 图文（note）：平台不提供封面/时长/点赞，卡片只能给"作者 + 分享文案里的正文"，
   //    并且**如实说明**这不是抓来的内容（不装成完整预览）。
+  //    ⚠️ 但现在能走无头浏览器拿到 images 了 —— 拿到就 normal 渲染，不再标"partial"。
   if (v.kind === 'note') {
     const lines = [`# ${mdEsc(cut(v.title, 40))}`];
+    if (v.cover) lines.push(`![封面](${v.cover})`);
     if (v.author) lines.push(`**作者**：${mdEsc(v.author)}　**类型**：图文`);
-    lines.push('📷 图文作品（抖音不提供图文页数据，标题取自分享文案）');
+    if (v.partial) lines.push('📷 图文作品（抖音不提供图文页数据，标题取自分享文案）');
+    if (directLines.length) lines.push(...directLines);
     lines.push(`[🔗 在 抖音 打开](${v.htmlUrl})`);
     return lines.join(ZWSP + '\n');
   }
-  return renderShortVideo(v, '抖音', '抖音');
+
+  const card = renderShortVideo(v, '抖音', '抖音');
+  if (!directLines.length) return card;
+  return card + ZWSP + '\n' + directLines.join(ZWSP + '\n');
 }
 
 function renderKuaishou(v) {
