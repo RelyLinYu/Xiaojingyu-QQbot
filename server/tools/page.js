@@ -458,9 +458,13 @@ const PAGE = (opts) => `<!doctype html>
   .exrow { display:grid; grid-template-columns:1fr 1fr 132px 44px; gap:10px; align-items:center; margin:8px 0; }
   .exrow input, .exrow select { width:100%; font-size:14px; padding:9px 12px; }
   .exrow button.danger { padding:6px 10px; min-height:34px; }
+  /* 🔴 2026-10-09 修：窄屏原来收成两列 1fr + 44px，那 44px 本是留给「删」按钮的，
+     可网格是**按文档顺序填格**的 ⇒ 第 2 个子项（「鱼回」输入框）顺位掉进那条 44px 窄缝，
+     减掉内边距内容区只剩 20px ⇒ 手机上「鱼回」只剩半个字（用户截图确认过）。
+     ⇒ 改成单列：四个控件各占一整行；桌面端（>720px）那条四列规则完全不受影响。 */
   @media (max-width:720px) {
-    .exrow { grid-template-columns:1fr 44px; }
-    .exrow select { grid-column:1; }
+    .exrow { grid-template-columns:1fr; }
+    .exrow button.danger { justify-self:start; }
   }
 
   /* ============================================================
