@@ -149,9 +149,18 @@ cp -f "$SRC_DIR"/*.js "$APP_DIR/"
 echo "  ✅ $js_count 个 .js 已就位"
 
 # tools/ 也要一起（logweb.js = 网页控制台本体，page.js/convo.js/ogcache.js 是它的依赖，
-# ops/ 下是运维脚本）—— 用 -r 覆盖式拷贝，**不先 rm**：别把别人留在那儿的备份删掉
+# ops/ 下是运维脚本）—— 覆盖式**合并**，不先 rm：别把别人留在那儿的 page.js.bak-* 删掉
+#
+# 🔴 2026-10-09 修：这里原来写的是  cp -rf "$SRC_DIR/tools" "$APP_DIR/tools"
+#    当 $APP_DIR/tools **已经存在**（也就是"第二次以后的任何一次部署"）时，
+#    cp 的语义是"把源目录整个搬进目标目录里面"⇒ 结果变成 $APP_DIR/tools/tools/，
+#    而真正的 tools/*.js **一个都没被覆盖**（旧的 page.js 原地不动，修复根本没生效）；
+#    那份嵌套副本里的 require('../settings') 又全都解析不到 ⇒
+#    部署自检会报 10 个 require 找不到文件并**中止部署**。
+#    ⇒ 正确写法是源路径末尾带 /.：拷的是"目录里的内容"，合并进已存在的目标目录。
 if [ -d "$SRC_DIR/tools" ]; then
-  cp -rf "$SRC_DIR/tools" "$APP_DIR/tools"
+  mkdir -p "$APP_DIR/tools"
+  cp -rf "$SRC_DIR/tools/." "$APP_DIR/tools/"
   echo "  ✅ tools/ 已就位（$(find "$SRC_DIR/tools" -name '*.js' -o -name '*.cjs' | wc -l | tr -d ' ') 个脚本）"
 else
   echo "❌ 缺少 tools/ 目录 —— 网页控制台会起不来"
