@@ -275,7 +275,11 @@ async function handleEvent(type, d) {
       if (!found.length) {
         found = await linkparse.resolveBilibiliCard(cardTitle, (m) => console.log(`  ├ 🔗 ${m}`));
         if (!found.length) {
-          console.log('  ├ 🔗 B站小程序卡片：平台没给链接，用标题也没搜到完全同名的 → 当没看见（继续正常流程）');
+          console.log('  ├ 🔗 B站小程序卡片：平台没给链接，用标题也没搜到完全同名的');
+          // 🆕 2026-10-09：这里原来**完全静默** —— 群友发一张卡片、机器人一声不吭，
+          //    和"它根本没识别到这张卡片"在体感上完全没区别。
+          //    现在回一句（同样走节流），回完**继续走正常流程**（别 return）。
+          await noticeLinkFail(scope, openid, d, cfg.policy.linkParse?.failNotice?.cardText);
         } else {
           console.log(`  ├ 🔗 B站小程序卡片 → 标题反查命中 ${found[0].url}`);
         }
@@ -592,6 +596,36 @@ async function handleEvent(type, d) {
 //       而每个链接最多要 3 条（卡片 + 解析提示 + 视频）。
 //       所以：卡片最多发 `maxLinksPerMessage`（默认 2）张，
 //       **视频整条消息最多发 1 个**（2 卡片 + 1 提示 + 1 视频 = 4 ≤ 5）。
+// 🆕 2026-10-09：链接 / 卡片**识别到了、但解析不出内容**时，回一句短的。
+//
+// 起因（用户原话）：「看测试群日志，为什么快手视频不@没自检」
+//   —— 查日志发现**自检是有的**（`🔗 kuaishou 链接` 那行就是证据），只是快手取数靠
+//      "抓页面 HTML 再抠内嵌 JSON"，页面一抖就抠不到；失败之后**除了日志一声不吭**，
+//      于是群里看到的就是"机器人没理我"，被当成"它根本没检测到链接"。
+//
+// ⚠️ 必须节流：快手偶尔会连着翻车，每次都回就是刷屏 —— 同一个群 N 分钟只提示一次。
+const linkFailAt = new Map();
+function pickFailText() {
+  const c = cfg.policy.linkParse?.failNotice;
+  const pool = (Array.isArray(c?.texts) && c.texts.length)
+    ? c.texts : ['🔗 链接收到了，但没解析出内容'];
+  return String(pool[Math.floor(Math.random() * pool.length)]);
+}
+async function noticeLinkFail(scope, openid, d, text) {
+  const c = cfg.policy.linkParse?.failNotice;
+  if (c?.enabled === false) return;
+  const cd = Number(c?.cooldownMs) || 5 * 60 * 1000;
+  const last = linkFailAt.get(scope) || 0;
+  if (Date.now() - last < cd) {
+    console.log(`  ├ 🔗 本可以回一句"没解析出内容"，但本群 ${Math.round((Date.now() - last) / 1000)}s 前刚说过 → 不重复`);
+    return;
+  }
+  linkFailAt.set(scope, Date.now());
+  const msg = text || pickFailText();
+  const ok = await sendGroupMessage(openid, msg, d.id);
+  console.log(`  ├ 🔗 已回一句"解析失败"提示${ok ? '' : '（⚠️ 发送失败）'}：${msg}`);
+}
+
 async function handleLink(d, links, scope, isGroup, openid) {
   // 🆕 2026-10-09「已读回执」：抖音解析要 ~17 秒（起无头浏览器），卡片迟迟不来，
   //    群友会以为机器人根本没读到这条链接。
@@ -615,13 +649,16 @@ async function handleLink(d, links, scope, isGroup, openid) {
   // ① 先把所有链接都解析出来（解析失败的不占位置）
   const parsed = [];
   const seenId = new Set();
+  // 🆕 2026-10-09：要区分两种"没出卡片"的情况（见下面 if (!parsed.length) 的处理）
+  let failCount = 0;   // 真的解析不出内容
+  let dupCount = 0;    // 被去重 / 防重复跳过
   for (const link of links) {
     console.log(`  ├ 🔗 ${link.platform} 链接: ${String(link.url).slice(0, 90)}`);
     try {
       // ⚠️ 第二个参数（消息原文）只有抖音图文用得到：它平台不给数据，
       //    要靠分享文案里的「【作者.的图文作品】正文」兜底（见 linkparse.fetchDouyin）
       const p = await linkparse.parse(link, String(d.content || ''));
-      if (!p || !p.card) { console.log('  │  └ 这条解析不出内容，跳过'); continue; }
+      if (!p || !p.card) { console.log('  │  └ 这条解析不出内容，跳过'); failCount++; continue; }
 
       // 🔴 解析之后**再**去一次重 —— 按"解析出来的身份"，不是按 URL。
       //    实测：一条合并转发里有 3 个 issue 链接（141/140/136），全指向同一个仓库，
@@ -630,6 +667,7 @@ async function handleLink(d, links, scope, isGroup, openid) {
       const ikey = linkparse.infoKey(p.info);
       if (ikey && seenId.has(ikey)) {
         console.log(`  │  └ 和前面那条指向同一个内容（${ikey}），跳过`);
+        dupCount++;
         continue;
       }
 
@@ -639,6 +677,7 @@ async function handleLink(d, links, scope, isGroup, openid) {
       const ago = linkparse.wasCarded(scope, [link.key, ikey]);
       if (ago) {
         console.log(`  │  └ 本群 ${ago} 秒前刚发过这条（${ikey || link.key}），跳过（防自我二次解析）`);
+        dupCount++;
         continue;
       }
 
@@ -647,11 +686,17 @@ async function handleLink(d, links, scope, isGroup, openid) {
       parsed.push(p);
     } catch (e) {
       console.warn(`  │  └ 链接解析异常: ${e.message || e}`);
+      failCount++;
     }
   }
   if (!parsed.length) {
     // ⚠️ 各平台的失败原因不一样，写全，免得以后翻日志时误判
-    console.log('  └ 不回（链接解析不出内容 / 刚发过 —— 私有仓库 / 已删除 / 番剧付费 / 抖音爬虫 UA 失效 / 快手页面改版）');
+    console.log(`  └ 不回（${failCount} 条解析不出内容 / ${dupCount} 条去重跳过 —— 私有仓库 / 已删除 / 番剧付费 / 快手页面改版 / 抖音被限流）`);
+    // 🆕 2026-10-09：**真的解析失败**才回话，让用户知道"看到了，是内容没取到"。
+    //    ⚠️ 单纯"刚发过"（dupCount）不打扰 —— 那是我们主动去重，用户并没期待回复。
+    if (failCount > 0 && isGroup) {
+      await noticeLinkFail(scope, openid, d);
+    }
     return;
   }
 
