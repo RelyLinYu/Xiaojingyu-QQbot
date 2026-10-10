@@ -29,6 +29,8 @@ const { execFile } = require('child_process');
 const ogcache = require('./ogcache');
 const convo = require('./convo');        // 🆕 把原始日志翻译成人看得懂的对话卡片
 const settings = require('../settings'); // 🆕 面板可改的参数（白名单 + 密钥掩码）
+const qrpage = require('../qrpage');     // 🆕 「打开 QQ 名片」落地页（公开路由 /qr）
+const qrHits = new Map();                // /qr 的每 IP 限流计数
 
 const PORT = Number(process.env.PORT) || 8080;
 const PASSWORD = process.env.LOG_PASSWORD || '';
@@ -562,6 +564,91 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     console.log(`[ogcache] 未捕获异常: ${e.message}`);
     if (!res.headersSent) { res.writeHead(500); res.end('ogcache error'); }
+    return;
+  }
+
+  // 🆕 2026-10-10：「打开 QQ 名片」落地页（**公开路由，故意放在密码校验之前**）
+  //
+  // 为什么放在这里：这条链接是要发到**群聊里**给群友点的，群友当然没有面板密码。
+  //                和上面的 ogcache 一样属于"给外部用的一小块"，所以必须在 auth 之前。
+  //
+  // 安全边界（和 tools/qrserve.js 同一套）：
+  //   · `n` 只接受 5~12 位纯数字、不以 0 开头 —— 不合法直接 400
+  //   · 不读文件、不代理、不做 Location 跳转（跳转是页面里点按钮才发生）
+  //   · 每 IP 限流，避免被当免费渲染器刷
+  if (url.pathname === '/qr' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const qn = String(url.searchParams.get('n') || '').trim();
+    const qg = url.searchParams.get('t') === 'g';
+    const qip = req.socket?.remoteAddress || '?';
+    const qh = qrHits.get(qip) || { n: 0, ts: Date.now() };
+    if (Date.now() - qh.ts > 60000) { qh.n = 0; qh.ts = Date.now(); }
+    qh.n++;
+    qrHits.set(qip, qh);
+    if (qh.n > 60) {
+      res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('too many requests');
+      return;
+    }
+    if (!qrpage.validNum(qn)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('号码不合法：n 需要是 5~12 位数字（且不以 0 开头）');
+      return;
+    }
+    let qhtml;
+    try {
+      qhtml = qrpage.page(qn, qg);
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('生成失败：' + (e.message || e));
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+    });
+    res.end(req.method === 'HEAD' ? '' : qhtml);
+    console.log(`[qr] 200 ${qn}${qg ? ' group' : ''} ← ${qip}`);
+    return;
+  }
+
+  // 🆕 2026-10-10：二维码 **PNG**（给 markdown 卡片用 —— QQ 的图片只认 png/jpg，不认 svg）
+  //
+  // 🔴 为什么需要这一条：手机 QQ 的内置浏览器会**拦截**我们服务器的"点击跳转"
+  //    （实测：IP 地址 + 非标端口 ⇒ 弹"如需浏览，请使用浏览器访问"的拦截页）。
+  //    但**图片抓取**是另一条链路（QQ 服务器端来抓、转存到它自己的 CDN），不受这个拦截影响。
+  //    ⇒ 把二维码当图片贴进卡片，"扫码打开名片"这条路就能整条绕开拦截。
+  if (url.pathname === '/qr.png' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const pn = String(url.searchParams.get('n') || '').trim();
+    const pg = url.searchParams.get('t') === 'g';
+    const pip = req.socket?.remoteAddress || '?';
+    const ph = qrHits.get('png:' + pip) || { n: 0, ts: Date.now() };
+    if (Date.now() - ph.ts > 60000) { ph.n = 0; ph.ts = Date.now(); }
+    ph.n++;
+    qrHits.set('png:' + pip, ph);
+    if (ph.n > 120) {
+      res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('too many requests');
+      return;
+    }
+    if (!qrpage.validNum(pn)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('号码不合法：n 需要是 5~12 位数字（且不以 0 开头）');
+      return;
+    }
+    try {
+      const buf = qrpage.png(pn, pg, { scale: 7 });
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Content-Length': buf.length,
+        'Cache-Control': 'public, max-age=86400',
+      });
+      res.end(req.method === 'HEAD' ? '' : buf);
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('生成失败：' + (e.message || e));
+    }
     return;
   }
 
