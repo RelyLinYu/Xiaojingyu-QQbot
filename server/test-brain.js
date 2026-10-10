@@ -2667,16 +2667,26 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('  认不出时返回 null（不瞎猜）', T('https://www.douyin.com/user/xxx') === null);
 
     // ③ 图文卡片：如实说明"内容不是抓来的"，别装成完整预览
-    const card = lp.renderCard({
+    //    ⚠️ 2026-10-10 修正这条断言：那行"如实说明"现在**只在降级（partial）时**才出现
+    //    —— 无头浏览器能拿到 images 之后就不再标 partial 了（见 linkparse.js 的注释）。
+    //    所以这里要显式构造 partial 场景，否则测的是"已经不需要它的那条路"。
+    const cardPartial = lp.renderCard({
+      platform: 'douyin', kind: 'note', id: '7692802194072122688',
+      title: '喜欢来聊', author: '小张不吃香菜.', partial: true,
+      htmlUrl: 'https://www.iesdouyin.com/share/note/7692802194072122688/',
+    });
+    check('★ 图文卡片有标题和作者', /喜欢来聊/.test(cardPartial) && /小张不吃香菜\./.test(cardPartial));
+    check('★★ 降级（partial）的图文卡片**如实说明**数据来源（不装成抓来的）',
+      /抖音不提供图文页数据/.test(cardPartial), cardPartial.slice(0, 120));
+    const cardFull = lp.renderCard({
       platform: 'douyin', kind: 'note', id: '7692802194072122688',
       title: '喜欢来聊', author: '小张不吃香菜.',
       htmlUrl: 'https://www.iesdouyin.com/share/note/7692802194072122688/',
     });
-    check('★ 图文卡片有标题和作者', /喜欢来聊/.test(card) && /小张不吃香菜\./.test(card));
-    check('★★ 图文卡片**如实说明**数据来源（不装成抓来的）',
-      /抖音不提供图文页数据/.test(card));
-    check('  图文卡片没有封面图（平台不给，不能瞎造）', !/!\[封面/.test(card));
-    check('  图文卡片给了能点开的链接', /iesdouyin\.com\/share\/note\//.test(card));
+    check('  └ 拿到真数据（非 partial）时**不**再写那句免责（别骗用户说没抓到）',
+      !/抖音不提供图文页数据/.test(cardFull));
+    check('  图文卡片没有封面图（平台不给，不能瞎造）', !/!\[封面/.test(cardFull));
+    check('  图文卡片给了能点开的链接', /iesdouyin\.com\/share\/note\//.test(cardFull));
 
     // ④ ⚠️ 关键约束：这套降级**只对图文**，视频抓不到时仍然安静跳过
     const lsrc = require('fs').readFileSync(__dirname + '/linkparse.js', 'utf8');
@@ -3926,6 +3936,62 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /::placeholder\s*\{[^}]*color:\s*var\(--text-tertiary\)/.test(pgI));
   }
 
+
+  // ============================================================
+  // 🆕 2026-10-10：「解析中」提示语的模板渲染（真机 bug 回归）
+  //
+  // 线上实测原文：`🎬 正在处理 **7.7MBMB** 的视频，需要一点时间`
+  // 原因：模板里写了 `{size}MB`（单位在模板里），代码又给 `{size}` 拼了个 `'MB'`。
+  // ⇒ 规范：**单位由模板负责，代码只给裸数字**。下面这几条把这个约定钉住。
+  // ============================================================
+  {
+    const vt = require('./videotext');
+    const v = cfg.policy.linkParse.video;
+    const pool = (Array.isArray(v.pendingTexts) && v.pendingTexts.length)
+      ? v.pendingTexts : [v.pendingTemplate];
+
+    // ① 真机那条路径：sizeMB 传裸数字，渲染出来**不能**有 MBMB
+    for (const tpl of pool) {
+      const out = vt.renderPendingText(tpl, { sizeMB: '7.7', quality: '360P', title: '测试标题' });
+      check(`★ 模板渲染不重复单位（${tpl.slice(0, 14)}…）`,
+        !/MBMB|P360|MB\s*MB/.test(out), out);
+      check('  └ 占位符全部被替换掉（不留 {xxx}）', !/\{[a-z]+\}/i.test(out), out);
+    }
+
+    // ② 单位只能出现一次
+    const one = vt.renderPendingText('🎬 正在处理 {size}MB 的视频', { sizeMB: '7.7' });
+    check('★★ 「{size}MB + 裸数字 7.7」→ 7.7MB（不重复、不缺失）',
+      one.includes('7.7MB') && !one.includes('MBMB'), one);
+
+    // ③ 模板自己用了没见过的占位符 → 这条会红（提醒去代码里接线）
+    const known = new Set(vt.PLACEHOLDERS);
+    const unknown = pool.flatMap((t) => vt.placeholdersIn(t)).filter((p) => !known.has(p));
+    check('★ 模板里只用了已知占位符（{size}/{quality}/{title}）',
+      unknown.length === 0, `多出来的：${unknown.join(',')}`);
+
+    // ④ 「信息不能丢」：每条至少带一个真信息占位符（size 或 quality）；
+    //    整个池子里 {quality} 也得露过面（有人点"干净度"、有人点"多大"，
+    //    这是文案选择，不是丢信息）。
+    const lost = pool.filter((t) => !t.includes('{size}') && !t.includes('{quality}'));
+    check('★ 每条提示语至少带一个真信息占位符（{size} 或 {quality}）',
+      lost.length === 0, lost.join(' | '));
+    check('★ 整个池子里 {quality} 有露面（清晰度这档信息没被整体丢掉）',
+      pool.some((t) => t.includes('{quality}')), '');
+    check('★ 整个池子里 {size} 有露面（体积这档信息没被整体丢掉）',
+      pool.some((t) => t.includes('{size}')), '');
+
+    // ⑤ 快手那种"没有 size/quality"的边界：留空也不留火星子
+    const empty = vt.renderPendingText('🎬 正在处理 {size}MB 的视频（{quality}）', { sizeMB: '', quality: '' });
+    check('  缺 size/quality 时不残留占位符、也不出现纯单位',
+      !/\{|\bMB\s*（\s*）/.test(empty), empty);
+
+    // ⑥ 接线：index.js 用的是这个纯函数，而且**给的是裸数字**
+    const isrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    check('★★ index.js 走 videotext.renderPendingText',
+      isrc.includes("require('./videotext')") && isrc.includes('renderPendingText(tpl'), '');
+    check('★★ index.js 给 {size} 的是裸数字（不再自己拼 MB，否则单位重复）',
+      /const sizeMB = src\.size \? \(src\.size \/ 1048576\)\.toFixed\(1\) : ''/.test(isrc), '');
+  }
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail === 0 ? 0 : 1);

@@ -17,6 +17,7 @@ const budget = require('./budget');   // 只为"没钱了"的节流（shouldAnno
 const qqmedia = require('./qqmedia');
 const emotion = require('./emotion');   // 🆕 情绪观察器（只观察、不注入，见 config.policy.emotionObserve）
 const memory = require('./memory');     // 🆕 记忆（全群共享便签本，见 config.policy.memory）
+const commands = require('./commands'); // 🆕 群内指令（/菜单、加Q+号 —— 0 次模型调用）
 
 // 🆕 记忆注入的节流表：scope -> 上次注入时间
 //    （防"每条消息都塞记忆"，见 config.policy.memory.recallMinIntervalMs）
@@ -132,6 +133,41 @@ async function handleEvent(type, d) {
       : await sendPrivateMessage(openid, text, d.id);
     console.log(`  └ ${sent ? '✓ 已回复' : '✗ 回复失败'}: ${text}`);
     return;   // 🛑 处理完就结束，不走下面任何流程
+  }
+
+  // 3.7 🆕 群内指令：/菜单 · 加Q+QQ号（2026-10-10）
+  //
+  // 🔴 位置和 power 一样讲究：**必须在"关机"判断之前** ——
+  //    关机了也得能把菜单调出来（否则关了菜单就看不见指令表了，很荒谬）。
+  //    ⇒ 也就是说它**不受开关机影响**。这是刻意的，不是漏了。
+  //
+  // 🔴 用 **markdown（msg_type=2）** 发，不用纯文本 —— 卡片里的"点了就跳"靠的就是
+  //    markdown 链接；纯文本里带 scheme 是死文本。
+  //
+  // 🔴 全程 0 次模型调用（能不用模型解决的就不用模型）：纯正则命中 → 拼串发出去。
+  //    所以它**不花额度**，也就不需要过 budget 闸。
+  //
+  // ⚠️ 群友不 @ 也想收到 → 得在开放平台后台开「获取群内全部消息」（只有群主能改）。
+  //    没开的话 @它说「/菜单」照样能用。
+  try {
+    const cmd = d.author?.bot ? null : commands.build(String(d.content || ''), scope);
+    if (cmd && cmd.silent) {
+      console.log(`  ├ 📋 命中群内指令，但跳过（${cmd.why}）`);
+      return;
+    }
+    if (cmd) {
+      const label = cmd.kind === 'menu' ? '/菜单' : '加Q';
+      console.log(`  ├ 📋 群内指令【${label}】`
+        + `${cmd.num ? ` 号码=${cmd.num}${cmd.bad ? '（❌ 格式不对，回提示）' : ''}` : ''}`);
+      const ok = isGroup
+        ? await sendGroupMarkdown(openid, cmd.text, d.id)
+        : await sendPrivateMarkdown(openid, cmd.text, d.id);
+      console.log(`  └ 📋 ${ok ? '✓ 已回复' : '✗ 回复失败'}（markdown）`);
+      return;   // 🛑 指令走完就结束，不进上下文、不进 L0/L1/L2
+    }
+  } catch (e) {
+    // 指令出问题**绝不能影响正常聊天** —— 打一行日志继续往下走
+    console.warn(`  ├ 📋 群内指令处理异常（已忽略，继续正常流程）: ${e.message || e}`);
   }
 
   // 🛑 已关机：只留一行日志，什么都不做（不识别、不解析、不回话、不花钱）
@@ -265,11 +301,26 @@ async function handleEvent(type, d) {
     const what = links.length
       ? `${links.length} 条链接（${links[0].platform} 等）`
       : '一张 B站小程序卡片';
+
+    // 🆕 2026-10-10：**卡片不再被"本群连发上限"挡掉**
+    //
+    // 用户报「小肥鱼广场的B站卡片没返回」，翻 24 小时日志统计原因：
+    //   标题反查命中 27 次 · 卡片已发送 14 次 · **「连发已达上限且没被点名」跳过 7 次** ·
+    //   反查没搜到 1 次（那次回了话）· 其余是普通聊天的不回
+    // ⇒ 那 7 次就是"它明明收到了却一声不吭"的元凶：机器人刚在本群说过话（3 分钟 2 次），
+    //   于是卡片被判超限、**静默丢弃** —— 群友体感就是"它没理我"。
+    //
+    // 🔑 为什么可以放心去掉这道判据：卡片解析**自己有一层更严格的闸门** ——
+    //    `linkAllowed` 的**每会话冷却**（`linkParse.cooldownMs`，比"3 分钟 2 次"严得多），
+    //    刷屏照样被挡，而且是**有日志、有理由**的挡。
+    //    反过来，"因为机器人刚说过话就不解析卡片"是把两件无关的事绑在了一起。
     if (!gate.ok) {
       console.log(`  ├ 🔗 看到 ${what}，但先跳过（${gate.why}）`);
-    } else if (!named && !brain.consecutiveOk(scope)) {
-      console.log(`  ├ 🔗 看到 ${what}，但先跳过（本群连发已达上限，且没被点名）`);
     } else {
+      if (!named && !brain.consecutiveOk(scope)) {
+        // 留痕但**不再拦**（方便以后回看有多少次是被这条放行的）
+        console.log('  ├ 🔗 本群连发已达上限，但卡片照常解析（2026-10-10 起不再静默丢弃）');
+      }
       // 🆕 卡片才需要反查（链接不用）—— **过了闸门才发请求**
       let found = links;
       if (!found.length) {
@@ -788,20 +839,24 @@ const QN_NAME = {
   80: '1080P', 112: '1080P+', 116: '1080P60', 120: '4K',
 };
 
+// 把"解析中"的模板渲染成人话（纯函数抽到 videotext.js，**为了能被测试覆盖**）
+//
+// 🔴 2026-10-10 修的真 bug：模板写 `{size}MB`、代码又给 `{size}` 拼了 `'MB'`
+//    ⇒ 线上打出「🎬 正在处理 **7.7MBMB** 的视频」。
+//    规范：**单位由模板负责，代码只给裸数字**。
+const { renderPendingText } = require('./videotext');
+
 // 🆕 解析期间的提示语
 //
 // ⚠️ 调用时机很关键：必须**过了大小检查、确定要发**之后才调。
 //    否则会出现"提示了却什么都没来" —— 那比不提示更让人困惑。
 async function sendVideoPending(d, groupopenid, info, src, v) {
   // 快手不给 size / quality，所以这两项都做成"有才显示"
-  const size = src.size ? (src.size / 1048576).toFixed(1) + 'MB' : '';
+  const sizeMB = src.size ? (src.size / 1048576).toFixed(1) : '';
   const quality = QN_NAME[src.quality] || src.qualityLabel || '原画';
   const pool = Array.isArray(v.pendingTexts) && v.pendingTexts.length ? v.pendingTexts : [v.pendingTemplate];
-  let text = pool[Math.floor(Math.random() * pool.length)] || '🎬 正在解析视频…';
-  text = String(text)
-    .replace(/\{size\}/g, size)
-    .replace(/\{quality\}/g, quality)
-    .replace(/\{title\}/g, String(info.title || '').slice(0, 30));
+  const tpl = pool[Math.floor(Math.random() * pool.length)] || '🎬 正在解析视频…';
+  const text = renderPendingText(tpl, { sizeMB, quality, title: info.title });
 
   const ok = await sendGroupMessage(groupopenid, text, d.id);
   console.log(`  ├ 🎬 已发解析提示${ok ? '' : '（⚠️ 发送失败）'}：${text}`);
