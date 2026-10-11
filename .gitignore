@@ -72,3 +72,18 @@ temp/
 # ⚠️ 只忽略 _preview/ 这一个目录；preview-page / theme-audit / shot-page / assert-deliverable
 #    这四个脚本本身是**要提交**的开发工具（下次改 UI 还得用它们验收）。
 devtools/_preview/
+
+# ---- 🔴 CodeGraph 本地索引（每台机器各自生成，不进仓库）----
+# `codegraph init` 在项目里建的本地知识图谱（SQLite，本仓库约 5 MB）。
+# ⚠️ 它自带的 .codegraph/.gitignore 只挡目录内部的文件、挡不住目录本身，
+#     所以这里补一行，否则 git status 会一直挂着一条未跟踪的 .codegraph/。
+.codegraph/
+
+# ---- 🔴 宣传片渲染的中间产物（2026-10-11）----
+# promo/ 下面是宣传片：成片 bigfish-promo.mp4、组合 onetake/comp.html、声音 onetake/score.py
+# 都是**要提交**的。渲染过程产生的草稿与截图只在本地看，不进仓库。
+promo/onetake/draft*.mp4
+promo/onetake/*.render.json
+promo/onetake/_*.png
+promo/onetake/sheet*.png
+promo/archive-v1/v1-film.mp4
