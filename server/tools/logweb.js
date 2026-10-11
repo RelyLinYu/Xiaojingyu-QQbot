@@ -105,6 +105,8 @@ function fillPersonaForPanel(snapObj) {
         budgetDaily: cfgNum.budget.dailyLimitYuan,
         budgetTotal: cfgNum.budget.totalLimitYuan,
         dailyCalls: cfgNum.policy.dailyCallLimit,
+        // 🆕 2026-10-11：识图上限同样是"没存过就给空框" ⇒ 用代码里的当前生效值填上
+        visionDaily: cfgNum.policy.vision && cfgNum.policy.vision.dailyLimit,
       };
       for (const k of Object.keys(eff)) {
         const v = eff[k];
@@ -166,6 +168,48 @@ function budgetState() {
       byModel: j.byModel || {},
     };
   } catch { return null; }
+}
+
+// 🆕 2026-10-11：识图用量（给面板那张"今日识图 / 上限 N 张"卡片 + 设置区的默认值）。
+//
+// 🔑 数据只能从**机器人进程**落盘的 `data/vision-stats.json` 来 —— 真正的计数
+//    （`visionCount`）在主进程内存里，这个页面是独立进程，读不到。
+//
+// ⚠️ 口径必须和 vision.js 对齐：
+//    · `used` = 今天**真花钱认过**的张数 = stats 里的 `ok`
+//      （`cached` 是同一张图命中 md5 缓存、**不占额度**，所以不能加进去）
+//    · `miss` = 今天"没看成"的张数（名额用完 / 冷却 / 取图失败 / 空描述，加总）
+//    · 日期按**北京时间**算（和 vision.js 的 beijingToday 同一个口径，
+//      服务器时区万一不是 CST 也不会错一天）
+// ⚠️ 文件不存在 / 读坏了 ⇒ 返回 used:null（页面显示 `—`），绝不让额度区变空。
+function visionState() {
+  let limit = 800;
+  try {
+    const cfgNum = require('../config');
+    limit = Number(cfgNum.policy.vision && cfgNum.policy.vision.dailyLimit) || 800;
+  } catch { /* 用兜底 */ }
+  // 上限**动态值优先**（和 dailyCallLimit 一个道理：面板改完，卡片上的数字要立刻跟着变）
+  try { limit = settings.num('visionDaily', limit); } catch { /* 用上面的 */ }
+
+  try {
+    const f = path.join(APP_DIR, 'data', 'vision-stats.json');
+    if (!fs.existsSync(f)) return { used: null, miss: null, limit };
+    const days = (JSON.parse(fs.readFileSync(f, 'utf8')) || {}).days || {};
+    const d = new Date();
+    const bj = new Date(d.getTime() + d.getTimezoneOffset() * 60000 + 8 * 3600 * 1000);
+    const key = `${bj.getFullYear()}-${bj.getMonth() + 1}-${bj.getDate()}`;
+    const cur = days[key] || {};
+    const missN = Object.values(cur.miss || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+    return {
+      used: Number(cur.ok) || 0,
+      cached: Number(cur.cached) || 0,
+      seen: Number(cur.seen) || 0,
+      miss: missN,
+      limit,
+    };
+  } catch {
+    return { used: null, miss: null, limit };
+  }
 }
 
 // 🆕 事件读取加缓存 + 放大窗口 + **跨天读两个文件**（2026-10-05）
@@ -735,6 +779,7 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       log, service, budget, power, events, convos,
       settings: fillPersonaForPanel(settings.snapshot()),   // 🆕 可改参数（密钥只给掩码；人设框填上当前生效的人设）
+      vision: visionState(),                  // 🆕 今日识图用量（额度区那张「今日识图 / 上限 N 张」）
       scopeIds: recentScopeIds(),             // 🆕 猜群号用
       build: BUILD,                           // 🆕 版本戳（页头显示，用来确认"是不是新页面"）
     }));

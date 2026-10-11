@@ -852,7 +852,7 @@ async function load(){
     document.getElementById('pwstate').className = 'pwstate' + (pw.on ? '' : ' warn');
 
     // 每一步单独兜底 —— 某一块出错不该让整页变成空白（之前就是这样，还只弹了个会消失的提示）
-    try { renderBudget(j.budget); } catch (e) { setErr('额度渲染失败：' + e.message); }
+    try { renderBudget(j.budget, j.vision); } catch (e) { setErr('额度渲染失败：' + e.message); }
     // 🆕 2026-10-07：额度一变，趋势图的黄/红阈值与那段说明里的数字也跟着变
     //    （用户原话「这 1600 不会跟着改」—— 写死的上限比没有上限更误导人）
     try { applyLimits(j.budget); loadUsage(lastUsageDays); } catch (e) { /* 不影响其它区块 */ }
@@ -870,7 +870,7 @@ async function load(){
   }
 }
 
-function renderBudget(b){
+function renderBudget(b, v){
   const el = document.getElementById('budget');
   if (!b) { el.innerHTML = '<div class="card"><span>暂无花费数据</span></div>'; return; }
   // 🔴 2026-10-06：**"累计已花"只用本地账本**（官方口径/锚点已按用户要求删除）
@@ -878,7 +878,13 @@ function renderBudget(b){
     card(yuan(b.daySpent), '今日已花 / 上限 ' + yuan(b.dailyLimit)) +
     card(yuan(b.spentYuan), '累计已花 / 上限 ' + yuan(b.totalLimit)) +
     card((b.dayCalls||0), '今日调用 / 上限 ' + (b.dailyCallLimit||'?') + ' 次') +
-    card(b.dayLeft==null?'—':yuan(b.dayLeft), '今日剩余', (b.dayLeft!=null && b.dayLeft<1));
+    card(b.dayLeft==null?'—':yuan(b.dayLeft), '今日剩余', (b.dayLeft!=null && b.dayLeft<1)) +
+    // 🆕 2026-10-11：识图张数也摊出来（要"调控识图上限"，得先看得见今天用掉多少）。
+    //    ⚠️ 数据来自**机器人进程**落盘的 data/vision-stats.json，面板只读；
+    //       拿不到就退回「— / 上限 N」，绝不让整块额度区变空。
+    //    ⚠️ "用完"时把数字标黄（和"今日剩余 < ¥1"同一个 warn 样式），一眼能看出该调大了。
+    (v ? card(v.used == null ? '—' : v.used, '今日识图 / 上限 ' + (v.limit || '?') + ' 张',
+      !!(v.used != null && v.limit && v.used >= v.limit)) : '');
 }
 function card(big, small, warn){
   return '<div class="card"><b class="' + (warn?'warn':'') + '">' + big + '</b><span>' + small + '</span></div>';
@@ -889,7 +895,7 @@ function renderSettings(s){
   if (!s || !Object.keys(s).length) { el.innerHTML = '<p class="hint">没有可改的参数（settings.snapshot() 返回空）</p>'; return; }
   // 🆕 2026-10-06 用户：人设补充为什么要单独做功能，直接在修改里面的末尾加上不就行了？
   //    ⇒ 去掉单独的「人设补充」行，只留一个「人设」大框（保存时会顺手清掉旧的补充值）
-  const order = ['aiApiKey','budgetDaily','budgetTotal','dailyCalls','personaText'];
+  const order = ['aiApiKey','budgetDaily','budgetTotal','dailyCalls','visionDaily','personaText'];
   const rows = order.filter(k => s[k]).map(k => {
     const it = s[k];
     const val = it.value == null ? '' : it.value;
@@ -903,7 +909,8 @@ function renderSettings(s){
         : '<input id="' + id + '" data-key="' + k + '" ' +
           // ⚠️⚠️ 密码分支的收尾 > **必须留着**（这个收尾符被吃掉过两次，害得「保存」变纯文本）
           (it.secret ? 'type="password" placeholder="留空=不改；粘贴新的会覆盖" value="">' :
-            'type="number" step="0.01" value="' + esc(val) + '">')) +
+            // 🆕 2026-10-11：整数项（次数 / 张数）用 step="1"，别让数字框按 0.01 步进
+            'type="number" step="' + (it.int ? '1' : '0.01') + '" value="' + esc(val) + '">')) +
       '<button class="sm" data-save="' + k + '" type="button">保存</button></div>';
   }).join('');
   el.innerHTML = rows + (s.aiApiKey ? '<p class="hint">当前密钥：' + esc(s.aiApiKey.value || '（未设置）') + '</p>' : '')

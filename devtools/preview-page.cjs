@@ -61,11 +61,17 @@ const MOCK = {
       daySpent: 1.2345, dailyLimit: 3, spentYuan: 12.6789, totalLimit: 30,
       dayCalls: 812, dailyCallLimit: 3000, dayLeft: 1.7655,
     },
+    // 🆕 2026-10-11：识图用量（额度区那张「今日识图 / 上限 N 张」）。
+    //    ⚠️ 桩数据必须**仿真**：字段名/口径都照 logweb 的 visionState() 来，
+    //       否则预览里那张卡渲染不出来，theme-audit / btn-probe 就成了"盲区"。
+    vision: { used: 312, cached: 58, seen: 400, miss: 4, limit: 800 },
     settings: {
       aiApiKey:   { label: 'AI 密钥', value: 'sk-abc…(只显示前后几位)…8f21', secret: true },
-      budgetDaily:{ label: '每日金额上限（元）', value: 3 },
-      budgetTotal:{ label: '累计金额上限（元）', value: 30 },
-      dailyCalls: { label: '每日调用次数上限', value: 3000 },
+      budgetDaily:{ label: '每日金额上限（元）', value: 3, min: 0.1, max: 1000 },
+      budgetTotal:{ label: '累计金额上限（元）', value: 30, min: 1, max: 100000 },
+      dailyCalls: { label: '每日调用次数上限', value: 3000, min: 10, max: 100000, int: true },
+      // 🆕 2026-10-11：识图上限（面板可改项）
+      visionDaily:{ label: '每天识图上限（张）', value: 800, min: 1, max: 100000, int: true },
       personaText:{ label: '人设（system 提示词）', value: '你叫巧克力，是一只甜系傲娇的猫娘……（这行只是打样的占位文本）' },
     },
     convos: [

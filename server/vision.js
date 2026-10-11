@@ -116,11 +116,16 @@ function beijingToday() {
   return `${bj.getFullYear()}-${bj.getMonth() + 1}-${bj.getDate()}`;
 }
 
-// 每日张数上限：**每次现取**（和 brain.dailyLimit 同一个理由 —— 以后真做成
-// 面板可改项时，这里不用再改代码）。兜底从旧值 300 提到 800。
+// 每日张数上限：**每次现取**（和 brain.dailyLimit 同一个理由）——
+//   ① 面板可改（settings.json 的 `visionDaily`，2026-10-11 用户要的）；
+//   ② 改完**立即生效**：当天撞满上限后把它调大，下一张图当场就能认，不用重启也不用等第二天。
+// ⚠️ require 放在函数里（和 brain.dailyLimit 一样的写法）：settings ⇄ vision 之间别在
+//    加载期互相拽着，取不到就退回 config 里的值。
 function visionLimit() {
   const n = Number((cfg.policy.vision || {}).dailyLimit);
-  return n > 0 ? n : 800;
+  const fallback = n > 0 ? n : 800;
+  try { return require('./settings').num('visionDaily', fallback); }
+  catch { return fallback; }
 }
 
 // 返回 { ok, key, why }：

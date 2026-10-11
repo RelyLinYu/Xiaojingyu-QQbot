@@ -41,7 +41,13 @@ const SPEC = {
   budgetTotal: { type: 'runtime', key: 'budgetTotalYuan', env: 'BUDGET_TOTAL_YUAN', label: '总限额（元）', min: 1, max: 100000 },
   // 🔴 2026-10-06：`budgetAnchor`（累计已花锚点）**已按用户要求删除** —— 他原话：
   //    「不需要那个锚点，我自己看，删掉」。⇒ "累计已花"只用本地账本（页面显示 `spentYuan`）。
-  dailyCalls: { type: 'runtime', key: 'dailyCallLimit', env: 'DAILY_CALL_LIMIT', label: '每天回复调用上限（次）', min: 10, max: 100000 },
+  dailyCalls: { type: 'runtime', key: 'dailyCallLimit', env: 'DAILY_CALL_LIMIT', label: '每天回复调用上限（次）', min: 10, max: 100000, int: true },
+  // 🆕 2026-10-11（用户：「给后台面板加一个调控识图上限的功能」）：识图上限也做成面板可改项。
+  //    ⚠️ 走 runtime（settings.json）⇒ **改完立即生效**：vision.js 的 `visionLimit()` 每次现读一次，
+  //       所以当天撞满上限之后，用户在面板把它调大，**下一张图当场就能认** ——
+  //       不用重启（重启会清掉上下文和"最近一张图"的缓存）、也不用干等到第二天 0 点。
+  //    ⚠️ `int: true`：张数必须是整数（`budgetDaily` 那类要小数的才用 step 0.01）。
+  visionDaily: { type: 'runtime', key: 'visionDailyLimit', env: 'VISION_DAILY_LIMIT', label: '每天识图上限（张）', min: 1, max: 100000, int: true },
   // 🆕 2026-10-06（用户要的"改人设"）：**人设补充** —— 一小段话，追加到 system 人设**末尾**。
   //    ⚠️ 走 runtime（settings.json）而不是 env ⇒ **改完即时生效、不用重启**（cfg.persona.systemPrompt 是 getter，每次现算）。
   //    ⚠️ 但它**在 system 里** ⇒ 一改就会让 prompt 前缀缓存失效一次（命中价 1/50 → 全价）。
@@ -210,6 +216,8 @@ function snapshot() {
           type: spec.type,
           value: Number.isFinite(Number(v)) ? Number(v) : null,
           min: spec.min, max: spec.max,
+          // 🆕 2026-10-11：整数项要告诉前端用 `step="1"`（否则数字框按 0.01 步进）
+          int: !!spec.int,
         };
     }
   }
@@ -253,6 +261,9 @@ function update(patch) {
 
     const v = Number(rawVal);
     if (!Number.isFinite(v)) return { ok: false, why: `${spec.label} 必须是数字` };
+    // 🆕 2026-10-11：整数类（次数 / 张数）**拒掉小数** —— 否则会出现"上限 800.5"这种
+    //    没法解释的值（`visionCount >= 800.5` 到底算 800 还是 801？）。金额类不受影响。
+    if (spec.int && !Number.isInteger(v)) return { ok: false, why: `${spec.label} 必须是整数` };
     if (spec.min != null && v < spec.min) return { ok: false, why: `${spec.label} 不能小于 ${spec.min}` };
     if (spec.max != null && v > spec.max) return { ok: false, why: `${spec.label} 不能大于 ${spec.max}` };
     next[spec.key] = v;

@@ -3417,6 +3417,40 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     //    ⇒ `lw` 指**页面模板**（历史原因沿用这个名字），`pg` 指 logweb.js 的运行逻辑
     const lw = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
     const pg = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
+
+    // 🆕 2026-10-11（用户：「给后台面板加一个调控识图上限的功能」）
+    //    ⚠️ 关键不是"多一个框"，而是这个框**改完立刻管用**：vision.visionLimit() 每次现读
+    //       settings ⇒ 当天撞满上限后调大，下一张图当场就能认（不用重启、不用等第二天）。
+    const vSnap = snap.visionDaily;
+    check('★★ 面板多了「每天识图上限」这一项（默认取 config 当前生效值、整数、有下限）',
+      !!vSnap && vSnap.type === 'runtime' && vSnap.int === true && vSnap.min === 1
+        && /识图/.test(vSnap.label || ''), JSON.stringify(vSnap));
+    check('★ 它是**即时生效**类（runtime ⇒ 写 settings.json，不用重启）',
+      settings.SPEC.visionDaily.type === 'runtime'
+      && settings.SPEC.visionDaily.key === 'visionDailyLimit');
+    check('★★ 张数只收整数（12.5 应被拒）', settings.update({ visionDaily: 12.5 }).ok === false);
+    check('★ 张数有下限（0 应被拒）', settings.update({ visionDaily: 0 }).ok === false);
+    check('★★ 面板改完，机器人**立刻**读到新值（visionLimit 现取、不缓存）',
+      (() => {
+        const before = require('./vision').visionLimit();
+        const r = settings.update({ visionDaily: 12 });
+        const now = require('./vision').visionLimit();
+        settings.update({ visionDaily: before });          // 还原（测试模式不落盘）
+        return r.ok && now === 12 && require('./vision').visionLimit() === before;
+      })());
+    check('★★ vision.js 走的是 settings 白名单真源（不是自己另存一份）',
+      /require\('\.\/settings'\)\.num\('visionDaily'/.test(
+        require('fs').readFileSync(require('path').join(__dirname, 'vision.js'), 'utf8')));
+    check('★★ page.js 真的会渲染这一行（在 order 里，否则 snapshot 有也不显示）',
+      /'dailyCalls','visionDaily'/.test(lw));
+    check('★ 整数项用 step="1"（不是 0.01）', /it\.int \? '1' : '0\.01'/.test(lw));
+    check('★★ 概览区多一张「今日识图 / 上限 N 张」卡片（上限也要跟着面板改而变）',
+      /今日识图 \/ 上限/.test(lw) && /renderBudget\(j\.budget, j\.vision\)/.test(lw));
+    check('★★ logweb 给面板提供识图用量（口径：ok = 真花钱的张数，cached 不占额度）',
+      /function visionState/.test(pg) && /vision: visionState\(\)/.test(pg)
+        && /Number\(cur\.ok\)/.test(pg) && /settings\.num\('visionDaily'/.test(pg));
+    check('★ 设置区默认值兜底：没存过时框里填当前生效值（不能是空框）',
+      /visionDaily: cfgNum\.policy\.vision/.test(pg));
     check('★★ 合并群功能**已删**（用户要求：那是修代码引入的补丁）',
       !/mergeGroup/.test(lw) && !/合并到…/.test(lw) && !/patch\.move/.test(lw),
       '还残留合并相关代码');
