@@ -135,6 +135,39 @@ const hintProbe = `(function(){
   return out;
 })()`;
 
+// ============================================================
+//  探针三：设置区每个参数自己的「保存」按钮 —— **点了到底发不发请求**（2026-10-11 补）
+//
+//  🔴 为什么必须补（用户直接踩到的线上 bug）：用户报「这些参数都改不了，我把 30 改成 40，
+//    没有任何提示，刷新网页还是 30」。根因是 page.js 里 `saveOne` 的收尾 `}` 被吃掉，
+//    把"注册事件委托"那段吞进了 `saveOne` 体内 ⇒ 委托**从来没注册过**，点按钮连事件都没有。
+//    ⚠️ 当时的闸门全绿：theme-audit 只看样式、check-page-script 只看语法能解析、
+//       连这个 btn-probe 也只点"用量天数"那排按钮 —— 没人**点过设置区的保存**。
+//    ⇒ 断言口径：改掉输入框的值 → 点保存 → **必须看到一条 POST /api/settings 请求**
+//      （且带上刚改的键和值），否则报错。请求记录由 preview-page.cjs 的 fetch 桩提供。
+// ============================================================
+const saveProbe = `(function(){
+  window.__calls = [];
+  var inp = document.querySelector('#settings [data-key="budgetTotal"]');
+  var btn = document.querySelector('#settings button[data-save="budgetTotal"]');
+  if (!inp || !btn) return Promise.resolve({ error: '设置区找不到 budgetTotal 的输入框或保存按钮' });
+  inp.value = '40';
+  btn.click();
+  return new Promise(function(resolve){
+    setTimeout(function(){
+      var calls = (window.__calls || []).filter(function(c){ return c.url === '/api/settings'; });
+      var post = calls[calls.length - 1] || null;
+      var t = document.getElementById('toast');
+      resolve({
+        n: calls.length,
+        method: post ? post.method : null,
+        body: post ? post.body : null,
+        toast: t ? (t.textContent || '') : ''
+      });
+    }, 900);
+  });
+})()`;
+
 async function main() {
   const profile = path.join(PRE, '_edge-profile');
   fs.mkdirSync(profile, { recursive: true });
@@ -192,6 +225,30 @@ async function main() {
       } else {
         console.log('  ✅ 提示里的组数与表格实际行数一致、标题和两条提示都在');
       }
+    }
+
+    // ── 探针三：设置区的「保存」按钮（2026-10-11 用户报"参数都改不了"后补的）──
+    console.log('\n══════ 设置区「保存」按钮探针（改一个值 → 点保存 → 看有没有真发请求）══════');
+    await send('Page.navigate', {
+      url: 'file:///' + path.join(PRE, 'preview-settings.html').replace(/\\/g, '/'),
+    }, sid);
+    await sleep(2500);
+    const rs = await send('Runtime.evaluate', { expression: saveProbe, returnByValue: true, awaitPromise: true }, sid);
+    const sv = rs.result && rs.result.value;
+    if (!sv) { console.log('  ❌ 探针没返回结果'); bad++; }
+    else if (sv.error) { console.log('  ❌ ' + sv.error); bad++; }
+    else {
+      const okReq = sv.method === 'POST' && /budgetTotal/.test(sv.body || '') && /40/.test(sv.body || '');
+      const okToast = /已保存/.test(sv.toast || '');
+      if (!okReq) {
+        console.log('  ❌ 点了「保存」但没发出 POST /api/settings（收到 ' + sv.n + ' 条）' +
+          ' ⇒ 按钮没接上（事件委托没注册？）');
+        bad++;
+      } else {
+        console.log('  ✅ 点「保存」→ ' + sv.method + ' /api/settings ' + sv.body);
+      }
+      console.log('     ' + (okToast ? '✅' : '⚠️') + ' 页面提示：' + (sv.toast || '(无)'));
+      if (!okToast) bad++;
     }
 
     console.log('\n════════════════════════════════════');

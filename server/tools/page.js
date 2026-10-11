@@ -959,15 +959,24 @@ async function saveOne(key){
   const j = await r.json();
   if (!j.ok) { toast('❌ ' + (j.why||'保存失败')); return; }
   toast('✅ 已保存' + (j.needRestart ? '（密钥需点「重启机器人」才生效）' : '（立即生效）'));
-  // 🔴 设置区的「保存」用**事件委托 + data-save**（不再拼内联 onclick 的引号，那个坑踩过两次）
+}
+
+// 🔴 设置区的「保存」用**事件委托 + data-save**（不再拼内联 onclick 的引号，那个坑踩过两次）
+//
+// 🔴🔴 2026-10-11 修一个**用户直接踩到的真 bug**：用户报「参数都改不了，30 改 40 没任何提示、刷新还是 30」。
+//   根因：上面 saveOne 的**收尾大括号曾经被吃掉**，于是"注册事件委托"这段代码被吞进了 saveOne 函数体内部。
+//   而 saveOne 只能由这个委托触发 ⇒ **自己调自己，永远进不去**：点「保存」既不弹提示、也不发请求，
+//   控制台不报错、闸门也全绿（btn-probe 当时只点"用量天数"按钮，从没点过设置区的保存）。
+//   ⇒ 教训：监听器的注册必须在**顶层**（模块加载时就生效）；
+//      "点一下按钮，看有没有真的发出请求"这类断言是唯一能挡住它的东西（已补进 btn-probe）。
+//
+// ⚠️ 这里**不再调 load()** —— 页面末尾已有启动用的 try { load(); } catch，
+//   再调一次等于每次开页多请求一遍 /api/state（1.5 万行日志，白费）。
 document.addEventListener('click', function (ev) {
   var b = ev.target && ev.target.closest && ev.target.closest('button[data-save]');
   if (!b) return;
   saveOne(b.getAttribute('data-save'));
 });
-
-load();
-}
 
 async function saveSettings(){
   const patch = {};

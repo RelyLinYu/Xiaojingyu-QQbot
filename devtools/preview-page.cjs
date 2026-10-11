@@ -124,6 +124,10 @@ function stubFetch(html) {
   var MOCK = ${JSON.stringify(MOCK)};
   var MOCK_DAYS = ${JSON.stringify(MOCK_DAYS)};
   var real = window.fetch;
+  // 🆕 2026-10-11：**记录每一次请求**，让 btn-probe 能断言"点了一下按钮，到底有没有真的发出请求"。
+  //   起因：设置区的「保存」按钮曾经**完全没反应**（事件委托被吞进函数体内部），
+  //   而当时的探针只读"渲染出来的东西"，压根没看"点了之后发生了什么" ⇒ 全绿但线上是坏的。
+  window.__calls = [];
   // 🔴 2026-10-08 修（用户报「切换天数貌似用不了」）：
   //    原来所有 /api/* 都返回同一份**固定**数据，于是 /api/usage 不管你传 days=7 还是 30，
   //    都回同一批 14 天 ⇒ 打样页上"7/14/30 天"按钮**点了没反应**（永远 14 根柱子）。
@@ -132,6 +136,13 @@ function stubFetch(html) {
   //    ⇒ 这里必须**看懂请求参数**再答，跟真实接口一个行为：按 days 取最后 N 天。
   //    ⚠️ 教训：桩数据不仿真 = 用假象验收，比不验收更坏。
   window.fetch = function (u, o) {
+    try {
+      window.__calls.push({
+        url: String(u).split('?')[0],
+        method: (o && o.method) || 'GET',
+        body: String((o && o.body) || ''),
+      });
+    } catch (e) {}
     try {
       var raw = String(u);
       var url = raw.split('?')[0];
@@ -143,6 +154,13 @@ function stubFetch(html) {
         return Promise.resolve({ ok:true, status:200,
           json:function(){ return Promise.resolve({ ok:true, days:days }); },
           text:function(){ return Promise.resolve(JSON.stringify({ ok:true, days:days })); } });
+      }
+      // 🆕 2026-10-11：POST /api/settings 也桩住（否则 file:// 下真 fetch 失败，看不到"已保存"提示）
+      if (url === '/api/settings') {
+        return Promise.resolve({ ok:true, status:200,
+          json:function(){ return Promise.resolve({ ok:true, applied:['budgetTotal'], needRestart:false,
+                                                   snapshot:MOCK['/api/state'].settings }); },
+          text:function(){ return Promise.resolve('{"ok":true}'); } });
       }
       if (MOCK[url]) {
         return Promise.resolve({ ok:true, status:200, json:function(){ return Promise.resolve(MOCK[url]); },
