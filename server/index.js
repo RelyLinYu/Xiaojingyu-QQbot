@@ -874,6 +874,26 @@ async function sendVideoPending(d, groupopenid, info, src, v) {
   console.log(`  ├ 🎬 已发解析提示${ok ? '' : '（⚠️ 发送失败）'}：${text}`);
 }
 
+// 🆕 2026-10-11：视频"太长 / 太大"没下载时，**在群里回一句**。
+//
+// 用户原话：「视频过长不下载加个反馈提示呗，不然别人还以为是没获取到」
+//   —— 原来这种跳过只写进 `noteVideoSkip`（内部记录，给模型答话用），群里完全静默，
+//      群友只看到"卡片 + 没有视频"，自然当成解析失败。
+//
+// ⚠️ 不节流：每条长视频都该有反馈，这正是用户要的"别让我以为坏了"。
+async function noticeVideoSkip(d, groupOpenid, v, key, vars, info) {
+  const pool = (Array.isArray(v?.[key]) && v[key].length) ? v[key] : [];
+  if (!pool.length) return;
+  // 卡片里到底有没有无水印直链，决定 {tip} 填哪句
+  const tip = info?.playUrl ? (v.skipTipWithDirect || '') : (v.skipTipNoDirect || '');
+  let text = String(pool[Math.floor(Math.random() * pool.length)]);
+  for (const [k, val] of Object.entries({ ...vars, tip })) {
+    text = text.split(`{${k}}`).join(String(val == null ? '' : val));
+  }
+  const ok = await sendGroupMessage(groupOpenid, text, d.id);
+  console.log(`  ├ 🎬 已回一句"没下载"的说明${ok ? '' : '（⚠️ 发送失败）'}：${text}`);
+}
+
 async function sendVideo(d, info, groupOpenid, scope) {
   const v = cfg.policy.linkParse.video;
   const tag = info.platform === 'kuaishou' ? '  ├ 🎬[快手]'
@@ -888,12 +908,22 @@ async function sendVideo(d, info, groupOpenid, scope) {
     : v.maxDurationSec;
   if (info.durationSec && info.durationSec > maxDur) {
     console.log(`${tag} 跳过（时长 ${info.durationSec}s > 上限 ${maxDur}s）`);
+    // 说人话的时长 / 上限（抖音按秒，B站快手按分钟）
+    const durText = info.platform === 'douyin'
+      ? `${Math.round(info.durationSec)} 秒`
+      : `${Math.round(info.durationSec / 60)} 分钟`;
+    const limText = info.platform === 'douyin'
+      ? `${maxDur} 秒`
+      : `${Math.round(maxDur / 60)} 分钟`;
     // 🆕 记下"为什么没发视频"，生成回复时才答得对
     if (scope) {
       linkparse.noteVideoSkip(scope, info.platform === 'douyin'
-        ? `时长 ${Math.round(info.durationSec)} 秒，超过抖音短视频上限 ${maxDur} 秒，只在卡片里给了直链`
-        : `时长 ${Math.round(info.durationSec / 60)} 分钟，超过上限 ${Math.round(maxDur / 60)} 分钟，搬不动`);
+        ? `时长 ${durText}，超过抖音短视频上限 ${limText}，只在卡片里给了直链`
+        : `时长 ${durText}，超过上限 ${limText}，搬不动`);
     }
+    // 🆕 2026-10-11：**在群里也说一声**，否则群友以为解析没成功（用户提的需求）
+    await noticeVideoSkip(d, groupOpenid, v, 'skipTooLongTexts',
+      { dur: durText, limit: limText }, info);
     return;
   }
 
@@ -921,6 +951,9 @@ async function sendVideo(d, info, groupOpenid, scope) {
     if (src.size && src.size > maxBytes) {
       console.log(`${tag} 跳过（${mb} > 上限 ${v.maxMB}MB —— 超了 QQ 会把它降级成"文件"，不是可播放视频）`);
       if (scope) linkparse.noteVideoSkip(scope, `视频文件 ${mb}，超过上限 ${v.maxMB}MB，发不了`);
+      // 🆕 2026-10-11：同样在群里说一声（用户提的需求）
+      await noticeVideoSkip(d, groupOpenid, v, 'skipTooBigTexts',
+        { mb: String(mb).replace('MB', ''), limit: v.maxMB }, info);
       return;
     }
 
