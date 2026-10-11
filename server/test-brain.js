@@ -3666,8 +3666,8 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     const cfg = require('./config');
     const exSrc = rd('examples.js');
 
-    check('★★ 没配过文件时，用的还是代码里的默认 14 组',
-      ex.current() === null && cfg.persona.examples.length === 14);
+    check('★★ 没配过文件时，用的还是代码里的默认 15 组',
+      ex.current() === null && cfg.persona.examples.length === 15);
 
     // 存一组 → config 立刻用它（这就是"面板改完即生效"的机制）
     const r1 = ex.save([{ u: '测试问', a: '测试答' }, { u: '帮个忙', a: '不帮', role: '普通群员' }]);
@@ -3689,7 +3689,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       || process.env.XLJ_NO_PERSIST !== '1');
 
     ex.reset();
-    check('★ 恢复默认后回到 14 组', ex.current() === null && cfg.persona.examples.length === 14);
+    check('★ 恢复默认后回到 15 组', ex.current() === null && cfg.persona.examples.length === 15);
 
     // 接线断言：面板 + 接口都要真接上（逻辑对但没接 = 没做）
     check('★★ 面板有示范表格的接线（exList / exSave / /api/examples）',
