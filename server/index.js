@@ -198,7 +198,14 @@ async function handleEvent(type, d) {
   if (img) {
     const vg = vision.visionAllowed(scope);
     if (!vg.ok) {
-      console.log(`  ├ 🖼 有图片，但跳过识别（${vg.why}）`);
+      // 🔴 被闸门拦掉也要**留痕**（用户 2026-10-11 要的），两份：
+      //    ① console —— 一直就有，跟着 journal 走；
+      //    ② 落盘 data/vision-stats.json —— 能回答"今天一共被拦了多少张、卡在哪"。
+      //    同时给这条消息挂一句**固定说明**，免得模型自己编"图没传上来/你网络卡了"。
+      d.__visionNote = vision.missNote(vg.key, vg.why);
+      vision.recordMiss(vg.key, vg.why);
+      console.log(`  ├ 🖼 有图片，但跳过识别（${vg.why}）${
+        d.__visionNote ? ' → 已挂固定说明' : ''}`);
     } else {
       const vt = Date.now();
       try {
@@ -208,6 +215,7 @@ async function handleEvent(type, d) {
           // ⚠️ 缓存命中（同一张图之前认过）**不占今日张数** —— 它一分钱没花。
           //    但冷却照走（否则一个表情包刷屏会被瞬间处理一遍）。
           vision.markVision(scope, !(r && r.cached));
+          vision.recordSeen(!!(r && r.cached), true);   // 留痕：今天看成了一张
           d.__vision = desc;      // ← extractText 会把它拼进文本
           // 🔑 把"这条消息的编号 → 描述"记下来：
           //    之后有人**引用这张图**时，QQ 不会再把图片给我们，
@@ -217,11 +225,15 @@ async function handleEvent(type, d) {
             + `（${((Date.now() - vt) / 1000).toFixed(1)}s）：${desc}`);
         } else {
           // 只有"识别出来是空"才走这里（真失败会抛异常）
-          console.log('  ├ 🖼 模型返回空描述，当没图处理');
+          d.__visionNote = vision.missNote('empty');
+          vision.recordMiss('empty', '模型返回空描述');
+          console.log('  ├ 🖼 模型返回空描述，当没图处理（已挂固定说明）');
         }
       } catch (e) {
         // ⚠️ 识图失败**不能影响正常聊天** —— 图看不懂就照原样继续（文字还在）
-        console.warn(`  ├ 🖼 识别失败: ${e.message || e}`);
+        d.__visionNote = vision.missNote('error');
+        vision.recordMiss('error', e.message || String(e));
+        console.warn(`  ├ 🖼 识别失败: ${e.message || e}（已挂固定说明）`);
       }
     }
   } else if (!d.author?.bot) {

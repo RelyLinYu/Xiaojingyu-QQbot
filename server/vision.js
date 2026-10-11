@@ -41,6 +41,8 @@ const cfg = require('./config');
 const qqmedia = require('./qqmedia');
 const brain = require('./brain');
 const gif = require('./gif');       // 动图采样拼网格（API 只认第一帧）
+const fs = require('fs');
+const path = require('path');
 
 // ---------- 格式嗅探（按字节，不信 filename）----------
 function sniffMime(buf) {
@@ -101,7 +103,7 @@ function hasImage(msg) {
 //   · 图片/表情包是**高频**消息（群里动不动连发一串），
 //     而 dailyCallLimit（现在是 1600）是给"真的要回话"留的。
 //     不隔离的话，一波表情包就能把当天的聊天额度烧光。
-//   · 所以这里默认 300 张/天，先把识图**单独**刹住。
+//   · 所以这里**单独**限流，默认 800 张/天（2026-10-11 由 300 调大；实证见 config.js 注释）。
 //   · ⚠️ 但识图的模型调用**仍然会计入** brain 的 callCount 和 budget ——
 //     那不是重复限制，是应该的：钱是真的花了。
 const lastAt = new Map();     // scope -> ts
@@ -114,23 +116,162 @@ function beijingToday() {
   return `${bj.getFullYear()}-${bj.getMonth() + 1}-${bj.getDate()}`;
 }
 
+// 每日张数上限：**每次现取**（和 brain.dailyLimit 同一个理由 —— 以后真做成
+// 面板可改项时，这里不用再改代码）。兜底从旧值 300 提到 800。
+function visionLimit() {
+  const n = Number((cfg.policy.vision || {}).dailyLimit);
+  return n > 0 ? n : 800;
+}
+
+// 返回 { ok, key, why }：
+//   · `key` 是给"没看成时的固定说明"用的稳定标识（limit/cooldown/disabled/quiet），
+//     文案在 config.policy.vision.missWhy 里 —— 别把中文 why 当键用，改字就断了。
 function visionAllowed(scope) {
   const v = cfg.policy.vision || {};
-  if (!v.enabled) return { ok: false, why: '识图已关闭' };
-  if (brain.inQuietHours()) return { ok: false, why: '静默时段' };
+  if (!v.enabled) return { ok: false, key: 'disabled', why: '识图已关闭' };
+  if (brain.inQuietHours()) return { ok: false, key: 'quiet', why: '静默时段' };
 
   const today = beijingToday();
   if (today !== visionDay) { visionDay = today; visionCount = 0; }
-  if (visionCount >= (v.dailyLimit || 300)) {
-    return { ok: false, why: `今日识图已达上限(${v.dailyLimit})` };
+  const limit = visionLimit();
+  if (visionCount >= limit) {
+    return { ok: false, key: 'limit', why: `今日识图已达上限(${visionCount}/${limit})` };
   }
 
   const gap = v.cooldownMs ?? 2000;
   const last = lastAt.get(scope) || 0;
   if (Date.now() - last < gap) {
-    return { ok: false, why: `同群识图冷却中(${Math.round((gap - (Date.now() - last)) / 1000)}s)` };
+    return {
+      ok: false,
+      key: 'cooldown',
+      why: `同群识图冷却中(${Math.round((gap - (Date.now() - last)) / 1000)}s)`,
+    };
   }
-  return { ok: true };
+  return { ok: true, key: '', why: '' };
+}
+
+// ---------- 「这张图没看成」的固定说明（2026-10-11）----------
+//
+// 为什么要有：图没看成时模型手上是**空的**，它会自己编理由（线上实例：
+// 「图还是没传上来啊，你那儿网络是不是又卡了」）。所以这里由代码写死一句
+// 事实说明，让模型"照实说"，把它编造的路堵掉。
+//
+// ⚠️ 纯函数（喂 key、出字符串），自测直接调，不碰网络/配置以外的状态。
+function missNote(key, why) {
+  const v = cfg.policy.vision || {};
+  const tpl = String(v.missNotice || '').trim();
+  if (!tpl) return '';
+  const table = v.missWhy || {};
+  const reason = String(table[key] || why || '这次没看成').trim();
+  return tpl.replace('{why}', reason);
+}
+
+// ---------- 「没看成」留痕（落盘，供事后查"今天为什么看不了图"）----------
+//
+// 用户 2026-10-11 要的：闸门拦掉时要**留痕**。console 里本来就有那一行，
+// 但它只活在 journal 里、翻起来费劲，也看不出"今天一共被拦了多少张"。
+// 所以按天记一份 `data/vision-stats.json`：
+//     { days: { "2026-10-11": { seen, ok, cached, miss:{limit,cooldown,...}, lastMissAt } } }
+//
+// ⚠️ 三条纪律（和 usage.js 一致）：
+//   ① 数据目录统一 `process.env.APP_DIR || __dirname`（否则又会出现"机器人读一个目录、
+//      面板写另一个目录"那个坑）；
+//   ② **绝不抛错**：读不到/写不了就静默降级，绝不能影响识图和回话；
+//   ③ 写入是"tmp → rename"原子写 + 改前备份 .bak；`XLJ_NO_PERSIST=1` 时不碰磁盘
+//      （自测用，同 settings/usage 的做法）。
+const APP_DIR = process.env.APP_DIR || __dirname;
+const DATA_DIR = path.join(APP_DIR, 'data');
+const STATS_FILE = path.join(DATA_DIR, 'vision-stats.json');
+const STATS_KEEP_DAYS = 30;
+
+let statsCache = null;
+let statsDirty = false;
+
+// 只有本进程写这个文件，所以读一次就够（不像 settings 那份会被面板改）。
+function readStats() {
+  if (process.env.XLJ_NO_PERSIST === '1') return statsCache || (statsCache = { days: {} });
+  if (statsCache) return statsCache;
+  try {
+    const obj = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+    statsCache = (obj && typeof obj.days === 'object' && obj.days) ? { days: obj.days } : { days: {} };
+  } catch {
+    statsCache = { days: {} };          // 读不到/坏了当空，绝不因此不干活
+  }
+  return statsCache;
+}
+
+function writeStats() {
+  if (process.env.XLJ_NO_PERSIST === '1') { statsDirty = false; return; }
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const json = JSON.stringify(statsCache, null, 2);
+    if (fs.existsSync(STATS_FILE)) { try { fs.copyFileSync(STATS_FILE, STATS_FILE + '.bak'); } catch { /* 忽略 */ } }
+    const tmp = STATS_FILE + '.tmp';
+    fs.writeFileSync(tmp, json, 'utf8');
+    fs.renameSync(tmp, STATS_FILE);
+    statsDirty = false;
+  } catch { /* 留痕失败绝不能影响主流程 */ }
+}
+
+function todayBucket() {
+  const days = readStats().days;
+  const date = beijingToday();
+  let cur = days[date];
+  if (!cur) {
+    cur = days[date] = { seen: 0, ok: 0, cached: 0, miss: {}, lastMissAt: '' };
+  }
+  if (!cur.miss || typeof cur.miss !== 'object') cur.miss = {};
+  return cur;
+}
+
+function pruneStats() {
+  const days = readStats().days;
+  const keys = Object.keys(days).sort();
+  while (keys.length > STATS_KEEP_DAYS) delete days[keys.shift()];
+}
+
+// 每次**看到一张图**（不管成没成）都要留着 —— 这样"今天群里进了 500 张图、
+// 只有 300 张看成"这种账才记得下来。
+function recordSeen(cached, ok) {
+  try {
+    const cur = todayBucket();
+    cur.seen += 1;
+    if (ok) { if (cached) cur.cached += 1; else cur.ok += 1; }
+    pruneStats();
+    scheduleWrite();
+  } catch { /* 忽略 */ }
+}
+
+// 被闸门拦 / 取图失败 / 空描述 —— 都走这里
+function recordMiss(key, why) {
+  try {
+    const cur = todayBucket();
+    cur.seen += 1;
+    const k = String(key || 'other');
+    cur.miss[k] = (Number(cur.miss[k]) || 0) + 1;
+    const now = new Date();
+    cur.lastMissAt = String(now.getHours()).padStart(2, '0') + ':'
+      + String(now.getMinutes()).padStart(2, '0') + ':'
+      + String(now.getSeconds()).padStart(2, '0');
+    cur.lastMissWhy = String(why || '');
+    pruneStats();
+    scheduleWrite();
+  } catch { /* 忽略 */ }
+}
+
+// 限频落盘：撞满上限时每分钟可能十几次 miss，没必要每次都写盘。
+let writeTimer = null;
+function scheduleWrite() {
+  if (process.env.XLJ_NO_PERSIST === '1') { statsDirty = false; return; }
+  statsDirty = true;
+  if (writeTimer) return;
+  writeTimer = setTimeout(() => { writeTimer = null; if (statsDirty) writeStats(); }, 5000);
+  if (writeTimer.unref) writeTimer.unref();
+}
+
+// 给自测/排查用：今天的统计 + 上限
+function stats() {
+  return { date: beijingToday(), limit: visionLimit(), ...todayBucket(), count: visionCount };
 }
 
 // counted=false 表示"这次没花钱"（缓存命中）→ 不该占今日张数
@@ -348,8 +489,15 @@ module.exports = {
   hasImage,
   describe,
   visionAllowed,
+  visionLimit,      // 🆕 每日张数上限（现取，兜底 800）
   markVision,
   sniffMime,
+  // 🆕 「这张图没看成」的固定说明 + 留痕（2026-10-11）
+  missNote,
+  recordSeen,
+  recordMiss,
+  stats,
+  STATS_FILE,
   // 🆕 图片索引缓存（「引用图片 + @机器人」靠它）
   msgIdxOf,
   refIdxOf,
@@ -359,4 +507,5 @@ module.exports = {
   // 给自测用
   _beijingToday: beijingToday,
   _extMap: extMap,
+  _resetStats: () => { statsCache = { days: {} }; statsDirty = false; },
 };

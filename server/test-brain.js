@@ -1771,7 +1771,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       again.ok === false && /冷却/.test(again.why), again);
     check('别的群不受影响', vision.visionAllowed('group:VISION_TEST3').ok === true);
     check(`识图上限是独立的（${cfg.policy.vision.dailyLimit}，不共用 dailyCallLimit ${cfg.policy.dailyCallLimit}）`,
-      cfg.policy.vision.dailyLimit === 300 && cfg.policy.vision.dailyLimit !== cfg.policy.dailyCallLimit);
+      cfg.policy.vision.dailyLimit === 800 && cfg.policy.vision.dailyLimit !== cfg.policy.dailyCallLimit);
 
     // --- 配置健全性 ---
     check('识图默认开着', cfg.policy.vision.enabled === true);
@@ -1783,6 +1783,61 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       cfg.policy.vision.maxMB === 8, cfg.policy.vision.maxMB);
     check('  有提示词（不能空着，否则模型只能瞎猜）',
       typeof cfg.policy.vision.prompt === 'string' && cfg.policy.vision.prompt.length > 20);
+
+    // --- 🆕 「这张图没看成」的固定说明 + 留痕（2026-10-11 用户要的）---
+    //
+    // 起因（线上真事）：他在广场群 @ 它说「你看」，它回「图还是没传上来啊，
+    // 你那儿网络是不是又卡了」——**它在编理由**（当天 15:32 就撞满 300 张上限，
+    // 图根本没被识别，模型手上是空的）。所以这句事实必须由**代码**写死。
+    const noteLimit = vision.missNote('limit', '今日识图已达上限(800/800)');
+    check('★ 没看成图时给的是**代码写死**的说明（不让模型自己编）',
+      /名额用完/.test(noteLimit) && /别猜图里是什么/.test(noteLimit), noteLimit);
+    check('  说明里没有残留的 {why} 占位符', !noteLimit.includes('{why}'), noteLimit);
+    check('  每种"没看成"都有中性说法（不许写成人设动作）',
+      ['limit', 'cooldown', 'disabled', 'quiet', 'error', 'empty']
+        .every((k) => typeof cfg.policy.vision.missWhy[k] === 'string'
+          && cfg.policy.vision.missWhy[k].length > 3));
+    check('  认不出的 key 也不抛错（退化成通用说法）',
+      typeof vision.missNote('查无此因') === 'string' && vision.missNote('查无此因').length > 10);
+
+    // ★★ 关键：这句说明必须真的**送得到模型手里**（走 extractText 这个唯一出口）
+    const missMsg = { message_type: 0, content: '你看', __visionNote: noteLimit };
+    const mt = brain.extractText(missMsg);
+    check('★★ 有文字时，固定说明会拼进送给模型的内容',
+      mt.includes('你看') && mt.includes('名额用完'), mt);
+    check('★★ 真看到图时以 __vision 为准（说明不会顶掉真描述）',
+      brain.extractText({ message_type: 0, content: 'x', __vision: '一只猫', __visionNote: noteLimit })
+        .includes('一只猫'));
+    check('★★ 「没看成」≠「看到了」：没文字时 extractText 仍为空（纯 @ 还是纯 @）',
+      brain.extractText({ message_type: 0, content: '', __visionNote: noteLimit }) === '');
+
+    // 留痕（闸门拦掉 / 取图失败都算一笔，按天分原因记下来）
+    vision._resetStats();
+    vision.recordMiss('limit', '今日识图已达上限(800/800)');
+    vision.recordMiss('limit', '');
+    vision.recordMiss('error', 'rkey 过期');
+    vision.recordSeen(false, true);
+    const vstat = vision.stats();
+    check('★★ 没看成会**留痕**：按天计数、按原因分开',
+      vstat.miss.limit === 2 && vstat.miss.error === 1 && vstat.ok === 1 && vstat.seen === 4,
+      JSON.stringify(vstat));
+    check('  留痕里带上限值与最近一次原因',
+      vstat.limit === 800 && vstat.lastMissWhy === 'rkey 过期', JSON.stringify(vstat));
+    check('  留痕落在 data/vision-stats.json（目录算法与其他模块一致）',
+      vision.STATS_FILE.endsWith('vision-stats.json'));
+
+    // 源码级守护：光有配置不算数，三处调用点必须真接上
+    const readSrc = (f) => require('fs').readFileSync(require('path').join(__dirname, f), 'utf8');
+    const idxSrc = readSrc('index.js');
+    check('★★ index.js 的"跳过识别"分支真的挂了固定说明 + 留痕',
+      /vision\.missNote\(vg\.key/.test(idxSrc) && /vision\.recordMiss\(vg\.key/.test(idxSrc));
+    check('★★ 取图失败 / 空描述这两条路也挂了说明（否则那两种又会自己编理由）',
+      /vision\.missNote\('error'\)/.test(idxSrc) && /vision\.missNote\('empty'\)/.test(idxSrc));
+    check('★★ 看成一张也会留痕（这样才能对账"今天进了多少张、看成多少"）',
+      /vision\.recordSeen\(/.test(idxSrc));
+    const vsSrc = readSrc('vision.js');
+    check('★★ visionAllowed 给每种"没看成"都带了稳定 key（改文案不会把它带断）',
+      ['disabled', 'quiet', 'limit', 'cooldown'].every((k) => vsSrc.includes(`key: '${k}'`)));
 
     // --- 🔴 引用图片 + @机器人（用户 2026-09-22 真机踩到：回了"咋了"）---
     //
@@ -2743,8 +2798,8 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★★ 日额度提到 1600（原 800）', P2.dailyCallLimit === 1600, P2.dailyCallLimit);
     check('★★ 且**高于历史峰值**（10-04 实测 995 次）—— 否则它还会继续当那道"无谓的刹车"',
       P2.dailyCallLimit > 995, `${P2.dailyCallLimit} vs 995`);
-    check('  识图仍是**独立**限流，没被这次改动带上（300 张/天）',
-      cfg.policy.vision.dailyLimit === 300 && cfg.policy.vision.dailyLimit !== P2.dailyCallLimit);
+    check('  识图仍是**独立**限流，没被这次改动带上（现为 800 张/天）',
+      cfg.policy.vision.dailyLimit === 800 && cfg.policy.vision.dailyLimit !== P2.dailyCallLimit);
 
     // ⚠️ 别在测试里改 P2.dailyCallLimit —— budget.js 的 callCount 会跨用例累加，
     //    改完再断言会依赖执行顺序（这类"依赖顺序的测试"最容易变成假绿）。
