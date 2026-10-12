@@ -1193,6 +1193,10 @@ async function fetchDouyin(url, shareText) {
     id,
     // 🆕 无水印直链（就是上面刚取到的那个；拿不到就是空串，卡片少一行而已）
     playUrl: direct?.playUrl || '',
+    // 🆕 2026-10-12：**贴给用户点的是 shareUrl**（抖音官方播放接口，裸访问能播），
+    //    不是 playUrl（CDN 直链，裸访问 403 —— 用户 2026-10-12 报的"直链 403"就是这个）。
+    //    playUrl 仍然保留：**服务器自己下载/发群**时用它（带 Referer 能下，且能挑 h264 高码率）。
+    shareUrl: direct?.shareUrl || '',
     // 体积（抖音会给 data_size）—— 上层据此判断能不能直接发进群
     playSize: direct?.playSize || 0,
     images: (direct?.images || []).map((x) => x.url),
@@ -1332,8 +1336,19 @@ function renderShortVideo(v, brand, siteName) {
 function renderDouyin(v) {
   // 🆕 无水印直链（2026-10-09）：用 Markdown 链接给出，和卡片其他链接风格一致，
   //    点开就能看/存（比糊一条几百字符的裸 URL 清爽得多）。
+  //
+  // 🔴 2026-10-12 修：这里原来贴的是 `v.playUrl`（CDN 直链 `*.douyinvod.com`）——
+  //    抖音现在给 CDN 加了防盗链，**不带 `Referer: https://www.douyin.com/` 就是 403**，
+  //    而用户在 QQ 里点开是浏览器直连、带不上我们的 Referer ⇒ 点开只有一个 403 页
+  //    （用户当天反馈「抖音返回的卡片的直链是 403，bz 和 ks 正常」）。
+  //    ⇒ 改成贴 `v.shareUrl`（抖音官方播放接口），实测裸访问 302 → 206 video/mp4，点开就能播。
+  //    ⚠️ 老教训（2026-10-09 B站那次）又应验了一遍：**"我们能下"不等于"用户能打开"**，
+  //       产出给终端用户点的 URL 之前，必须按用户的访问方式（无 Referer / 无 UA）再测一次。
   const directLines = [];
-  if (v.playUrl) directLines.push(`[🎬 无水印视频直链](${v.playUrl})`);
+  if (v.shareUrl) directLines.push(`[🎬 无水印视频直链](${v.shareUrl})`);
+
+  // ⚠️ 图文的图片链接（`*.douyinpic.com`）**我还没按"裸访问"验过**（这次只验了视频）。
+  //    如果用户反馈图文原图打不开，按同一套办法处理（很可能也加了防盗链）。
   if (v.images && v.images.length) {
     const picks = v.images.slice(0, 3).map((u, i) => `[原图${i + 1}](${u})`);
     directLines.push(`🖼 图文共 ${v.images.length} 张　${picks.join('　')}`);

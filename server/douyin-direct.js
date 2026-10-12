@@ -25,7 +25,8 @@
  *
  * 【依赖】
  *   系统装了 chrome-headless-shell（纯二进制，**不是 npm 依赖**）。
- *   路径可用环境变量 DY_BROWSER 覆盖；见 tools/ops/ 下的安装脚本。
+ *   路径可用环境变量 DY_BROWSER 覆盖；安装步骤见 README「环境」一节
+ *   （⚠️ 别再指向仓库里不存在的脚本 —— 之前这里写的是「见 tools/ops/ 下的安装脚本」，那个脚本从来没有过）。
  */
 
 const { spawn } = require('child_process');
@@ -201,6 +202,9 @@ async function fetchDirect(awemeId, opts = {}) {
 
       // 挑地址：h264 优先（QQ 侧对 H.265 支持不好），同编码下再比码率
       const cands = [];
+      // 🆕 2026-10-12：官方播放接口（`/aweme/v1/play/?video_id=…`）单独收集 —— **它才是给用户点的那个**。
+      //   详见下面 `shareUrl` 的注释（CDN 直链裸访问 403，这个接口裸访问 206）。
+      const ifaceUrls = [];
       for (const b of (v.bit_rate || [])) {
         const u = b?.play_addr?.url_list?.[0];
         if (u) cands.push({
@@ -211,7 +215,9 @@ async function fetchDirect(awemeId, opts = {}) {
         });
       }
       for (const u of (v.play_addr?.url_list || [])) {
-        if (u.includes('/aweme/v1/play/')) continue;   // 跳转接口，优先 CDN 直链
+        // 🔴 2026-10-12 反转：原来是 `if (u.includes('/aweme/v1/play/')) continue;`（把它当"跳转接口"丢掉），
+        //    现在反过来收好 —— 它是唯一**裸访问不被防盗链挡**的地址（实测数据见 shareUrl 注释）。
+        if (u.includes('/aweme/v1/play/')) { ifaceUrls.push(u); continue; }
         if (/\.mp3(\?|$)/i.test(u)) continue;          // 图文会混入背景音乐
         cands.push({ url: u, bitRate: 0, key: '' });
       }
@@ -228,6 +234,27 @@ async function fetchDirect(awemeId, opts = {}) {
       if (!cands.length && !images.length) return null;
 
       return {
+        // 🔴 两个地址，用途不同，**别搞混**（2026-10-12 踩过）：
+        //
+        //   · `playUrl` = CDN 直链（`*.douyinvod.com`）—— **只给服务器自己下载用**。
+        //     它现在**不带 Referer 就 403**（实测：裸 403 text/html；带
+        //     `Referer: https://www.douyin.com/` 才是 206 video/mp4）。
+        //     服务器下载时 index.js 会带上这个 Referer，所以能下（且能挑 h264 高码率）。
+        //
+        //   · `shareUrl` = 抖音官方播放接口 `https://www.douyin.com/aweme/v1/play/?video_id=…`
+        //     —— **贴到卡片里给用户点**。实测（同一台服务器、同一个视频）：
+        //       裸访问 / 带手机 QQ 的 UA / 带不带 ratio 参数 → **全部 302 → 206 video/mp4**。
+        //     原因：它是**服务端** 302 到带签名的 CDN 地址，CDN 校验的是那一次跳转，
+        //     跟用户浏览器的 Referer 无关 ⇒ 用户在 QQ 里点开能直接播。
+        //     ⚠️ 2026-10-09 那次实测的结论是"抖音直链裸访问 200"，**现在已经不成立了** ——
+        //        抖音给 CDN 加了防盗链（这也是用户 2026-10-12 反馈"直链 403"的根因）。
+        //
+        //     ⚠️ 这里**优先用自己按 video_id 拼的接口地址**，而不是 detail 响应里
+        //        url_list 可能自带的那种 —— 理由是"自己拼的形状我实测过"（裸 206），
+        //        而 url_list 里的那个我没验过（只留作万一没有 uri 时的兜底）。
+        shareUrl: v.play_addr?.uri
+          ? `https://www.douyin.com/aweme/v1/play/?video_id=${encodeURIComponent(v.play_addr.uri)}&ratio=1080p&line=0`
+          : (ifaceUrls[0] || ''),
         playUrl: cands.length ? cands[0].url : null,
         playSize: cands.length ? (cands[0].dataSize || 0) : 0,
         altCount: Math.max(0, cands.length - 1),

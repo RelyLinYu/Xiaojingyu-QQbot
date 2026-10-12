@@ -816,7 +816,9 @@ async function handleLink(d, links, scope, isGroup, openid) {
     const only = parsed[0];
     if (only && only.platform === 'douyin' && scope) {
       const isNote = only.info?.kind === 'note';
-      const hasDirect = !!only.info?.playUrl;
+      // ⚠️ 2026-10-12：这里看的是 `shareUrl`（**卡片里真正贴给用户的那一行**），
+      //    不是 `playUrl`（那是服务器下载用的 CDN 直链）。两回事，别混。
+      const hasDirect = !!only.info?.shareUrl;
       // 走到这里 = vtarget 没选中抖音。只有两种情况：图文（本来没视频）、或没拿到直链。
       if (isNote) {
         linkparse.noteVideoSkip(scope, '这是抖音图文作品，本来就没有视频');

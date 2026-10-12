@@ -1232,6 +1232,32 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /\[🔗 .*\]\(https:\/\/www\.iesdouyin\.com\/share\/video\//.test(dyCard)
       && !/douyin\.com\/video\//.test(dyCard), dyCard);
 
+    // --- 🔴 抖音卡片里贴的那行"直链"必须是**用户点得开的那个**（2026-10-12 用户报 403 后加的）---
+    //
+    //  背景：抖音给 CDN（*.douyinvod.com）加了防盗链，**不带 Referer 就是 403**；
+    //  而卡片里原来贴的正是这个 CDN 直链 ⇒ 用户在 QQ 里点开只有 403 页。
+    //  正解：贴官方播放接口（实测裸访问 302 → 206 video/mp4）。
+    //  ⇒ 这条断言把"贴给用户的是哪一个"钉死，防止以后又回退成 CDN 直链。
+    const CDN = 'https://v26-web.douyinvod.com/abc/video/tos/cn/x.mp4?a=1128';
+    const IFACE = 'https://www.douyin.com/aweme/v1/play/?video_id=v0200fg1&ratio=1080p&line=0';
+    const dyDirect = lp.renderCard({
+      platform: 'douyin', title: '抖音标题', author: '作者A', duration: '13:04',
+      pubdate: '2026-09-05', like: 1, view: 0, comment: 2,
+      cover: 'https://p3.douyinpic.com/x.jpeg', coverSize: '#480px #360px',
+      htmlUrl: 'https://www.iesdouyin.com/share/video/7681631364923329842/',
+      playUrl: CDN,        // 服务器下载用的 CDN 直链
+      shareUrl: IFACE,     // 给用户点的官方播放接口
+    });
+    check('★ 抖音卡片贴的直链是官方播放接口（用户点得开），不是 CDN 直链（裸访问 403）',
+      dyDirect.includes('无水印视频直链](' + IFACE + ')') && !dyDirect.includes('douyinvod.com'), dyDirect);
+    check('  └ 只有 shareUrl、没有 shareUrl 时不硬贴 playUrl（宁可不给）', (() => {
+      const onlyPlay = lp.renderCard({
+        platform: 'douyin', title: 't', duration: '1:00', htmlUrl: 'https://www.iesdouyin.com/share/video/1/',
+        playUrl: CDN,
+      });
+      return !onlyPlay.includes('douyinvod.com') && !/无水印视频直链/.test(onlyPlay);
+    })());
+
     // --- 一条消息里的多个链接（用户 2026-09-22 实测踩到：快手那条被静默丢掉）---
     const two = 'https://v.douyin.com/IbTyOLmZyDY/ https://v.kuaishou.com/JJYSn5HT';
     const twoLinks = lp.findLinks({ content: two, message_type: 0 });
