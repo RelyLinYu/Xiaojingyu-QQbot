@@ -77,8 +77,10 @@ function load() {
     if (!Number.isFinite(Number(state.dayCalls))) state.dayCalls = 0;
     // 跨天：只清零"今日"，累计保留
     rollover(true);
-    console.log(`[budget] 今日 ¥${state.daySpent.toFixed(4)} / ¥${cfg.budget.dailyLimitYuan}　`
-      + `累计 ¥${state.spentYuan.toFixed(4)} / ¥${cfg.budget.totalLimitYuan}　`
+    console.log(`[budget] 今日 ¥${state.daySpent.toFixed(4)} / ¥${settings.num('budgetDaily', cfg.budget.dailyLimitYuan)}　`
+      // 🔴 2026-10-13 修：这里的"上限"原来读 `cfg.budget.totalLimitYuan`（.env = 30），
+      //    和下面的闸门一起**无视了面板设置**（详见 canSpend 的注释）。
+      + `累计 ¥${state.spentYuan.toFixed(4)} / ¥${settings.num('budgetTotal', cfg.budget.totalLimitYuan)}　`
       // 🔴 2026-10-07：横幅要打**有效上限**（面板可改），别打代码默认值 ——
       //    否则面板设 3000、横幅还写 1600，看起来像"设置没生效"（我差点被这个误导）
       + `今日 ${state.dayCalls}/${settings.num('dailyCalls', cfg.policy.dailyCallLimit)} 次调用（终身累计 ${state.calls} 次）`);
@@ -94,8 +96,8 @@ function save() {
     // ⚠️ 把上限也写进去。日志网页是独立进程，读不到 config 的运行时值，
     //    只靠文件里的数字才能显示"还剩多少"。
     const out = Object.assign({}, state, {
-      dailyLimit: cfg.budget.dailyLimitYuan,
-      totalLimit: cfg.budget.totalLimitYuan,
+      dailyLimit: settings.num('budgetDaily', cfg.budget.dailyLimitYuan),
+      totalLimit: settings.num('budgetTotal', cfg.budget.totalLimitYuan),
       // 🆕 顺手把"官方口径"也写进文件 —— 日志网页是**独立进程**，
       //    读不到本模块的内存，只能靠这个文件显示"累计已花（官方）"。
       // ⚠️ 这里会覆盖 `state.official`（老版本存过）⇒ 文件里不会留过期字段。
@@ -264,8 +266,15 @@ function canSpend() {
   rollover();
   if (!cfg.budget.enabled) return { ok: true, reason: '' };
 
-  const dl = cfg.budget.dailyLimitYuan;
-  const tl = cfg.budget.totalLimitYuan;
+  // 🔴 2026-10-13 修（**用户直接踩到的**）：总额度必须读**面板设置**，不能只读 .env。
+  //    · 用户 10-12 在面板把总限额 30 → 40（settings.json 里确实存着 40）；
+  //    · 但这里一直读 `cfg.budget.totalLimitYuan`（.env 的 `BUDGET_TOTAL_YUAN=30`）
+  //      ⇒ **面板上写着 40，闸门却按 30 执行**；
+  //    · 10-13 19:32 实测后果：累计花到 ¥30.0018 就触发 `🛑 没钱了…累计 ¥30.00 —— 主动拒绝调用`，
+  //      **机器人当场哑掉**，而用户看到的面板还写着 40。
+  //    ⇒ 和日额度/调用上限统一：都走 `settings.num(...)`（面板可改、即时生效）。
+  const dl = settings.num('budgetDaily', cfg.budget.dailyLimitYuan);
+  const tl = settings.num('budgetTotal', cfg.budget.totalLimitYuan);
 
   // 先判总计（更严重：直接就是没钱了）
   if (tl > 0 && state.spentYuan >= tl) {
@@ -377,8 +386,8 @@ function record(model, usage) {
   state.byModel[model].yuan += yuan;
   save();
 
-  const dayLeft = cfg.budget.dailyLimitYuan - state.daySpent;
-  const totalLeft = cfg.budget.totalLimitYuan - state.spentYuan;
+  const dayLeft = settings.num('budgetDaily', cfg.budget.dailyLimitYuan) - state.daySpent;
+  const totalLeft = settings.num('budgetTotal', cfg.budget.totalLimitYuan) - state.spentYuan;
   if (!state.warned && (dayLeft < cfg.budget.warnAtYuan || totalLeft < cfg.budget.warnAtYuan)) {
     state.warned = true;
     save();
