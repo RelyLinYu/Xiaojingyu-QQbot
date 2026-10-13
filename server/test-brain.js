@@ -187,6 +187,33 @@ console.log('\n=== 2b. ⭐ 引用消息（103）：真机数据，必须能读�
   const r3 = brain.passHardRules('group:QUOTE', empty, t, false);
   check('提不出任何内容 → 拒绝（且理由说清是提不出）',
     r3.ok === false && /提不出/.test(r3.why), JSON.stringify(r3));
+
+  // ============================================================
+  // 🔴 2026-10-13 用户报：「我引用别人的消息，bot 把其他人的发言当成了我的发言做出回复」。
+  //    事故现场：他引用群友说的"我下了大肥鱼的"，回「@棠吟 奥奥」，
+  //    机器人答「**主人**下表情包还专门挑我这份」—— 把被引用者的话算到主人头上。
+  //    根因：QQ 的引用元素里**没有作者**（实测只有 content/message_type/msg_idx），
+  //    而拼出来的文本只写"引用了一条消息"，没写是谁说的。
+  //    ⇒ 作者名由 index.js 反查后挂在 `__quoteFrom`，这里钉死拼装规则，防回退。
+  // ============================================================
+  {
+    const withFrom = { ...quoted, content: '奥奥', __quoteFrom: '棠吟' };
+    const tFrom = brain.extractText(withFrom);
+    check('★ 引用消息要标出"是谁说的"（否则模型会把别人的话算到当前发言者头上）',
+      tFrom.includes('是「棠吟」说的') && tFrom.includes('砍一个人') && tFrom.includes('奥奥'), tFrom);
+
+    const noFrom = { ...quoted, content: '奥奥' };
+    check('  └ 查不到作者时也要写明"不是当前说话人说的"',
+      brain.extractText(noFrom).includes('不是当前说话人说的'), brain.extractText(noFrom));
+
+    const selfQuote = { ...quoted, content: '嗯嗯', __quoteIsSelf: true };
+    const tSelf = brain.extractText(selfQuote);
+    check('  └ 引用机器人自己的话时不能写成"别人说的"',
+      tSelf.includes('我自己（机器人）') && !tSelf.includes('不是当前说话人说的'), tSelf);
+
+    check('  └ 老文案「（引用了一条消息：…）」已彻底不再出现（防回退）',
+      !brain.extractText(withFrom).includes('引用了一条消息：「'), tFrom);
+  }
 }
 
 console.log('\n=== 3. 抽样开关（默认 8%：没@没关键词的闲聊有 8% 进判断）===');

@@ -19,6 +19,45 @@ const emotion = require('./emotion');   // 🆕 情绪观察器（只观察、�
 const memory = require('./memory');     // 🆕 记忆（全群共享便签本，见 config.policy.memory）
 const commands = require('./commands'); // 🆕 群内指令（/菜单、加Q+号 —— 0 次模型调用）
 
+// ============================================================
+//  🆕 2026-10-13：**引用消息必须标出"这句话是谁说的"**（用户报的真实 bug）
+//
+//  现象（用户原话）：「我引用别人的消息，bot 把其他人的发言当成了我的发言做出回复」——
+//  他引用了群友「棠吟」说的"我下了大肥鱼的（表情包）"、回了句「@棠吟 奥奥」，
+//  机器人却答「**主人**下表情包还专门挑我这份」：它把**被引用者**说的话算到了**当前发言者**头上。
+//
+//  根因：QQ 的引用事件里 `msg_elements` 只给 `content / message_type / msg_idx`，
+//  **没有任何作者信息**（2026-10-13 实测线上事件确认），而 `brain.extractText` 原来只拼
+//  `（引用了一条消息：「…」）` ⇒ 模型只能默认"这是当前这位说的"。
+//
+//  解：QQ 给**每条**消息都带一个 `msg_idx`（在 `message_scene.ext` 里），被引用的那条也在其中
+//  ⇒ 进程内存一张 `scope|msg_idx → 昵称` 的小表，遇到引用就查回来标上说话人。
+//  ⚠️ 查不到时（消息早于机器人启动、或不在推送范围）也**必须写明"不是当前说话人说的"**，
+//     否则模型照样张冠李戴。
+// ============================================================
+const authorByIdx = new Map();        // `${scope}|${msg_idx}` -> { n: 昵称, b: 是否机器人 }
+const AUTHOR_IDX_MAX = 3000;
+
+function rememberAuthor(scope, msg) {
+  const idx = vision.msgIdxOf(msg);
+  if (!idx) return;
+  if (authorByIdx.size >= AUTHOR_IDX_MAX) {          // 简单清理：先丢最早的四分之一
+    let n = 0;
+    for (const k of authorByIdx.keys()) { authorByIdx.delete(k); if (++n >= AUTHOR_IDX_MAX / 4) break; }
+  }
+  authorByIdx.set(`${scope}|${idx}`, { n: msg.author?.username || '', b: !!msg.author?.bot });
+}
+
+// 返回被引用那条消息的说话人（查不到返回空串）
+function quotedAuthor(scope, msg) {
+  const ref = vision.refIdxOf(msg);
+  if (!ref) return { name: '', isSelf: false };
+  const hit = authorByIdx.get(`${scope}|${ref}`);
+  if (!hit) return { name: '', isSelf: false };
+  if (hit.b) return { name: '', isSelf: true };
+  return { name: hit.n || '', isSelf: false };
+}
+
 // 🆕 记忆注入的节流表：scope -> 上次注入时间
 //    （防"每条消息都塞记忆"，见 config.policy.memory.recallMinIntervalMs）
 const lastRecallAt = new Map();
@@ -113,6 +152,9 @@ async function handleEvent(type, d) {
   // 私聊事件里 username 常常是空的
   const who = d.author.username || (isPrivate ? '私聊用户' : '群友');
   const scope = isGroup ? `group:${openid}` : `private:${openid}`;
+
+  // 🆕 2026-10-13：先记下"这条消息是谁说的"（引用标注要用，见文件顶部的注释）
+  rememberAuthor(scope, d);
 
   // 3.5 🆕 全局开关机（2026-09-22）
   //
@@ -260,6 +302,13 @@ async function handleEvent(type, d) {
         console.log(`  ├ 🖼 本群刚发过图、这句只 @ 了它 → 用那张图的描述：${recent}`);
       }
     }
+  }
+
+  // 🆕 2026-10-13：引用消息 → 挂上"被引用的那句话是谁说的"（brain.extractText 会拼进文本）
+  if (d.message_type === 103) {
+    const qa = quotedAuthor(scope, d);
+    if (qa.name) d.__quoteFrom = qa.name;
+    else if (qa.isSelf) d.__quoteIsSelf = true;
   }
 
   const text = brain.extractText(d);

@@ -347,10 +347,26 @@ function extractText(msg) {
   };
 
   // 引用消息：把自己的话 + 被引用的原文一起给它，让它看得懂上下文
+  //
+  // 🔴 2026-10-13 修：原来只拼 `（引用了一条消息：「…」）`，**没写这句话是谁说的** ⇒
+  //    模型默认把被引用的内容当成**当前发言者**说的。真实事故（用户原话）：
+  //    「我引用别人的消息，bot 把其他人的发言当成了我的发言做出回复」——
+  //    他引用群友说的"我下了大肥鱼的"，回了句「@棠吟 奥奥」，机器人答
+  //    「**主人**下表情包还专门挑我这份」，把被引用者的话算到主人头上了。
+  //    ⇒ QQ 的 msg_elements 里**没有作者**（实测），所以作者名由 index.js 用
+  //      「scope|msg_idx → 昵称」小表反查后挂在 `msg.__quoteFrom` 上；
+  //      查不到时也**必须写明"不是当前说话人说的"**，否则模型照样张冠李戴。
   if (msg.message_type === 103) {
     const quoted = extractQuoted(msg);
-    if (quoted && main) return withVis(`（引用了一条消息：「${quoted}」）${main}`);
-    if (quoted) return withVis(`（引用了一条消息：「${quoted}」）`);
+    const from = String(msg?.__quoteFrom || '').trim();
+    let qtag = '';
+    if (quoted) {
+      if (from) qtag = `（引用了一条消息，是「${from}」说的：「${quoted}」）`;
+      else if (msg?.__quoteIsSelf) qtag = `（引用了我自己（机器人）说过的一条消息：「${quoted}」）`;
+      else qtag = `（引用了一条消息（不是当前说话人说的）：「${quoted}」）`;
+    }
+    if (qtag && main) return withVis(`${qtag}${main}`);
+    if (qtag) return withVis(qtag);
     return withVis(main);
   }
   return withVis(main);
