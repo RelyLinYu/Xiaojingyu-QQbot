@@ -494,6 +494,34 @@ const PAGE = (opts) => `<!doctype html>
         ⚠️ 这两个对齐属性看着像写反了，其实是关键：外层定"起始边"、柱子定"自己贴哪边"。
         （theme-audit 里有一条断言专门盯着"柱底必须与绘图区底边齐平"，就是为了锁死这件事。）*/
   .uplot { width:100%; height:120px; display:flex; align-items:flex-start; overflow:hidden; }
+
+  /* ============================================================
+     ⑫ 🆕 2026-10-13 图库页
+        🔴 规矩（项目既有约定，别破）：
+          · **不许原生控件** —— 上传区是自绘的 .ildrop（虚线框，点/拖都行），
+            底下那个 input[type=file] 只当执行者、用 hidden 藏起来；
+          · 说明文字**只用 .hint 一个字号**，强调靠 b/亮色；
+          · 预览图统一 96×96 方框裁剪（object-fit:cover），免得长图把网格撑歪。
+     ============================================================ */
+  .ildrop { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;
+            padding:24px; border:1px dashed var(--border-strong); border-radius:18px;
+            background:var(--bg-elevated); cursor:pointer; text-align:center;
+            transition:border-color .2s var(--ease), background .2s var(--ease); }
+  .ildrop:hover { border-color:var(--accent); }
+  .ildrop.dragging { border-color:var(--accent); background:var(--bg-hover); }
+  .ildrop b { font-size:16px; font-weight:600; }
+  .ildrop span { font-size:14px; color:var(--text-secondary); }
+  .ilprog { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
+  .ilprog .row { display:flex; align-items:center; gap:8px; font-size:14px; color:var(--text-secondary); }
+  .ilgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:12px; }
+  .ilcard { display:flex; gap:12px; padding:12px; border:1px solid var(--border); border-radius:18px;
+            background:var(--bg-elevated); }
+  .ilcard img { width:96px; height:96px; border-radius:10px; object-fit:cover; flex:0 0 auto;
+                background:var(--bg); }
+  .ilmeta { display:flex; flex-direction:column; gap:6px; min-width:0; flex:1; }
+  .ilmeta .d { font-size:14px; line-height:1.6; word-break:break-word; }
+  .ilmeta .s { font-size:13px; color:var(--text-tertiary); }
+  .ilacts { display:flex; gap:8px; flex-wrap:wrap; margin-top:auto; }
   /* ⚠️ 2026-10-08 打样截图抓到的一个真 bug：这里原来是 .ubar i { display:block; width:100% }，
      而 .uplot 是 display:flex **带 align-items:flex-end** —— flex 容器里**主轴（宽度）方向**由子项的
      width 决定，可它是 flex item 时 width:100% 会先按"内容宽"解析，再被 flex-shrink 分掉，
@@ -539,6 +567,10 @@ const PAGE = (opts) => `<!doctype html>
   body[data-page="overview"] main > [data-page="overview"],
   body[data-page="chat"]     main > [data-page="chat"],
   body[data-page="settings"] main > [data-page="settings"],
+  /* 🔴 2026-10-13 踩坑（用户截图：图库页一片空白）：这段是**白名单**，
+     加一个新页签必须同时**在这里补一行** + 补 <section data-page="xxx"> + 补 logweb 的 ALLOWED，
+     漏了任何一处就是"页签能点、内容全白"。三个地方缺一不可。 */
+  body[data-page="imglib"]   main > [data-page="imglib"],
   body[data-page="raw"]      main > [data-page="raw"] { display:block; }
 
   /* 滚动条：两套主题各一份（深色下用亮色滑块，浅色下用暗色滑块） */
@@ -563,6 +595,17 @@ const PAGE = (opts) => `<!doctype html>
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration:.001ms !important; transition-duration:.001ms !important; }
   }
+  /* ---------- 页面内自绘弹窗（替代原生 prompt / confirm） ---------- */
+  .uimask { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:9999; }
+  .uicard { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:14px; padding:20px 22px; min-width:300px; max-width:min(92vw,520px); box-shadow:0 18px 50px rgba(0,0,0,.35); }
+  .uititle { font-size:13.5px; line-height:1.7; color:var(--text); }
+  .uiinput { width:100%; box-sizing:border-box; margin-top:14px; padding:10px 12px; font-size:14px; border-radius:10px; border:1px solid var(--border); background:transparent; color:var(--text); outline:none; }
+  .uiinput:focus { border-color:var(--accent); }
+  .uirow { display:flex; gap:10px; justify-content:flex-end; margin-top:18px; }
+  .uibtn { padding:8px 18px; font-size:13px; border-radius:10px; border:1px solid var(--border); background:transparent; color:var(--text-secondary); cursor:pointer; }
+  .uibtn:hover { border-color:var(--accent); color:var(--accent); }
+  .uibtn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .uibtn.primary:hover { color:#fff; opacity:.9; }
 </style></head>
 <body>
 <header class="appbar">
@@ -589,6 +632,7 @@ const PAGE = (opts) => `<!doctype html>
     <a href="#" data-tab="overview">概览</a>
     <a href="#" data-tab="chat">对话</a>
     <a href="#" data-tab="settings">设置</a>
+    <a href="#" data-tab="imglib">图库</a>
     <a href="#" data-tab="raw">日志</a>
   </nav>
 </header>
@@ -706,6 +750,35 @@ const PAGE = (opts) => `<!doctype html>
     <div id="convos"></div>
   </section>
 
+  <!-- 🆕 2026-10-13 图库（用户需求：后台单开一个界面，一次传多张 → AI 逐张给理解 → 我确认后才入库 → bot 在合适情景自己发）
+       🔴 三条规矩沿用项目既有约定：
+         ① 说明文字**一个字号**（.hint），强调用 b/亮色，不许大小字混排；
+         ② 不许原生控件 —— 上传区是一个**自绘的投放区**（点击选文件 / 拖进来），隐藏的 input[type=file] 只当下层执行者；
+         ③ 能看到的东西必须有用：每张图给"用 / 弃 / 删"，状态用 tag 标出来。 -->
+  <section data-page="imglib">
+    <h2>图库（让 bot 自己配图）</h2>
+    <div class="card">
+      <div id="ilDrop" class="ildrop" role="button" tabindex="0" aria-label="上传图片，可多选或拖进来">
+        <b>点这里选图片</b>
+        <span>可以一次选多张，也可以直接把图片拖进来（png / jpg / webp / gif）</span>
+      </div>
+      <input id="ilFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+      <p class="hint" id="ilNote">传上来之后，AI 会先告诉它看到的每张图是什么；<b>你点「用」它才进图库</b>，点「弃」就当没传过。</p>
+      <div id="ilProgress" class="ilprog"></div>
+    </div>
+
+    <div class="card">
+      <div class="exbar" style="margin:0 0 12px">
+        <button class="sm" id="ilTabAll" type="button">全部</button>
+        <button class="sm" id="ilTabPending" type="button">待确认</button>
+        <button class="sm" id="ilTabApproved" type="button">已入库</button>
+        <button class="sm" id="ilTabRejected" type="button">已弃用</button>
+        <span id="ilStat" class="hint" style="margin:0"></span>
+      </div>
+      <div id="ilGrid" class="ilgrid"></div>
+    </div>
+  </section>
+
   <!-- 🆕 2026-10-06 用户：原始日志既然已经放到单独界面了，那展示框可以加长啊，还有默认就是展开吧
        ⇒ details 默认 open；pre 去掉 340px 上限、给足高度（样式见 body[data-page=raw] pre#log） -->
   <details data-page="raw" open>
@@ -806,6 +879,72 @@ try {
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function yuan(v){ return '\\u00a5' + (Number(v)||0).toFixed(4); }
+// ---------- 页面内自绘弹窗（替代原生 prompt / confirm）----------
+// 🔴 2026-10-15：别人部署时报「请求出错: prompt() is not supported.」——
+//    原生 prompt/confirm 在部分环境（内嵌 WebView / 应用内浏览器 / 弹窗被策略禁用）
+//    不可用，甚至**直接抛错**把整个操作打断；用户也早要求过「禁止使用默认输入框」。
+//    ⇒ 自己画一个，返回 Promise：
+//       uiConfirm(标题, 按钮文字?)  → Promise<true|false>
+//       uiPrompt(标题, 默认值?)     → Promise<string|null>（null = 取消）
+//    Enter = 确定，Esc / 点遮罩 = 取消。
+function uiModal(opt) {
+  return new Promise(function (resolve) {
+    var mask = document.createElement('div');
+    mask.className = 'uimask';
+    var card = document.createElement('div');
+    card.className = 'uicard';
+    var title = document.createElement('div');
+    title.className = 'uititle';
+    title.textContent = opt.title || '';
+    card.appendChild(title);
+
+    var input = null;
+    if (opt.input) {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'uiinput';
+      input.value = (opt.value == null) ? '' : String(opt.value);
+      if (opt.placeholder) input.placeholder = opt.placeholder;
+      card.appendChild(input);
+    }
+
+    var row = document.createElement('div');
+    row.className = 'uirow';
+    var btnCancel = document.createElement('button');
+    btnCancel.type = 'button';
+    btnCancel.className = 'uibtn';
+    btnCancel.textContent = opt.cancelText || '取消';
+    var btnOk = document.createElement('button');
+    btnOk.type = 'button';
+    btnOk.className = 'uibtn primary';
+    btnOk.textContent = opt.okText || '确定';
+    row.appendChild(btnCancel);
+    row.appendChild(btnOk);
+    card.appendChild(row);
+    mask.appendChild(card);
+    document.body.appendChild(mask);
+
+    function cancelVal() { return opt.input ? null : false; }
+    function okVal() { return opt.input ? (input.value || '').trim() : true; }
+    function close(val) {
+      document.removeEventListener('keydown', onKey, true);
+      if (mask.parentNode) mask.parentNode.removeChild(mask);
+      resolve(val);
+    }
+    function onKey(ev) {
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(cancelVal()); }
+      else if (ev.key === 'Enter') { ev.preventDefault(); ev.stopPropagation(); close(okVal()); }
+    }
+    btnCancel.onclick = function () { close(cancelVal()); };
+    btnOk.onclick = function () { close(okVal()); };
+    mask.onclick = function (ev) { if (ev.target === mask) close(cancelVal()); };
+    document.addEventListener('keydown', onKey, true);
+    if (input) { input.focus(); input.select(); } else { btnOk.focus(); }
+  });
+}
+function uiConfirm(title, okText) { return uiModal({ title: title, okText: okText }); }
+function uiPrompt(title, value) { return uiModal({ title: title, input: true, value: value }); }
+
 function toast(msg, ms){
   const t = document.getElementById('toast');
   t.textContent = msg; t.style.display = 'block';
@@ -852,7 +991,7 @@ async function load(){
     document.getElementById('pwstate').className = 'pwstate' + (pw.on ? '' : ' warn');
 
     // 每一步单独兜底 —— 某一块出错不该让整页变成空白（之前就是这样，还只弹了个会消失的提示）
-    try { renderBudget(j.budget, j.vision); } catch (e) { setErr('额度渲染失败：' + e.message); }
+    try { renderBudget(j.budget, j.vision, j.disk); } catch (e) { setErr('额度渲染失败：' + e.message); }
     // 🆕 2026-10-07：额度一变，趋势图的黄/红阈值与那段说明里的数字也跟着变
     //    （用户原话「这 1600 不会跟着改」—— 写死的上限比没有上限更误导人）
     try { applyLimits(j.budget); loadUsage(lastUsageDays); } catch (e) { /* 不影响其它区块 */ }
@@ -870,7 +1009,7 @@ async function load(){
   }
 }
 
-function renderBudget(b, v){
+function renderBudget(b, v, d){
   const el = document.getElementById('budget');
   if (!b) { el.innerHTML = '<div class="card"><span>暂无花费数据</span></div>'; return; }
   // 🔴 2026-10-06：**"累计已花"只用本地账本**（官方口径/锚点已按用户要求删除）
@@ -884,7 +1023,14 @@ function renderBudget(b, v){
     //       拿不到就退回「— / 上限 N」，绝不让整块额度区变空。
     //    ⚠️ "用完"时把数字标黄（和"今日剩余 < ¥1"同一个 warn 样式），一眼能看出该调大了。
     (v ? card(v.used == null ? '—' : v.used, '今日识图 / 上限 ' + (v.limit || '?') + ' 张',
-      !!(v.used != null && v.limit && v.used >= v.limit)) : '');
+      !!(v.used != null && v.limit && v.used >= v.limit)) : '') +
+    // 🆕 2026-10-14：磁盘与事件日志水位（**只读展示，不清理**）。
+    //    越线（盘 ≥85% 或 日志 ≥500MB）时数字标黄，并直接把"为什么告警"写在说明里 ——
+    //    一眼能看出该收拾什么，不用再去猜。拿不到（statfs 失败）就整张不显示。
+    (d ? card((d.pct == null ? '?' : d.pct) + '%',
+      '磁盘已用 ' + d.usedGB + 'G / ' + d.totalGB + 'G　·　日志 ' + d.logMB + 'MB'
+      + (d.logOldest ? '（最早 ' + d.logOldest.slice(5) + '）' : '') + (d.why ? '　⚠️ ' + d.why : ''),
+      !!d.warn) : '');
 }
 function card(big, small, warn){
   return '<div class="card"><b class="' + (warn?'warn':'') + '">' + big + '</b><span>' + small + '</span></div>';
@@ -895,7 +1041,7 @@ function renderSettings(s){
   if (!s || !Object.keys(s).length) { el.innerHTML = '<p class="hint">没有可改的参数（settings.snapshot() 返回空）</p>'; return; }
   // 🆕 2026-10-06 用户：人设补充为什么要单独做功能，直接在修改里面的末尾加上不就行了？
   //    ⇒ 去掉单独的「人设补充」行，只留一个「人设」大框（保存时会顺手清掉旧的补充值）
-  const order = ['aiApiKey','budgetDaily','budgetTotal','dailyCalls','visionDaily','personaText'];
+  const order = ['aiApiKey','budgetDaily','budgetTotal','dailyCalls','visionDaily','imglibChance','personaText'];
   const rows = order.filter(k => s[k]).map(k => {
     const it = s[k];
     const val = it.value == null ? '' : it.value;
@@ -997,7 +1143,7 @@ async function saveSettings(){
 }
 
 async function restartBot(){
-  if (!confirm('现在重启机器人？大约 5 秒内恢复，期间不回复消息。')) return;
+  if (!(await uiConfirm('现在重启机器人？大约 5 秒内恢复，期间不回复消息。'))) return;
   toast('正在重启…');
   const r = await fetch('/api/restart?p=' + encodeURIComponent(P), { method:'POST' });
   const j = await r.json();
@@ -1251,7 +1397,7 @@ async function exSave() {
 }
 
 async function exReset() {
-  if (!confirm('恢复成代码里的默认示范？你改的那些会被删掉。')) return;
+  if (!(await uiConfirm('恢复成代码里的默认示范？你改的那些会被删掉。'))) return;
   try {
     var r = await fetch('/api/examples/reset?p=' + encodeURIComponent(P), { method: 'POST' });
     var j = await r.json();
@@ -1485,7 +1631,7 @@ async function psActivate(id) {
 }
 
 async function psRename(id, old) {
-  const n = prompt('预设名字：', old || '');
+  const n = await uiPrompt('预设名字：', old || '');
   if (n === null) return;
   try {
     const j = await psApi({ action: 'rename', id: id, name: n });
@@ -1505,13 +1651,13 @@ async function psRemove(id) {
 }
 
 // 预设卡片的点击：点卡片 = 切换；点"改名/删" = 不切换（事件委托）
-document.addEventListener('click', function (ev) {
+document.addEventListener('click', async function (ev) {
   var t = ev.target;
   if (!t || !t.closest) return;
   var del = t.closest('[data-psdel]');
   if (del) {
     ev.stopPropagation();
-    if (confirm('删掉这个预设？（不影响当前正在用的人设）')) psRemove(del.getAttribute('data-psdel'));
+    if (await uiConfirm('删掉这个预设？（不影响当前正在用的人设）')) psRemove(del.getAttribute('data-psdel'));
     return;
   }
   var rn = t.closest('[data-psrename]');
@@ -1549,6 +1695,252 @@ initPages();
 // ⚠️ 前面顶栏那段只挂了"点击委托"；这里再 paint 一次是为了保证 aria-pressed 也同步上，
 //    而且顺序无所谓（paintTheme 只读 DOM 和 localStorage，不依赖任何接口数据）。
 try { paintTheme(); } catch (e) {}
+
+// ============================================================
+//  🆕 2026-10-13 图库页（用户需求）
+//
+//  ── 三条实现要点（都是踩过的坑逼出来的）──
+//  ① **上传走"一张一个请求"的裸二进制**，不是把一堆图塞进一个 JSON：
+//     面板读请求体有 64KB 上限（防塞爆），JSON+base64 随便几张就超；
+//     而且一张失败不该把整批拖死。
+//  ② **上传前先在浏览器里压一道**：长边 >1600 或体积 >1.5MB 就重编码成 JPEG(0.85)。
+//     好处是省流量、也顺带绕开"手机原图 3~8MB"上传慢的问题。
+//     ⚠️ GIF **不压**（重编码会把动图压成静帧，动图就废了）。
+//  ③ 传完马上刷新列表 —— 让用户立刻看到 AI 对每张图的理解，再去点「用 / 弃」。
+// ============================================================
+var IL = { status: 'all', items: [], busy: false };
+
+function ilApi(path, opts) {
+  var url = path + (path.indexOf('?') >= 0 ? '&' : '?') + 'p=' + encodeURIComponent(P);
+  return fetch(url, opts);
+}
+
+async function loadImgLib() {
+  var grid = document.getElementById('ilGrid');
+  var stat = document.getElementById('ilStat');
+  if (!grid) return;
+  try {
+    var r = await ilApi('/api/imglib');
+    if (!r.ok) throw new Error('服务器返回 ' + r.status);
+    var j = await r.json();
+    IL.items = j.items || [];
+    if (stat && j.status) {
+      stat.textContent = '库里 ' + j.status.approved + ' 张 · 待确认 ' + j.status.pending
+        + ' 张 · 已弃用 ' + j.status.rejected + ' 张　（单张上限 '
+        + j.status.maxMB + 'MB，最多 ' + j.status.maxItems + ' 张）';
+    }
+    renderImgLib();
+  } catch (e) {
+    grid.innerHTML = '';
+    var d = document.createElement('p');
+    d.className = 'hint';
+    d.textContent = '图库读不出来：' + e.message;
+    grid.appendChild(d);
+  }
+}
+
+function ilThumb(it) {
+  var img = document.createElement('img');
+  img.alt = it.desc || it.id;
+  // 🔴 缩略图走接口取字节：**不用 base64 塞进 JSON** —— 几十张图的 base64 会把页面撑爆
+  img.src = '/api/imglib/file?id=' + encodeURIComponent(it.id) + '&p=' + encodeURIComponent(P);
+  img.loading = 'lazy';
+  return img;
+}
+
+function ilCard(it) {
+  var card = document.createElement('div');
+  card.className = 'ilcard';
+  card.appendChild(ilThumb(it));
+
+  var meta = document.createElement('div');
+  meta.className = 'ilmeta';
+
+  var d = document.createElement('div');
+  d.className = 'd';
+  d.textContent = it.desc || '（AI 没看出内容 —— 你可以自己补一句描述）';
+  meta.appendChild(d);
+
+  var s = document.createElement('div');
+  s.className = 's';
+  s.textContent = (it.status === 'approved' ? '✅ 已入库' : it.status === 'pending' ? '⏳ 待确认' : '🚫 已弃用')
+    + '　' + (it.bytes / 1024).toFixed(0) + 'KB　用过 ' + (it.used || 0) + ' 次';
+  meta.appendChild(s);
+
+  // 补/改描述（AI 认错时用得上）
+  var inp = document.createElement('input');
+  inp.type = 'text';
+  inp.placeholder = '给这张图补一句描述';
+  inp.value = it.desc || '';
+  meta.appendChild(inp);
+
+  var acts = document.createElement('div');
+  acts.className = 'ilacts';
+  var mk = function (label, cls, fn) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls;
+    b.textContent = label;
+    b.onclick = fn;
+    acts.appendChild(b);
+    return b;
+  };
+  if (it.status !== 'approved') mk('用这张', 'sm primary', function () { ilSet(it.id, 'approved', inp.value); });
+  if (it.status !== 'rejected') mk('弃用', 'sm', function () { ilSet(it.id, 'rejected', inp.value); });
+  mk('删除', 'sm danger', function () { ilRemove(it.id); });
+  meta.appendChild(acts);
+
+  card.appendChild(meta);
+  return card;
+}
+
+function renderImgLib() {
+  var grid = document.getElementById('ilGrid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  var list = IL.status === 'all' ? IL.items : IL.items.filter(function (x) { return x.status === IL.status; });
+  // 待确认的排前面（那是要他动手的）
+  list.sort(function (a, b) {
+    var w = function (x) { return x.status === 'pending' ? 0 : x.status === 'approved' ? 1 : 2; };
+    return w(a) - w(b);
+  });
+  if (!list.length) {
+    var p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = IL.status === 'all' ? '图库还是空的 —— 先在上面传几张。' : '这一类里暂时没有图。';
+    grid.appendChild(p);
+    return;
+  }
+  for (var i = 0; i < list.length; i++) grid.appendChild(ilCard(list[i]));
+}
+
+async function ilSet(id, status, desc) {
+  try {
+    await ilApi('/api/imglib/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id, status: status, desc: desc }),
+    });
+    toast(status === 'approved' ? '已入库' : '已弃用');
+    await loadImgLib();
+  } catch (e) { toast('改状态失败：' + e.message); }
+}
+
+async function ilRemove(id) {
+  if (!(await uiConfirm('真删掉这张图？（文件也会从服务器上删掉）'))) return;
+  try {
+    await ilApi('/api/imglib/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id }),
+    });
+    toast('已删除');
+    await loadImgLib();
+  } catch (e) { toast('删除失败：' + e.message); }
+}
+
+// 上传前压一道（GIF 跳过）
+async function ilCompress(file) {
+  if (file.type === 'image/gif') return file;
+  var MAXEDGE = 1600, MAXBYTES = 1.5 * 1024 * 1024;
+  if (file.size <= MAXBYTES) return file;   // 小图原样传，别再重编码（省得掉画质）
+  try {
+    var bmp = await createImageBitmap(file);
+    var scale = Math.min(1, MAXEDGE / Math.max(bmp.width, bmp.height));
+    var w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
+    var cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    var blob = await new Promise(function (res) { cv.toBlob(res, 'image/jpeg', 0.85); });
+    if (!blob) return file;
+    return new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
+  } catch (e) {
+    return file;   // 浏览器不支持就原样传（服务端还有 16MB 硬上限兜着）
+  }
+}
+
+function ilProg(msg) {
+  var box = document.getElementById('ilProgress');
+  if (!box) return;
+  if (msg === null) { box.innerHTML = ''; return; }
+  var row = document.createElement('div');
+  row.className = 'row';
+  row.textContent = msg;
+  box.appendChild(row);
+}
+
+async function ilUpload(files) {
+  if (IL.busy) { toast('上一批还在传'); return; }
+  if (!files || !files.length) return;
+  IL.busy = true;
+  ilProg(null);
+  ilProg('共 ' + files.length + ' 张，开始处理…');
+  var okN = 0, skipN = 0, failN = 0;
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    try {
+      var out = await ilCompress(f);
+      ilProg('（' + (i + 1) + '/' + files.length + '）' + f.name
+        + (out.size !== f.size ? ' 压缩 ' + (f.size / 1024).toFixed(0) + 'KB → ' + (out.size / 1024).toFixed(0) + 'KB' : '')
+        + '　识别中…');
+      var r = await ilApi('/api/imglib/upload?name=' + encodeURIComponent(f.name.slice(0, 40)), {
+        method: 'POST',
+        headers: { 'Content-Type': out.type || 'application/octet-stream' },
+        body: out,
+      });
+      var j = {};
+      try { j = await r.json(); } catch (e) { j = {}; }
+      if (r.ok && j.ok) {
+        if (j.dup) { skipN++; ilProg('（' + (i + 1) + '/' + files.length + '）' + f.name + '　图库里已经有这张了，跳过'); }
+        else { okN++; ilProg('（' + (i + 1) + '/' + files.length + '）' + f.name + '　AI 看到：' + (j.item.desc || '（没看出内容，等下你自己补一句）')); }
+      } else {
+        failN++;
+        ilProg('（' + (i + 1) + '/' + files.length + '）' + f.name + '　失败：' + (j.why || ('HTTP ' + r.status)));
+      }
+    } catch (e) {
+      failN++;
+      ilProg('（' + (i + 1) + '/' + files.length + '）' + f.name + '　失败：' + e.message);
+    }
+  }
+  ilProg('结束：入库待确认 ' + okN + ' 张 · 重复跳过 ' + skipN + ' 张 · 失败 ' + failN + ' 张');
+  IL.busy = false;
+  await loadImgLib();
+}
+
+(function initImgLib() {
+  // 🔴 2026-10-13：**在 Node / 测试的 vm 沙箱里必须直接退出**。
+  //    踩到的：test-brain 会把这段脚本丢进 vm 跑（它补的假 document 只有 getElementById 那几个，
+  //    **没有 createElement**）⇒ 图库这段一执行就报 "document.createElement is not a function"，
+  //    把整个自测带崩。用"有没有浏览器 API"当开关，比在里面到处 try 干净。
+  //    🔴 另外：注释里**绝不能出现反引号** —— 反引号会提前结束 PAGE 的模板字符串，整页语法崩。
+  if (typeof document === 'undefined' || typeof document.createElement !== 'function') return;
+  var drop = document.getElementById('ilDrop');
+  var file = document.getElementById('ilFile');
+  if (!drop || !file) return;
+  var pick = function () { file.value = ''; file.click(); };
+  drop.addEventListener('click', pick);
+  drop.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+  });
+  file.addEventListener('change', function () { ilUpload(file.files); });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('dragging'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('dragging'); });
+  });
+  drop.addEventListener('drop', function (e) {
+    var fl = e.dataTransfer && e.dataTransfer.files;
+    if (fl && fl.length) ilUpload(fl);
+  });
+
+  var tabs = [['ilTabAll', 'all'], ['ilTabPending', 'pending'], ['ilTabApproved', 'approved'], ['ilTabRejected', 'rejected']];
+  tabs.forEach(function (t) {
+    var el = document.getElementById(t[0]);
+    if (el) el.addEventListener('click', function () { IL.status = t[1]; renderImgLib(); });
+  });
+  loadImgLib();
+})();
 </script>
 </body></html>`;
 

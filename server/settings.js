@@ -48,6 +48,11 @@ const SPEC = {
   //       不用重启（重启会清掉上下文和"最近一张图"的缓存）、也不用干等到第二天 0 点。
   //    ⚠️ `int: true`：张数必须是整数（`budgetDaily` 那类要小数的才用 step 0.01）。
   visionDaily: { type: 'runtime', key: 'visionDailyLimit', env: 'VISION_DAILY_LIMIT', label: '每天识图上限（张）', min: 1, max: 100000, int: true },
+  // 🆕 2026-10-14（用户：「发图频率也高，是不是冷却过了就直接带图，没有设置概率？」）：
+  //    **机器人主动配图的概率**。0 = 它再也不主动配图（只有别人明确要图时才发），1 = 回到旧行为。
+  //    ⚠️ 走 runtime（settings.json）⇒ 改完**立即生效**：`imglib.sendChance()` 每次现读一次。
+  //    ⚠️ 别加 `int: true` —— 这个值就是小数（0.33），加了会把 0.33 拒掉。
+  imglibChance: { type: 'runtime', key: 'imglibChance', env: 'IMGLIB_CHANCE', label: '机器人主动配图的概率（0~1，1=不抽签）', min: 0, max: 1 },
   // 🆕 2026-10-06（用户要的"改人设"）：**人设补充** —— 一小段话，追加到 system 人设**末尾**。
   //    ⚠️ 走 runtime（settings.json）而不是 env ⇒ **改完即时生效、不用重启**（cfg.persona.systemPrompt 是 getter，每次现算）。
   //    ⚠️ 但它**在 system 里** ⇒ 一改就会让 prompt 前缀缓存失效一次（命中价 1/50 → 全价）。

@@ -392,6 +392,27 @@ setInterval(() => {
 // ⚠️ 只存内存，重启即失 —— 无所谓：这是省钱优化，不是功能正确性依赖。
 const DESC_CACHE = new Map();     // md5 -> { desc, ts }
 
+// ---------- 「这是你自己」的**无依据兜底**（2026-10-14 用户报"捕获率太高"）----------
+//
+// 🔴 为什么提示词之外还要一道代码闸（实测数据，见 `_srv/_probe-self2.cjs`）：
+//    近 20 小时 690 条识图里 236 条带「你自己」，其中 **227 条图里真的有** 蓝发/鲸鱼/女仆特征
+//    （精确率 96%，那些是**对的**）；剩下那几条是硬胡说 ——
+//      · 「一只橘白小猫被手托着，配红底白字"哦"，表敷衍冷漠。（这是你自己）」
+//      · 「微信支付账单截图，显示向杭州深度求索两次各付50元。（这是你自己）」
+//    `policy.vision.selfHint` 里明明写了排除项（截图 / 只有一点蓝色 / 特征对不上就不许提），
+//    **模型就是不听** ⇒ 提示词管不住的地方，用代码兜住：**整句一个特征词都没有时，摘掉标签**。
+//    ⚠️ 只摘"末尾那个标签"、绝不改写其它内容（宁可漏认，不许乱认）；特征词命中的一律不动。
+//    ⚠️ 识图（本文件 describe）与图库描述（imglib.describeBuffer）**共用这一个函数**，别各写一份。
+const SELF_TAG_TAIL_RE = /[（(]\s*这是你自己\s*[）)]\s*[。.！!]?\s*$/;
+const SELF_FEATURE_RE = /蓝发|蓝头|蓝毛|鲸鱼|女仆|水手服|鱼尾|鱼鳍/;
+
+function stripBaselessSelfTag(desc) {
+  const s = String(desc == null ? '' : desc).trim();
+  if (!SELF_TAG_TAIL_RE.test(s)) return s;      // 末尾没有这个标签 → 原样返回
+  if (SELF_FEATURE_RE.test(s)) return s;        // 图里真有那套特征 → 这个判断立得住，留着
+  return s.replace(SELF_TAG_TAIL_RE, '').trim();
+}
+
 // ---------- 真正的识图 ----------
 //
 // 返回 `{ desc, cached }`：
@@ -439,7 +460,11 @@ async function describe(img, log = () => {}) {
   //       （做到 514 就会多花一个 tile：221。）
   let sendBuf = buf;
   let sendMime = mime;
-  let prompt = v.prompt || '用一句中文描述这张图。';
+  // 🆕 2026-10-13：把「认出这是它自己的二创」这段**接在所有识图提示词后面**
+  //    （用户提的：群友发的多是它自己的二创，它却只看出"蓝发女仆"）。
+  //    ⚠️ 只接一处（`v.selfHint`），别在 prompt / gifPrompt 里各写一份 —— 那样迟早漂移。
+  const selfHint = String(v.selfHint || '');
+  let prompt = (v.prompt || '用一句中文描述这张图。') + selfHint;
   let gifNote = '';
   if (mime === 'image/gif') {
     const gi = gif.info(buf);
@@ -452,7 +477,7 @@ async function describe(img, log = () => {}) {
         //    "四张拼在一起的图"来描述，而不是"一个动作的四个瞬间"。
         prompt = String(v.gifPrompt
           || '这张图是一个动图按时间顺序抽取的 {n} 帧（从左到右、从上到下排列）。'
-          + '用一句中文描述这个动图在做什么。').replace('{n}', String(m.frames.length));
+          + '用一句中文描述这个动图在做什么。').replace('{n}', String(m.frames.length)) + selfHint;
         gifNote = ` · 动图 ${gi.frames} 帧 → 采样 ${m.frames.length} 帧拼成一张`;
         log(`动图：共 ${gi.frames} 帧 → 取第 ${m.frames.join('/')} 帧拼成 ${m.w}×${m.h}`
           + '（API 原本只认第一帧）');
@@ -474,7 +499,9 @@ async function describe(img, log = () => {}) {
   const desc = await brain.describeImage(dataUrl, v.maxTokens || 200, prompt);
   log(`模型返回（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
 
-  const out = String(desc || '').trim();
+  // 🆕 2026-10-14 晚：**无依据的「（这是你自己）」在进缓存之前就摘掉**
+  //    （缓存里存的必须是清洗过的 → 命中缓存的那条路径也自然干净，不用在两边各兜一次）
+  const out = stripBaselessSelfTag(desc);
   if (out) {
     DESC_CACHE.set(hash, { desc: out, ts: Date.now() });
     // 防止无限涨（表情包再多也不会有几万张不同的）
@@ -493,6 +520,8 @@ module.exports = {
   findImage,
   hasImage,
   describe,
+  // 🆕 2026-10-14 晚：无依据的「这是你自己」兜底（识图与图库描述共用这一份）
+  stripBaselessSelfTag,
   visionAllowed,
   visionLimit,      // 🆕 每日张数上限（现取，兜底 800）
   markVision,

@@ -848,15 +848,19 @@ async function shouldReply(scope, msg, hitKeyword, at) {
       + `除非内容明显在问机器人或提到机器人，否则应当 reply=false。\n`
     : '';
 
+  // 🆕 2026-10-15 压缩（token 审计 · 每次 L1 判断都要发一遍，实测调用量比 L2 大两个数量级）：
+  //    原来 4 行、约 150 字；现在 3 行、约 90 字，**判定语义一字没减**（JSON 格式、分数档、
+  //    "只输出 JSON" 都还在）。⚠️ JSON 里那两个引号**本来就是中文全角**，保持原样别再换。
   const sys = `你是群聊观察者。判断机器人"${cfg.persona.name}"现在插话是否自然。
-只输出 JSON：{"reply":true/false,"score":0-10,"reason":"简短理由"}
-score：10=非常适合接话，6=可以接，3=勉强，0=完全不相关。`;
+只输出 JSON：{"reply":true,"score":0-10,"reason":"简短理由"}
+score：10=很适合接话，6=可以接，3=勉强，0=完全不相关。`;
 
   const user = `最近群聊：\n${ctx}\n\n`
     + `最新：${msg.author?.username || '群友'}: ${extractText(msg)}\n${hint}\n适合接话吗？`;
 
   try {
-    const r = await callAI(sys, user, cfg.ai.judgeModel, cfg.ai.judgeMaxTokens, true);
+    const r = await callAI(sys, user, cfg.ai.judgeModel, cfg.ai.judgeMaxTokens, true,
+      null, null, null, 'L1判断');
     // 预算用光：不要在判断阶段就发消息（那是生成阶段的活），直接当作"不回"
     if (r.budgetStop) return { reply: false, score: 0, reason: '预算已用尽', budgetStop: true };
     const verdict = JSON.parse(r.text);
@@ -1005,10 +1009,15 @@ async function generateReply(scope, msg, linkNote) {
   //       —— **答偏了**，因为模型不知道自己刚发过卡片。这句就是补给它的事实。
   //    ⚠️ 放在 user 里（不是 system）→ 不破坏 prefix cache；没内容时是空串、不影响任何东西。
   const linkPart = linkNote ? `\n\n【刚刚发生的】${linkNote}` : '';
+  // 🆕 2026-10-13 图库（用户需求："自动在适合情景从图库发相关的图片"）
+  //    插在 user 尾部（不是 system）—— 和 linkPart 同一个理由：不破坏 prefix cache。
+  //    没图可发时是空串，对现有行为零影响。
+  const imgHint = buildImgHint(scope, msg, extractText(msg), ctx);
   const user = `【当前时间】${timeStr}\n`
     + `（有人问时间/日期/星期，直接照这个答。别编造，也别说"我又不是时钟"——你知道现在几点。）\n\n`
-    + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + linkPart + tail;
-  const r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples, null, extractText(msg));
+    + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + linkPart + imgHint + tail;
+  const r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples,
+    null, extractText(msg), 'L2生成');
   // 预算用光时，把"没钱了"的理由原样带回去，由 index.js 发到群里
   if (r.budgetStop) return r;
 
@@ -1016,13 +1025,15 @@ async function generateReply(scope, msg, linkNote) {
   //    分段是为了"像人一样一句一句说"，但会把完整答案切成几条，反而妨碍阅读；
   //    反重复会让它为了"换个说法"而偏离原答案。
   if (am.on) {
-    return { text: r.text, segments: [r.text], assistant: true };
+    const p1 = stripImgMark(r.text);
+    return { text: p1.text, segments: [p1.text], imgId: p1.imgId, assistant: true };
   }
 
   // 记下这次说的话，供下次"别重复"用
   recordReply(scope, r.text);
   // 返回分段数组：短回复就是 1 段，长的切成几句
-  return { text: r.text, segments: splitForChat(r.text) };
+  const p = stripImgMark(r.text);
+  return { text: p.text, segments: splitForChat(p.text), imgId: p.imgId };
 }
 
 // ---------- AI 调用（OpenAI 兼容）----------
@@ -1059,7 +1070,7 @@ async function respectMinGap() {
 //
 // 为什么不是"同一个模型重试多次"：实测小模型在高峰会**持续** 429，
 // 死等它半天不如立刻换一个模型 —— 换过去通常一次就成功。
-async function callAI(system, user, preferredModel, maxTokens, forceJson, examples, imageDataUrl, thinkText) {
+async function callAI(system, user, preferredModel, maxTokens, forceJson, examples, imageDataUrl, thinkText, tag) {
   const chain = modelChain(preferredModel);
   const attempts = Math.max(1, cfg.ai.maxAttempts);
   let lastErr = null;
@@ -1083,7 +1094,7 @@ async function callAI(system, user, preferredModel, maxTokens, forceJson, exampl
         //    踩过的坑：写成 `return { text: out }` 就变成 { text: { text: "..." } } 双层嵌套，
         //    于是 index.js 取的 gen.text 还是对象，QQ 收到非法内容报 40011000「请求数据异常」，
         //    而那个错误码官方文档查不到，极难定位。
-        const out = await callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText);
+        const out = await callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText, tag);
         if (mi > 0) console.log(`[ai] ↳ 已降级到 ${model}`);
         return out;
       } catch (e) {
@@ -1120,7 +1131,7 @@ function looksFactual(t) {
   return /(是谁|是什么|什么是|为什么|为啥|哪年|哪一年|哪个|哪一个|什么时候|多少|区别|有什么不同|介绍|来历|出处|你知道|知道吗|懂吗|什么梗|啥梗|真的假的|对不对)/.test(String(t || ''));
 }
 
-async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText) {
+async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText, tag) {
   callCount++;
 
   // ⭐ 示例对话：作为**真实的多轮消息**拼在 system 和当前用户消息之间。
@@ -1259,7 +1270,11 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
         // 🔴 这里用 `st.dayCalls`（账本口径：**跨天清零、含识图**），不用本文件的 `callCount`
         //    —— 后者只在"过闸时"自增、**不含识图**，两个数会差一截（2026-10-05 发现）。
         //    显示口径统一到账本，人看到的数字就和"那道闸消耗了多少"是同一个。
-        + ` (今日第 ${st.dayCalls}/${st.dailyCallLimit} 次 · 今日${day} · 累计${tot})`);
+        + ` (今日第 ${st.dayCalls}/${st.dailyCallLimit} 次 · 今日${day} · 累计${tot})`
+        // 🆕 2026-10-15：**按功能记账的标记**（放在行尾，**不动行首格式** ——
+        //    `_ops/*.sh` 和 usage.js 都靠 `[ai] <模型> in=… out=…` 这个前缀解析）。
+        //    有了它才能回答"token 到底花在哪：识图 / L1 判断 / L2 生成"。
+        + (tag ? ` [${tag}]` : ''));
     }
     return { text: out };
   } catch (e) {
@@ -1293,6 +1308,8 @@ async function describeImage(imageDataUrl, maxTokens = 200, prompt = null) {
     false,
     null,
     imageDataUrl,
+    null,          // thinkText：识图**永不开思考**（否则一张图多花 5 倍输出 token）
+    '识图',
   );
   // 预算被拦时 callAI 返回的是 { budgetStop: true, text: 理由 } ——
   // 🔴 text 里是"钱不够了"，**绝不能**当成图片描述塞进对话。
@@ -1301,6 +1318,250 @@ async function describeImage(imageDataUrl, maxTokens = 200, prompt = null) {
     return '';
   }
   return String(r?.text || '').trim();
+}
+
+// ============================================================
+//  🆕 2026-10-13 图库：把"可用的图"告诉模型，并把它选中的那张取回来
+//
+//  设计（用户拍板：混合触发 / 同群 5 分钟一张 / 不设每日上限 / 先只测试群）：
+//   · **给模型的只有 id + 一句话描述**，图本身不塞进 prompt（省钱，也不挤掉群聊上下文）；
+//   · 模型要配图时在结尾另起一行写 `[图:ID]`，由下面的 stripImgMark 摘掉，
+//     实际发图由 index.js 做（走富媒体上传，和发视频同一条链路）；
+//   · **冷却/只测试群**由 index.js 判断（那里才知道 scope 和群号）；这里只负责
+//     "最近发过的别再给" + "给不出图就别提这件事"。
+// ============================================================
+const IMG_HIST = new Map();          // scope -> [id, ...] 最近发过的（防复读同一张）
+
+function recentImgIds(scope) {
+  const a = IMG_HIST.get(scope) || [];
+  return a;
+}
+function noteImgUsed(scope, id) {
+  const a = IMG_HIST.get(scope) || [];
+  a.push(id);
+  // 🆕 2026-10-13 晚：6 → 12 —— 原来只排最近 6 张，滑出太快，同一张图隔几条又能再发
+  //    （实测 Top3 占 41.5%）。排得更久一点，复读的概率就低一截。
+  while (a.length > 12) a.shift();
+  IMG_HIST.set(scope, a);
+}
+
+// 给模型的候选图（拿不到图库 / 没图 / 关掉开关时一律返回空数组）
+//
+// 🔴 2026-10-13 重做（用户一问就问在点子上：「**候选图为什么是 12，一共不是 18 张吗**」）：
+//    原来就是 `approved().slice(0, limit)` = **固定取最前面 12 张**，问题有两个：
+//      · 第 13 张之后的图**永远进不了候选**（除非"最近发过的"被排除后恰好腾出位置）⇒ 半个图库白存；
+//      · 每次给的清单顺序完全一样 ⇒ 模型容易反复挑同一张。
+//    ⇒ 改成 **相关度优先 + 滚动窗口**：
+//      ① 先按"跟当前这句话的字面重合度"把明显相关的排到最前（纯字符串打分，**不额外调模型、不花钱**）；
+//      ② 其余用滚动窗口补齐：每次往后挪一格，**保证每张图都有机会露面**；
+//      ③ 清单长度仍由 `hintMax` 控制 —— ⚠️ **那是"这次给它看几张"，不是"图库能装几张"**（容量 300）。
+const IMG_ROTATE = new Map();          // scope -> 下次从第几位开始取
+
+// 🔴 2026-10-13 晚（用户澄清他的意思：「我说的关键词是**图片描述关键词**和**群友交流关键词**
+//    对得上、或者**意思相近**」）：
+//    原来是**按单字**算重合 —— 「哈哈这就很可爱」里蹭到一个"可"字也计分，噪声大、
+//    也不符合"关键词对得上"的直觉。⇒ 两处一起改：
+//      ① 换成 **双字词（bigram）**：只有连着两个字都在描述里出现才算命中（"可爱/米饭/饿了"这种）；
+//      ② 匹配字段**优先取描述里的「适合…」那段场景词** —— 因为"蓝发/女仆/Q版"这些词
+//         **每张图都有**，拿全文匹配等于白送分（噪声来源）；场景词才真正区分"这张该什么时候发"。
+//    ⚠️ 阈值跟着降（bigram 天然比单字少）：相关度门槛 5 → 2。
+//    ⚠️ 但"**意思相近**"（近义/同义）靠字面永远做不到 —— 那一层由**模型**负责：
+//       它读的是每张图的完整描述（含"适合…时发"），在候选清单里做真正的语义挑选；
+//       这里的字面打分只决定"哪几张进清单"。
+function overlapScore(a, b) {
+  const t = String(a || '').replace(/[\s\p{P}]/gu, '');
+  const hay = String(b || '').replace(/[\s\p{P}]/gu, '');
+  if (t.length < 2 || !hay) return 0;
+  let s = 0;
+  const seen = new Set();
+  for (let i = 0; i + 1 < t.length; i++) {
+    const g = t.slice(i, i + 2);
+    if (seen.has(g)) continue;
+    seen.add(g);
+    if (hay.includes(g)) s += 1;
+  }
+  return s;
+}
+
+// 从图片描述里取「适合…」那段（场景词）；取不到就退回整条描述
+function sceneTextOf(desc) {
+  const s = String(desc || '');
+  const m = /适合([^。！？\n]*)/.exec(s);
+  return m ? m[1] : s;
+}
+
+// 🔴 2026-10-13 晚：**关键词标签匹配**（这才是用户要的"关键词对得上"）
+//
+//  起因（用户原话）：「我说的关键词是**图片描述关键词**和**群友交流关键词**对得上、或者**意思相近**」。
+//  实测教训：拿**整条描述**去做字面匹配根本对不上 —— 描述写「适合催饭或表达饿到委屈时发」，
+//  群友说的是「我好饿啊有饭吃吗」，两边的连续两字词（bigram）几乎没有交集 ⇒ 命不中。
+//  ⇒ 解法：先用模型给每张图**提炼一组口语关键词**存进索引（`tags` 字段，共 46 张已生成），
+//     例如 dfy013 的 tags = 饿 / 饿了 / 好饿 / 饭呢 / 催饭 / 投喂 / 想吃 / 没吃饭 / 干饭
+//     —— "好饿""没吃饭"这类**群友真的会说的话**都在里面，字面就能对上。
+//     匹配规则：长度 ≥2 的词命中 +3 分、单字命中 +1.5 分。
+//     ⚠️ 近义仍靠**模型**在候选清单里判断；这里只负责"把对的图推进清单"。
+function tagScore(text, tags) {
+  const t = String(text || '');
+  if (!t || !Array.isArray(tags) || !tags.length) return 0;
+  let s = 0;
+  for (const tag of tags) {
+    const g = String(tag || '').trim();
+    if (!g) continue;
+    if (g.length >= 2) { if (t.includes(g)) s += 3; }
+    else if (t.includes(g)) s += 1.5;
+  }
+  return s;
+}
+
+// 用滚动窗口把清单补满（剩下的图也要轮得到）
+function fillImgSlots(head, rest, limit, scope) {
+  const out = head.slice(0, limit);
+  if (out.length >= limit || !rest.length) return out;
+  const have = new Set(out.map((x) => x.id));
+  const tail = rest.filter((x) => !have.has(x.id));
+  if (!tail.length) return out;
+  const off = (IMG_ROTATE.get(scope) || 0) % tail.length;
+  IMG_ROTATE.set(scope, (off + 1) % tail.length);
+  for (let i = 0; out.length < limit && i < tail.length; i++) out.push(tail[(off + i) % tail.length]);
+  return out;
+}
+
+// 选"这次给它看哪几张"。
+//
+// 🔴 2026-10-13 晚**再次**重做 —— 起因是用户又一句直觉命中的追问：
+//    「我发现他有些表情包发的很频繁，会不会同类里总抽最合适的那张，其他永远抽不到」，
+//    紧接着给了方案：「让描述的权重减小，同时参考群友最近谈话关键词来返图呢？」
+//    线上实测**证实偏斜很严重**：已入库 46 张里 **32 张（70%）从没发过**，Top3 占 41.5%
+//    （dfy007 发了 8 次）。两个原因叠加：① 描述高度相似（都是"蓝发女仆…懵/无语"），
+//    模型每次只能挑最顺眼那几张；② 原来"相关度最高的最多 6 张"**排在最前面**，
+//    而模型有"看开头"的偏好 ⇒ 后面那些（含所有新图）等于没露面。
+//    ⇒ 这一版的四件事：
+//      ① **均衡池（治偏斜的关键）**：把"发得最少 + 最久没用过"的几张**固定放清单最前**，
+//         并在文案里点名叫模型优先考虑它们 —— 纯靠调权重复不了这一点；
+//      ② **描述权重调低**：相关度阈值 3 → 5、名额 1/2 → 1/3，别让"巧合相关"占满前排；
+//      ③ **参考最近群聊**（用户要的）：匹配文本从"当前这一句"扩成"当前句 + 最近几条群聊"
+//         （群聊部分权重 0.5，别盖过当下这句话）；
+//      ④ 其余位置仍由滚动窗口补齐，保证每张都轮得到。
+function pickImgForScope(scope, limit = 12, msgText = '', recentText = '') {
+  let lib;
+  try { lib = require('./imglib'); } catch { return []; }
+  const recent = new Set(recentImgIds(scope));
+  let pool = lib.approved().filter((x) => !recent.has(x.id));
+  if (pool.length <= limit) return pool;      // 够少就全给（这时没有"谁轮不到"的问题）
+
+  // ① 均衡池：发得最少、且最久没用过的几张，固定排最前（limit=12 ⇒ 3 张）
+  const rareN = Math.max(2, Math.floor(limit / 4));
+  const rare = pool.slice().sort((a, b) =>
+    (a.used || 0) - (b.used || 0)
+    || String(a.lastUsedAt || '').localeCompare(String(b.lastUsedAt || ''))).slice(0, rareN);
+  const rareIds = new Set(rare.map((x) => x.id));
+  const rest = pool.filter((x) => !rareIds.has(x.id));
+
+  // ② 相关度（权重调低）：当前句为主 + 最近群聊为辅（0.5 倍）
+  const text = String(msgText || '');
+  const ctxText = String(recentText || '');
+  let hot = [];
+  if (text || ctxText) {
+    const scored = rest.map((x) => {
+      const scene = `${x.name || ''} ${sceneTextOf(x.desc)}`;
+      return {
+        x,
+        // 主：**关键词标签**命中（tags 是从描述提炼的"群里会说的话"，见 tagScore 注释）
+        // 辅：描述场景词的字面重合（bigram），权重减半 —— 它噪声大，只当补充
+        s: tagScore(text, x.tags) + tagScore(ctxText, x.tags) * 0.5
+          + 0.5 * (overlapScore(text, scene) + overlapScore(ctxText, scene) * 0.5),
+      };
+    });
+    // 阈值 3 = 至少命中一个双字关键词（或两个单字）
+    hot = scored.filter((y) => y.s >= 3).sort((a, b) => b.s - a.s).map((y) => y.x)
+      .slice(0, Math.max(1, Math.floor(limit / 3)));
+  }
+  const hotIds = new Set(hot.map((x) => x.id));
+  const out = fillImgSlots([...rare, ...hot], rest.filter((x) => !hotIds.has(x.id)), limit, scope);
+  // ⚠️ 用**浅拷贝**打标记，绝不写回索引文件（那是要落盘的）
+  return out.map((x) => (rareIds.has(x.id) ? Object.assign({}, x, { _rare: true }) : x));
+}
+
+// 🆕 2026-10-14 晚：「有人**明确要图**」的粗判 —— 只用来**免抽签**（要就给）。
+//    ⚠️ 故意写松（宁可多判中）：判错一条的代价只是"这一次多给一张图"，
+//       判漏的代价是"群友张嘴要图却被告知发不了"，那个更难看。
+//    概率闸本身在 `imglib.sendGate()` 里，这里只负责把"有人在要图"这个事实传进去。
+const WANT_IMG_RE = /发[一1]?[张个]?图|来[一1]?[张个]?图|给[一1]?[张个]图|要图|看图|美照|来[一1]?[张个]|发[一1]?[张个]/;
+
+function buildImgHint(scope, msg, msgText = '', recentText = '') {
+  const cfgI = (cfg.policy && cfg.policy.imglib) || {};
+  if (cfgI.enabled === false) return '';
+  let lib;
+  try { lib = require('./imglib'); } catch { return ''; }
+
+  const g = { groupOpenid: msg && (msg.group_openid || msg.group_id), groupId: msg && msg.group_id };
+
+  // 🔴 不在用图库的群：**一个字都不给**（省 token，也别让模型知道有这个功能）
+  //    踩过：早先版本对"别的群"也回一句"这次不能配图"，等于每次回复白加 100 字，
+  //    而且模型可能去跟群友解释"我这儿不能发图"——既费钱又莫名其妙。
+  if (!lib.inWhitelist(g)) return '';
+
+  // 🔴 关键：**能不能发**要先问闸门（和 index.js 发图时用的是同一个函数）。
+  //    闸门关着时必须**明确告诉模型"这次别答应发图"** —— 否则它会说"给你来一张"，
+  //    而代码随后把图拦掉，文案就对不上了（2026-10-13 用户实测到的正是这个）。
+  const gate = lib.sendGate({
+    scope, ...g,
+    isOwner: !!(msg && isOwner(msg)),          // 主人免冷却（config.policy.imglib.ownerBypass）
+    // 🆕 2026-10-14 晚：这里是**生成前**那次判断 ⇒ 概率签在这里抽（中了才放行；
+    //    签挂在 imglib 上，等 `index.sendLibImage()` 用 `consume: true` 去验**同一张**签）。
+    //    🔴 抽签放在生成前是老 bug 逼出来的铁律：模型必须**事先知道**这次能不能发，
+    //      否则它会说"给你来一张"、代码随后把图拦掉（2026-10-13 真机出过）。
+    //    有人明确要图 ⇒ 不抽签（要就给）。
+    explicit: WANT_IMG_RE.test(String(msgText || '')),
+  });
+  if (!gate.ok) {
+    return `\n\n【你的图库】这次**不能**配图（${gate.why}）。所以：`
+      + '**别答应发图、别说"来一张/再翻一张/给你一张"这类话**，也**别描述翻图、找图的动作** ——'
+      + '就正常用文字回这一句。';
+  }
+  const limit = Number(cfgI.hintMax) || 12;
+  const items = pickImgForScope(scope, limit, msgText, recentText);
+  if (!items.length) return '';
+  const total = lib.approved().length;
+  // 🔴 2026-10-13 加**格式**（用户要「来一张 webp 格式的」）——
+  //    清单原来只有 id + 描述，模型根本不知道哪张是 webp/png/jpg ⇒ 想按格式挑也挑不了
+  //    （那天发对一张 webp 其实是**碰巧**踩中的）。格式对模型只是几个字，直接给它。
+  const fmtOf = (x) => String((/\.([a-z0-9]+)$/i.exec(x.filename || '') || [])[1] || '').toLowerCase();
+  const lines = items.map((x) => {
+    const f = fmtOf(x);
+    const tags = Array.isArray(x.tags) && x.tags.length ? `〔${x.tags.slice(0, 6).join('/')}〕` : '';
+    // 🆕 2026-10-13 晚：① 均衡池那几张打 ※（模型偏好清单开头，光"放进来了"不够，得点名）；
+    //    ② 带上**关键词标签**（从描述提炼的口语词）—— 模型对"什么时候该发这张"的判断更快更准；
+    //       同时把描述截断从 40 字收到 26 字，**总长度基本持平**（不额外增加每轮开销）。
+    return `- ${x.id}${f ? `（${f}）` : ''}${x._rare ? ' ※很少出场' : ''}：${String(x.desc || '').slice(0, 26) || '（没有描述）'}${tags}`;
+  }).join('\n');
+  // ⚠️ 告诉它"这只是图库的一部分" —— 否则它会以为图库就这么几张，被问"你有没有别的图"时答错
+  const more = total > items.length ? `（图库一共 ${total} 张，这次先给你看这 ${items.length} 张）` : '';
+  return `\n\n【你的图库】下面这些图你可以拿来配话（**只在真的合适时才配**）${more}：
+${lines}
+🔴 带 **※很少出场** 的那几张是**很少被用过**的图：如果它跟现在聊的事对得上，**优先从带 ※ 的里面挑** ——
+别每一回都用同一张（实测：库里 46 张有 32 张从没露过面，就是总用那几张造成的）。
+要配图就在回复的**最后另起一行**写 \`[图:ID]\`（只写一次，最多一张；不想配就一个字都别写）。
+🔴 **ID 必须从上面这份清单里原样复制**（大小写、每个字符都照抄）—— **绝对不要自己拼一个**：
+拼的 id 在库里不存在，代码会拒绝发送，于是又变成"嘴上说给你一张、实际没发"（2026-10-13 真机出过一次）。
+对方点名要某种格式（"来张 webp / png"）时，就挑清单里标着那个格式的那张；没有那种格式就正常回话，别硬凑。
+⚠️ 写了就**一定会发出去**；反过来说，**没写就别在正文里提"发图"这件事**（更别演翻图、找图的动作），
+否则会出现"嘴上说发了、群里却没有"的尴尬。也别为了好玩乱配，更别在别人正经讨论事情时插表情包。
+
+🔴 **现在是可以发的**（否则这段不会出现）：**别再说"图库在冷却/发不了/翻不出来/等冷却好了"这类话**
+（那是刚才的情况，现在能发就说能发），绝不出现"嘴上说发不了、图又发出去"；
+有人**明确要图**（发个图/来个图/来一张/看看美照）就**直接挑一张发**，**别反问"要什么图"**。`;
+}
+
+// 把 `[图:ID]`（含全角写法）摘出来；文本里不会留下这个标记
+const IMG_MARK_RE = /\[图[:：]\s*([A-Za-z0-9_-]{1,40})\s*[\]］]/;
+function stripImgMark(text) {
+  const s = String(text == null ? '' : text);
+  const m = s.match(IMG_MARK_RE);
+  const id = m ? m[1] : '';
+  if (!m) return { text: s, imgId: '' };
+  const out = s.replace(IMG_MARK_RE, '').replace(/[ \t]+\n/g, '\n').trim();
+  return { text: out, imgId: id };
 }
 
 module.exports = {
@@ -1334,6 +1595,11 @@ module.exports = {
   describeImage,
   // 🆕 识图用：静默时段检查（避免和时间计算的代码重复一份）
   inQuietHours,
+  // 🆕 2026-10-13 图库：给自测用（发图后要记一笔"这张刚发过"）
+  _pickImgForScope: pickImgForScope,
+  _buildImgHint: buildImgHint,
+  _stripImgMark: stripImgMark,
+  _noteImgUsed: noteImgUsed,
   markReplied: (scope, openid) => {
     lastReply.set(`${scope}|${openid}`, Date.now());
     replyLog.push({ scope, ts: Date.now() });

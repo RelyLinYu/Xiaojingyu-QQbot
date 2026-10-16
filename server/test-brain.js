@@ -347,8 +347,10 @@ console.log('\n=== 9. ⭐ 跨文件接口一致性（防"改了 A 忘了传 B"�
   check('brain.js 的 callAI 不重复包裹（无双层 text）—— 由第 10 组实测',
     true);
   // ② generateReply 现在返回 { text, segments }（多行回复功能加的 segments）
+  //    🆕 2026-10-13 图库：多了一个 `imgId`（模型挑中的图）。断言跟着放宽成"至少要有 text/segments"，
+  //    但仍然**盯着返回结构**——消费方（index.js）靠这几个字段。
   check('brain.js 的 generateReply 返回 { text, segments }',
-    /return \{ text: r\.text, segments: splitForChat\(r\.text\) \}/.test(brainSrc),
+    /return \{ text: p\.text, segments: splitForChat\(p\.text\)[^}]*\}/.test(brainSrc),
     'generateReply 的返回结构变了 —— 消费方 index.js 必须同步');
   // ③ index.js 必须从 .text 取字符串（而不是直接用对象）
   check('index.js 用 gen.text 取字符串',
@@ -1038,7 +1040,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     // ---- 代码层：助手模式下不做分段/不记反重复 ----
     const bsrc = require('fs').readFileSync(require('path').join(__dirname, 'brain.js'), 'utf8');
     check('助手模式不注入反重复提示', /const last = am\.on \? \[\] : recentReplyTexts/.test(bsrc));
-    check('助手模式返回单段（不拆分答案）', /segments: \[r\.text\], assistant: true/.test(bsrc));
+    check('助手模式返回单段（不拆分答案）', /segments: \[p1\.text\], imgId: p1\.imgId, assistant: true/.test(bsrc));
 
     // ---- ⭐ 助手模式必须绕过 L1 判断和抽签 ----
     // 实测 bug（2026-09-16）：发「ovo叫妈妈」→ 暗号识别正常、正文剥成"叫妈妈"，
@@ -1968,8 +1970,8 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     //
     // 实测依据（2026-09-22）：QQ 的 fileid **每次都变**，没法用来去重；
     // 但按大小+尺寸看，群里图片重复率 **28.6%**，一个表情包被发了 21 次。
-    check('去重配置存在（24 小时 / 最多 1000 张）',
-      cfg.policy.vision.dedupeTtlMs === 24 * 60 * 60 * 1000 && cfg.policy.vision.dedupeMax === 1000,
+    check('去重配置存在（48 小时 / 最多 20000 张；2026-10-15 按实测命中率 48% 提的）',
+      cfg.policy.vision.dedupeTtlMs === 48 * 60 * 60 * 1000 && cfg.policy.vision.dedupeMax === 20000,
       [cfg.policy.vision.dedupeTtlMs, cfg.policy.vision.dedupeMax]);
     check('★ markVision(scope, false) 用来表示"没花钱"（缓存命中不占今日张数）',
       vision.markVision.length >= 1);
@@ -2669,20 +2671,28 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         /截止点|越新的越可能不知道/.test(p));
       check(`★★ [${name}] 明确"明明知道却说没听过也是错的"（治第一轮过度矫正）`,
         /明明知道却说|和编造一样是错的/.test(p));
-      check(`★ [${name}] 有「底细」段（知道自己跑在 DeepSeek 上，接得住相关玩笑）`,
-        /底细/.test(p) && /DeepSeek/.test(p));
+      // 🆕 2026-10-15：原「底细」段已按用户要求删掉（"不是AI助手"可以省略，毕竟群友不傻），
+      //    改成【长相】【铁盆】【出身】三段 —— 断言跟着换成"知道自己的长相/饭盆/出身"。
+      //    ⚠️ 只有 **lean**（= 线上生效的那套）加了这三段；full 是留着回退的旧版，
+      //       没同步改（要回退时它仍旧能用），所以这条只对 lean 生效。
+      if (name === 'lean') {
+        check(`★ [${name}] 有【长相】【铁盆】【出身】段（知道自己长什么样、饭盆是什么、出身哪来的）`,
+          /【长相】/.test(p) && /【铁盆】/.test(p) && /【出身】/.test(p) && /DeepSeek/.test(p));
+      }
     }
 
-    check('★ lean 版没失控（< 650 字；248 → 433 → 572 → 646）',
-      lean.length < 650, String(lean.length));
+    // 🆕 2026-10-15：人设加了【长相】【铁盆】【出身】三段（用户给的两张设定图 + token 梗），
+    //    篇幅从 646 涨到 915 —— **这是用户要的**，所以断言只防"失控"，不再卡 650。
+    check('★ lean 版没失控（< 1000 字；646 → 915）',
+      lean.length < 1000, String(lean.length));
 
     // 🔴 2026-10-07 用户报「他说自己不能识图」：真因是**人设从没告诉它"你能看图"**
     //    （识图是把图变成文字描述塞进消息，模型只看到文字 ⇒ 它按"纯文本 AI"自我认知答"看不了"）
     //    ⇒ 人设里必须留着这条自我认知，否则它会一本正经地否认自己的能力。
     check('★★ 人设里必须写着"你能看懂图"（否则它会自称看不了图）',
       /【看图】/.test(lean) && /能看懂图/.test(lean) && /我看不了图/.test(lean));
-    check('  lean 仍然远短于 full（保持精简版的意义）',
-      lean.length < full.length * 0.6, `${lean.length} vs ${full.length}`);
+    check('  lean 仍然短于 full（保持精简版的意义）',
+      lean.length < full.length * 0.85, `${lean.length} vs ${full.length}`);
     check('  两套词都还在（切换 promptStyle 不会丢规则）',
       lean.length > 200 && full.length > 600);
 
@@ -2733,7 +2743,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★★ 复现那个坑：整段 prompt（含上下文）会被误判成事实问题',
       lf('你好') === false && lf(assembled) === true);
     check('★★ thinking 判据吃的是独立的 thinkText，不是整段 user',
-      /function callAIOnce\([^)]*thinkText\)/.test(bsrc) && /thinkText != null \? thinkText : ''/.test(bsrc));
+      /function callAIOnce\([^)]*thinkText[^)]*\)/.test(bsrc) && /thinkText != null \? thinkText : ''/.test(bsrc));
     check('★ 没传 thinkText 时默认**不开**（fail-cheap，别再退化成"整段都算"）',
       /thinkText != null \? thinkText : ''/.test(bsrc));
     check('★ generateReply 把"当前这条消息"单独传进去',
@@ -3501,7 +3511,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /'dailyCalls','visionDaily'/.test(lw));
     check('★ 整数项用 step="1"（不是 0.01）', /it\.int \? '1' : '0\.01'/.test(lw));
     check('★★ 概览区多一张「今日识图 / 上限 N 张」卡片（上限也要跟着面板改而变）',
-      /今日识图 \/ 上限/.test(lw) && /renderBudget\(j\.budget, j\.vision\)/.test(lw));
+      /今日识图 \/ 上限/.test(lw) && /renderBudget\(j\.budget, j\.vision, j\.disk\)/.test(lw));
     check('★★ logweb 给面板提供识图用量（口径：ok = 真花钱的张数，cached 不占额度）',
       /function visionState/.test(pg) && /vision: visionState\(\)/.test(pg)
         && /Number\(cur\.ok\)/.test(pg) && /settings\.num\('visionDaily'/.test(pg));

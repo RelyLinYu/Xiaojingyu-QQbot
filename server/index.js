@@ -18,6 +18,7 @@ const qqmedia = require('./qqmedia');
 const emotion = require('./emotion');   // 🆕 情绪观察器（只观察、不注入，见 config.policy.emotionObserve）
 const memory = require('./memory');     // 🆕 记忆（全群共享便签本，见 config.policy.memory）
 const commands = require('./commands'); // 🆕 群内指令（/菜单、加Q+号 —— 0 次模型调用）
+const repeat = require('./repeat');     // 🆕 连续两条一样的消息 → 复读（0 次模型调用，见 repeat.js）
 
 // ============================================================
 //  🆕 2026-10-13：**引用消息必须标出"这句话是谁说的"**（用户报的真实 bug）
@@ -221,6 +222,37 @@ async function handleEvent(type, d) {
   if (!power.isOn()) {
     console.log('  └ ⏻ 已关机，忽略（@我说「开机」可恢复）');
     return;
+  }
+
+  // 3.8 🆕 2026-10-15 复读：群里**连着两条一模一样**的消息 → 跟着读一遍
+  //
+  // 🔴 位置：开机之后、识图之前。理由：
+  //    · 它在**关机判断之后** —— 遵守"关机 = 什么都不做"那条铁律，不为它开特例；
+  //    · 它在**识图和链接解析之前** —— 一分钱都不该为它花（不看图、不查链接、不进上下文）
+  //      ⇒ 群里真发生"连着两条一样的图/表情包"时，这一条会先复读、**跳过识图**，
+  //        顺带还省了一张图的钱（那是这个功能白捡的收益）。
+  //    · 它**不占额度、不写上下文、不进 L0/L1/L2**，发完就 return（见 repeat.js 头部）。
+  //
+  // ⚠️ 传 `d.content` 原文（只压空白、剥 @ 标记），**不传 brain.extractText(d)** ——
+  //    后者会把识图描述/引用内容拼进来，那样"两条一样的图"会因为描述不同而判不出重复。
+  // ⚠️ 这段整块包在 try 里：复读出任何问题都**不许影响正常聊天**。
+  if (isGroup && !d.author?.bot) {
+    try {
+      const rp = repeat.note(scope, {
+        text: String(d.content || ''),
+        quoted: vision.refIdxOf(d),     // 两条都引用**同一句**才算复读（见 repeat.judge ②）
+        isBot: !!d.author?.bot,
+        now: Date.now(),
+      });
+      if (rp && rp.text) {
+        console.log(`  ├ 🔁 ${rp.why} → 复读「${rp.text}」`);
+        const ok = await sendGroupMessage(openid, rp.text, d.id);
+        console.log(`  └ 🔁 ${ok ? '✓ 已复读' : '✗ 复读失败'}`);
+        return;   // 🛑 复读完就结束：不进识图 / 链接 / L0 / L1 / L2（0 次模型调用）
+      }
+    } catch (e) {
+      console.warn(`  ├ 🔁 复读判定异常（已忽略，继续正常流程）: ${e.message || e}`);
+    }
   }
 
   // 4.4 🆕 识图（2026-09-22）：把图片/表情包变成一句可读的话
@@ -684,6 +716,8 @@ async function handleEvent(type, d) {
         : await sendPrivateMessage(openid, seg, d.id, ref);
       if (sent) ok++;
     }
+    // 🆕 2026-10-13 图库：模型选了图就跟着发一张（同一队列里发，顺序才不乱）
+    if (isGroup && gen.imgId) await sendLibImage(d, openid, scope, gen.imgId);
     return ok;
   });
 
@@ -693,6 +727,91 @@ async function handleEvent(type, d) {
     brain.pushContext(scope, cfg.persona.name, reply);
   } else {
     console.log('  └ 发送失败，不计入冷却（下条消息仍可尝试）');
+  }
+}
+
+// ============================================================
+//  🆕 2026-10-13 图库：把模型挑的那张图发进群
+//
+//  用户拍板：同群 **5 分钟**一张、**不设每日上限**（"允许插图"）、先只在**测试群**生效。
+//  🔴 闸门判断**不在这里写第二份** —— 统一走 `imglib.sendGate()`，
+//     因为 `brain.buildImgHint()` 生成前也要问同一个闸门：
+//     两边判断不一致就会出「文字答应了发图、代码却没发」（2026-10-13 用户实测到的问题）。
+//  这里保留检查只为**兜底**（生成后到发送之间可能过了很久 / 队列里排过队）。
+//  发送链路和视频完全一样：读本地字节 → `qqmedia.uploadMedia(..., 1 /*图片*/)` → `sendGroupMedia`。
+//  为什么不用 `downloadToBuffer`：图就在本地磁盘上，没有任何理由再走一次网络。
+// ============================================================
+async function sendLibImage(d, groupopenid, scope, imgId) {
+  let lib;
+  try { lib = require('./imglib'); } catch { return false; }
+
+  const gate = lib.sendGate({
+    scope,
+    groupOpenid: groupopenid,
+    groupId: d && d.group_id,
+    isOwner: !!(d && brain.isOwner(d)),        // 主人免冷却（和生成前的判断保持一致）
+    // 🆕 2026-10-14 晚：这是**发送前**那次判断 ⇒ `consume: true` = **不重抽概率签**，
+    //    只验"生成前抽中的那张签还在不在"。重抽会让模型看到"能发"却发不出去（老 bug）。
+    consume: true,
+  });
+  if (!gate.ok) {
+    console.log(`  ├ 🖼 想发图但闸门没放行：${gate.why}`);
+    return false;
+  }
+
+  // 🔴 2026-10-13 修「模型报的 id 在图库里找不到」⇒ 用户看到的是**文字答应了、图却没来**。
+  //    真机证据（18:34:51）：回复「主人要就再给一张，这张也挺顺眼的。」后面跟着
+  //    `🖼 模型报的图 gmv69bei6e2m 在图库里找不到` —— **模型自己拼了一个 id**
+  //    （真 id 形如 `gmv69b3qz5za`，它照着样子编了个很像的）。
+  //    ⇒ 两道兜底（都是"说了就得真的做"，而不是让文案落空）：
+  //      ① **近似纠正**：库里恰好有一个"同长度且只差 ≤2 个字符"的 id → 那就是它想指的，直接用；
+  //      ② **换一张**：纠正不了就**从候选里挑一张真图**发出去（闸门都放行了，说明这轮本该配图）。
+  //    两条都会打日志留痕，方便事后核对到底发的是哪张。
+  const id0 = String(imgId || '').trim();
+  let id = id0;
+  let it = lib.get(id);
+  if (!it) {
+    const ids = lib.approved().map((x) => x.id);
+    const near = ids.filter((x) => x.length === id0.length
+      && [...x].filter((c, i) => c !== id0[i]).length <= 2);
+    if (near.length === 1) {
+      console.log(`  ├ 🖼 模型报的 id ${id0} 不存在 → 自动纠正为最接近的 ${near[0]}`);
+      id = near[0];
+      it = lib.get(id);
+    }
+    if (!it) {
+      // ② 挑一张真的（用同一套滚动窗口，保证不会老挑同一张）
+      let cand = [];
+      try { cand = brain._pickImgForScope(scope, 1, ''); } catch { cand = []; }
+      if (!cand.length) {
+        console.log(`  ├ 🖼 模型报的图 ${id0} 在图库里找不到，候选也没有 → 不发`);
+        return false;
+      }
+      id = cand[0].id;
+      it = cand[0];
+      console.log(`  ├ 🖼 模型报的图 ${id0} 在图库里找不到 → 改用候选里的 ${id} 顶上（别让文案落空）`);
+    }
+  }
+  if (it.status !== 'approved') { console.log(`  ├ 🖼 图 ${id} 还没入库（状态 ${it.status}），不发`); return false; }
+  const buf = lib.readFile(id);
+  if (!buf) { console.log(`  ├ 🖼 图 ${id} 的文件读不出来`); return false; }
+
+  try {
+    const fileInfo = await qqmedia.uploadMedia('groups', groupopenid, buf, it.filename || (id + '.png'), 1,
+      (m) => console.log(`  ├ 🖼 ${m}`));
+    const ok = await sendGroupMedia(groupopenid, fileInfo, d.id);
+    console.log(ok
+      ? `  └ 🖼 ✓ 已发图（${id} · ${(buf.length / 1024).toFixed(0)}KB）`
+      : '  └ 🖼 ✗ 图发送失败（看上面的 err_code）');
+    if (ok) {
+      lib.noteSent(scope);                       // ← 冷却以"真发出去"为准
+      try { lib.markUsed(id); brain._noteImgUsed(scope, id); } catch { /* 记账失败不影响发送 */ }
+    }
+    return ok;
+  } catch (e) {
+    // 发图失败**绝不**影响已经发出去的文字（它已经发出去了）
+    console.warn(`  └ 🖼 发图异常（已忽略）：${e.message || e}`);
+    return false;
   }
 }
 
@@ -1069,11 +1188,15 @@ console.log('[小蓝鲸] 判断模型:', cfg.ai.judgeModel, '| 日额度:',
 {
   const usage = require('./usage');
   const t1 = setTimeout(() => {
-    try {
-      const r = usage.backfill({ service: 'xiaolanjing', days: 14, dailyLimitYuan: cfg.budget.dailyLimitYuan });
-      console.log('[usage] 回填：' + (r.filled || 0) + ' 天（共 ' + (r.days || 0) + ' 天在库里）' + (r.why ? ' · ' + r.why : ''));
-    } catch (e) { console.warn('[usage] 回填失败（不影响运行）：' + e.message); }
-    try { const b = budget.status(); usage.record({ dayCalls: b.dayCalls, daySpent: b.daySpent }); } catch (e) { /* 忽略 */ }
+    // ⚠️ backfill 现在返回 **Promise**（内部从 execSync 改成了异步 exec + journalctl -g），
+    //    原因见 usage.js 那段注释：同步读 journal 会把整个机器人卡住十几秒。
+    Promise.resolve()
+      .then(() => usage.backfill({ service: 'xiaolanjing', days: 14, dailyLimitYuan: cfg.budget.dailyLimitYuan }))
+      .then((r) => console.log('[usage] 回填：' + (r.filled || 0) + ' 天（共 ' + (r.days || 0) + ' 天在库里）' + (r.why ? ' · ' + r.why : '')))
+      .catch((e) => console.warn('[usage] 回填失败（不影响运行）：' + e.message))
+      .then(() => {
+        try { const b = budget.status(); usage.record({ dayCalls: b.dayCalls, daySpent: b.daySpent }); } catch (e) { /* 忽略 */ }
+      });
   }, 25000);
   if (t1 && t1.unref) t1.unref();
   const t2 = setInterval(() => {

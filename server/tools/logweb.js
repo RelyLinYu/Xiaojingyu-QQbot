@@ -107,6 +107,8 @@ function fillPersonaForPanel(snapObj) {
         dailyCalls: cfgNum.policy.dailyCallLimit,
         // 🆕 2026-10-11：识图上限同样是"没存过就给空框" ⇒ 用代码里的当前生效值填上
         visionDaily: cfgNum.policy.vision && cfgNum.policy.vision.dailyLimit,
+        // 🆕 2026-10-14：主动配图概率同理（没存过时框里要显示当前生效的 0.33，而不是空白）
+        imglibChance: cfgNum.policy.imglib && cfgNum.policy.imglib.sendChance,
       };
       for (const k of Object.keys(eff)) {
         const v = eff[k];
@@ -209,6 +211,53 @@ function visionState() {
     };
   } catch {
     return { used: null, miss: null, limit };
+  }
+}
+
+// 🆕 2026-10-14 磁盘 / 日志水位（用户要的"东西悄悄涨、得看得见"）
+//
+//  🔴 只读，绝不清理 —— 老规矩：清理脚本不许碰用户数据，这里只负责"把水位的数字摊出来"。
+//  ⚠️ 越线阈值只是想让人"看一眼就知道该收拾了"，不代表现在就有问题：
+//     2026-10-14 实测：盘 4.3G/40G（12%）、events 日志合计 97MB（30 个文件，最早 09-14），
+//     按每天约 3MB 的速度，日志大约还要 5 个月才会碰 500MB。
+const DISK_WARN_PCT = 85;
+const LOG_WARN_MB = 500;
+function diskState() {
+  try {
+    const st = fs.statfsSync(APP_DIR);
+    const total = Number(st.blocks) * Number(st.bsize);
+    // 🔴 2026-10-14 对账修：这里必须用 **bfree**（全部剩余块），不能用 bavail。
+    //    bavail 是"给**非 root** 用户的可用块"，不含 ext4 预留给 root 的那 ~5%
+    //    ⇒ 拿它算会得到 used 6.1G / 16%，而 `df` 是 4.3G / 12% —— 两个数字对不上，
+    //       用户一看面板就会以为"面板在瞎报"。用 bfree 才和 `df` 同一口径（实测一致）。
+    const avail = Number(st.bfree) * Number(st.bsize);
+    const used = Math.max(0, total - avail);
+    let logBytes = 0;
+    let oldest = '';
+    const dir = path.join(APP_DIR, 'data');
+    for (const f of fs.readdirSync(dir)) {
+      if (!/^events-.*\.jsonl$/.test(f)) continue;
+      try { logBytes += fs.statSync(path.join(dir, f)).size; } catch { /* 单个读不到就跳过 */ }
+      const d = f.slice('events-'.length, -'.jsonl'.length);
+      if (!oldest || d < oldest) oldest = d;
+    }
+    const pct = total ? Math.round((used / total) * 100) : null;
+    const logMB = Math.round(logBytes / 1048576);
+    const why = [
+      pct != null && pct >= DISK_WARN_PCT ? `磁盘已用 ${pct}%（≥${DISK_WARN_PCT}%）` : '',
+      logMB >= LOG_WARN_MB ? `事件日志 ${logMB}MB（≥${LOG_WARN_MB}MB）` : '',
+    ].filter(Boolean).join(' · ');
+    return {
+      totalGB: +(total / 1073741824).toFixed(1),
+      usedGB: +(used / 1073741824).toFixed(1),
+      pct,
+      logMB,
+      logOldest: oldest,
+      warn: !!why,
+      why,
+    };
+  } catch {
+    return null;      // 读不到就当没有，绝不让额度区变空
   }
 }
 
@@ -780,6 +829,7 @@ const server = http.createServer(async (req, res) => {
       log, service, budget, power, events, convos,
       settings: fillPersonaForPanel(settings.snapshot()),   // 🆕 可改参数（密钥只给掩码；人设框填上当前生效的人设）
       vision: visionState(),                  // 🆕 今日识图用量（额度区那张「今日识图 / 上限 N 张」）
+      disk: diskState(),                      // 🆕 磁盘/日志水位（只读，越线标黄；2026-10-14）
       scopeIds: recentScopeIds(),             // 🆕 猜群号用
       build: BUILD,                           // 🆕 版本戳（页头显示，用来确认"是不是新页面"）
     }));
@@ -877,6 +927,85 @@ const server = http.createServer(async (req, res) => {
     const r = ex.reset();
     res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(Object.assign({ ok: r.ok }, r, { status: ex.status() })));
+    return;
+  }
+
+  // ============================================================
+  //  🆕 2026-10-13 图库（用户需求：后台单开一页，多张上传 → AI 逐张说理解 → 确认后入库 → bot 自己配图）
+  //
+  //  ── 三个接口，都**必须登录**（图库是内部素材，不像 /qr 那种要发给外人）──
+  //   读   GET  /api/imglib                     → { items, status }
+  //   图   GET  /api/imglib/file?id=xxx          → 缩略图字节（页面上 <img> 直接指过来）
+  //   传   POST /api/imglib/upload?name=xxx      → **裸二进制**（就是文件本身），
+  //         不是 JSON/base64 —— 面板读请求体默认只有 64KB 上限，塞几张图就爆。
+  //   改   POST /api/imglib/status  {id,status,desc?} → 用/弃/改描述
+  //   删   POST /api/imglib/remove  {id}
+  // ============================================================
+  if (url.pathname === '/api/imglib' && req.method === 'GET') {
+    const lib = require('../imglib');
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, items: lib.list(), status: lib.status() }));
+    return;
+  }
+  if (url.pathname === '/api/imglib/file' && (req.method === 'GET' || req.method === 'HEAD')) {
+    const lib = require('../imglib');
+    const id = String(url.searchParams.get('id') || '');
+    const it = lib.get(id);
+    const buf = it && lib.readFile(id);
+    if (!it || !buf) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('not found'); return; }
+    res.writeHead(200, {
+      'Content-Type': it.mime || 'application/octet-stream',
+      'Content-Length': buf.length,
+      'Cache-Control': 'private, max-age=3600',
+    });
+    res.end(req.method === 'HEAD' ? '' : buf);
+    return;
+  }
+  if (url.pathname === '/api/imglib/upload' && req.method === 'POST') {
+    const lib = require('../imglib');
+    const name = String(url.searchParams.get('name') || '').slice(0, 40);
+    // ⚠️ 这个路由**不能**用那个 64KB 的 readBody：图就是几十上百 KB 起步。
+    //    上限 16MB（和 imglib 的单张上限一致），超了直接 413 并明确告诉用户为什么。
+    const raw = await new Promise((resolve) => {
+      const chunks = [];
+      let n = 0, dead = false;
+      req.on('data', (c) => {
+        n += c.length;
+        if (n > 16 * 1024 * 1024) { dead = true; req.destroy(); return; }
+        chunks.push(c);
+      });
+      req.on('end', () => resolve(dead ? null : Buffer.concat(chunks)));
+      req.on('error', () => resolve(null));
+    });
+    if (!raw) {
+      res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: '图太大（超过 16MB），先在本地压一下再传' }));
+      return;
+    }
+    const r = await lib.add(raw, { name }, (m) => console.log(`[imglib] ${m}`));
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(Object.assign({ ok: r.ok }, r, { status: lib.status() })));
+    return;
+  }
+  if (url.pathname === '/api/imglib/status' && req.method === 'POST') {
+    const lib = require('../imglib');
+    const body = await readBody(req);
+    let p = {};
+    try { p = JSON.parse(body || '{}'); } catch { p = {}; }
+    if (p.desc && p.id) lib.update(p.id, { desc: String(p.desc) });   // 顺手把用户补的描述存下
+    const r = lib.setStatus(String(p.id || ''), String(p.status || ''));
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(Object.assign({ ok: r.ok }, r, { status: lib.status() })));
+    return;
+  }
+  if (url.pathname === '/api/imglib/remove' && req.method === 'POST') {
+    const lib = require('../imglib');
+    const body = await readBody(req);
+    let p = {};
+    try { p = JSON.parse(body || '{}'); } catch { p = {}; }
+    const r = lib.remove(String(p.id || ''));
+    res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(Object.assign({ ok: r.ok }, r, { status: lib.status() })));
     return;
   }
 
@@ -1001,8 +1130,9 @@ const server = http.createServer(async (req, res) => {
       'Expires': '0',
     });
     // 🆕 2026-10-06：分页面（概览/对话/设置/日志）—— 用 ?page= 选，缺省概览
+    // 🆕 2026-10-13：加第 5 页「图库」
     const wantPage = String(url.searchParams.get('page') || 'overview');
-    const ALLOWED = ['overview', 'chat', 'settings', 'raw'];
+    const ALLOWED = ['overview', 'chat', 'settings', 'imglib', 'raw'];
     res.end(PAGE({
       pwd: url.searchParams.get('p') || '',
       page: ALLOWED.includes(wantPage) ? wantPage : 'overview',
