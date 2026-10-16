@@ -22,7 +22,7 @@
 // ============================================================
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { exec } = require('child_process');   // ⚠️ 必须异步版，见 backfill() 的注释
 
 // ⚠️ 数据目录算法必须和 budget/power/memory/settings **完全一致**（2026-10-07：
 //   之前 settings/examples 用了 `__dirname/..`，而 bot 服务没设 APP_DIR ⇒ 两边读写不同文件、
@@ -159,26 +159,45 @@ function record(state, now) {
 }
 
 // 启动时回填历史（抓 journal ⇒ 解析 ⇒ 并入；**已有数据不覆盖**：取更大的值）
+//
+// 🔴🔴 2026-10-14 修一个**让整台机器人停摆十几秒**的 bug（用户报「指令发出去十几秒才有反应」）：
+//   原来这里是 `execSync('journalctl … --since "14 days ago" …', { maxBuffer: 32MB })`
+//   —— **同步**读 journal，而 Node 是单线程 ⇒ 那一瞬间**整个机器人不处理任何消息**。
+//   实测现象：每次重启后第 25 秒（`index.js` 的 setTimeout），群里发指令要等十几秒才动，
+//   而且它多半**根本没成功**：14 天全量日志轻松超过 32MB ⇒ `ENOBUFS` ⇒ 白卡一场。
+//   （2026-10-14 14:36 和 15:02 两次"反应好慢"，都正好发生在我部署重启之后。）
+//
+//   两条修法：
+//     ① `exec`（异步）—— 再慢也只占着它自己的子进程，**不阻塞事件循环**；
+//     ② `-g`（journalctl 自己过滤）—— 只输出 `[ai]` / `[budget]` 行，
+//        输出从几十 MB 掉到几十 KB，这才是根治（读少了自然快）。
+//   ⇒ 返回值也从"对象"变成 **Promise**，调用方要 `await` / `.then`。
 function backfill(opts) {
   const o = opts || {};
   const days = read().days;
-  let txt = '';
-  try {
-    const cmd = 'journalctl -u ' + (o.service || 'xiaolanjing') + ' --since "' + (o.days || KEEP_BACKFILL_DAYS) + ' days ago"'
-      + ' -o short-iso --no-pager';
-    txt = execSync(cmd, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 30000 });
-  } catch (e) {
-    return { ok: false, why: '读 journal 失败：' + e.message, filled: 0 };
-  }
-  const parsed = parseJournalText(txt, { dailyLimitYuan: o.dailyLimitYuan });
-  let filled = 0;
-  for (const [date, info] of Object.entries(parsed)) {
-    mergeDay(days, date, info);
-    filled += 1;
-  }
-  prune(days);
-  const w = write(days);
-  return { ok: w.ok !== false, filled, days: Object.keys(days).length, why: w.why };
+  const cmd = 'journalctl -u ' + (o.service || 'xiaolanjing')
+    + ' --since "' + (o.days || KEEP_BACKFILL_DAYS) + ' days ago"'
+    + " -g '\\[ai\\]|\\[budget\\]'"          // 让 journalctl 端过滤，别把几万行拉回内存
+    + ' -o short-iso --no-pager';
+
+  return new Promise((resolve) => {
+    exec(cmd, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 30000 }, (err, txt) => {
+      if (err) return resolve({ ok: false, why: '读 journal 失败：' + err.message, filled: 0 });
+      let filled = 0;
+      try {
+        const parsed = parseJournalText(String(txt || ''), { dailyLimitYuan: o.dailyLimitYuan });
+        for (const [date, info] of Object.entries(parsed)) {
+          mergeDay(days, date, info);
+          filled += 1;
+        }
+        prune(days);
+        const w = write(days);
+        return resolve({ ok: w.ok !== false, filled, days: Object.keys(days).length, why: w.why });
+      } catch (e) {
+        return resolve({ ok: false, why: '解析/落盘失败：' + e.message, filled });
+      }
+    });
+  });
 }
 
 // 给面板用的：最近 n 天（按日期升序，缺失的天补 0）

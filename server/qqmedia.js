@@ -36,6 +36,27 @@ const API = 'https://api.bot.qq.com';
 const md5 = (b) => crypto.createHash('md5').update(b).digest('hex');
 const sha1 = (b) => crypto.createHash('sha1').update(b).digest('hex');
 
+// ---------- 🆕 2026-10-14 晚：`file_info` 复用缓存（治大图每次重传那 6 秒）----------
+//
+// 🔴 为什么要这个（实测数据，见本机 `_srv/_probe-stall*.cjs`）：一张 1.13MB 的长图发一次约 **6 秒**，拆开是
+//    预上传 0.2~0.7s + 分片 PUT 1.7~2.4s（1.13MB，服务器上行 ~3Mbps）+ 合并 0.3~1.0s
+//    + **发媒体消息 2~3s（QQ 侧固定成本，跟大小无关：0.01MB 的小图也要 1~2s）**。
+//    而同一份字节**每次都要重传一遍** —— 同一个群、同一张图，白扔那 2.5~3.1s。
+//    QQ 合并出来的 `file_info` 有有效期，**实测 15 分钟后的旧票据仍能直接发**（`_srv/_wall-fi-reuse.cjs`）。
+// 🔴 缓存必须带**失效条件**（本项目老教训：靠"重启才更新"的缓存就是静默雷）：
+//    ① 键里带**内容 sha256**（文件换了 = 换键，自动失效，不靠人记得清）；
+//    ② TTL（默认 2 小时，可用 `XLJ_MEDIA_TTL_MS` 覆盖）；
+//    ③ **发送失败立刻 `forgetMedia()` 重传一次**（票据过期是唯一可能的失败模式）。
+// ⚠️ 只对**显式传 `{ reuse: true }`** 的调用生效 —— 图库配图那种"每次都不同"的图不受影响。
+const MEDIA_CACHE = new Map();                      // key -> { fileInfo, at }
+const MEDIA_TTL = Number(process.env.XLJ_MEDIA_TTL_MS || 2 * 60 * 60 * 1000);
+
+function mediaKey(scope, id, buf, fileName, fileType) {
+  return [scope, id, fileType, fileName,
+    crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)].join('|');
+}
+function mediaFresh(at, now = Date.now()) { return (now - at) < MEDIA_TTL; }
+
 // md5_10m = 文件前 10002432 字节的 MD5（官方拿来判"秒传"）
 const MD5_10M_BYTES = 10002432;
 
@@ -134,8 +155,25 @@ async function prepareAndUpload(scope, id, buf, fileName, fileType, log) {
  * @param {number} fileType    1=图片 2=视频 3=语音 4=文件
  * @param {(m:string)=>void} [log]
  */
-async function uploadMedia(scope, id, buf, fileName, fileType, log = () => {}) {
-  return prepareAndUpload(scope, id, buf, fileName, fileType, log);
+async function uploadMedia(scope, id, buf, fileName, fileType, log = () => {}, opts = {}) {
+  // 🆕 2026-10-14 晚：显式要求复用时，先看缓存（键里带内容 sha256 ⇒ 文件改了自动失效）
+  if (opts.reuse) {
+    const key = mediaKey(scope, id, buf, fileName, fileType);
+    const hit = MEDIA_CACHE.get(key);
+    if (hit && mediaFresh(hit.at)) {
+      log(`复用 ${((Date.now() - hit.at) / 60000).toFixed(1)} 分钟前的 file_info（跳过上传，省 2~3 秒）`);
+      return hit.fileInfo;
+    }
+  }
+  const fi = await prepareAndUpload(scope, id, buf, fileName, fileType, log);
+  if (opts.reuse) MEDIA_CACHE.set(mediaKey(scope, id, buf, fileName, fileType), { fileInfo: fi, at: Date.now() });
+  return fi;
+}
+
+// 🔴 票据作废（发送失败时的兜底：清掉再重传一次，别让一次过期票据把功能卡死）
+function forgetMedia(scope, id) {
+  const pre = `${scope}|${id}|`;
+  for (const k of [...MEDIA_CACHE.keys()]) if (k.startsWith(pre)) MEDIA_CACHE.delete(k);
 }
 
 /**
@@ -161,4 +199,9 @@ async function downloadToBuffer(url, opts = {}) {
   return Buffer.from(ab);
 }
 
-module.exports = { uploadMedia, downloadToBuffer, _md5: md5, _sha1: sha1 };
+module.exports = {
+  uploadMedia, downloadToBuffer, forgetMedia,
+  _md5: md5, _sha1: sha1,
+  // 🆕 给自测用（不联网就能验缓存命中/失效）
+  _mediaKey: mediaKey, _mediaFresh: mediaFresh, _mediaCache: MEDIA_CACHE, _mediaTtl: () => MEDIA_TTL,
+};

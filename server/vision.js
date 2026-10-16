@@ -320,8 +320,8 @@ setInterval(() => {
 //
 // 另外再兜一层 `LAST_IMG`：**刚发过图、紧接着只 @ 它**（图和 @ 分成两条消息发）
 // 这种在手机 QQ 上很常见的操作，也能用上那张图的描述，而不是回「咋了」。
-const IMG_CACHE = new Map();     // `${scope}|${msg_idx}` -> { desc, ts }
-const LAST_IMG = new Map();      // scope -> { desc, ts }
+const IMG_CACHE = new Map();     // `${scope}|${msg_idx}` -> { desc, url, ts }
+const LAST_IMG = new Map();      // scope -> { desc, url, ts }
 const IMG_CACHE_MAX = 500;       // 防内存涨
 
 // message_scene.ext 是个 `["key=value", ...]` 的数组，转成对象
@@ -340,11 +340,15 @@ const msgIdxOf = (d) => extMap(d).msg_idx || '';
 // 这条消息**引用**的那条消息的编号（找图时用）
 const refIdxOf = (d) => extMap(d).ref_msg_idx || '';
 
-function rememberImage(scope, idx, desc) {
-  if (!desc) return;
+// idx/desc 之外多收一个 `url`（可选）：**给"群友引用一张图去投稿（#tg）"用**。
+//   ⚠️ 为什么不能只记描述：投稿要的是**图片字节**（存进图库），描述换不回文件。
+//   ⚠️ 为什么不另开一张表：同一份数据一份生命周期，两张表迟早对不上（项目踩过好几次）。
+function rememberImage(scope, idx, desc, url) {
+  if (!desc && !url) return;
   const now = Date.now();
-  if (idx) IMG_CACHE.set(`${scope}|${idx}`, { desc, ts: now });
-  LAST_IMG.set(scope, { desc, ts: now });
+  const rec = { desc: desc || '', url: url || '', ts: now };
+  if (idx) IMG_CACHE.set(`${scope}|${idx}`, rec);
+  LAST_IMG.set(scope, rec);
   // 超量就丢最早的（Map 保持插入顺序）
   if (IMG_CACHE.size > IMG_CACHE_MAX) {
     for (const k of IMG_CACHE.keys()) {
@@ -352,6 +356,21 @@ function rememberImage(scope, idx, desc) {
       if (IMG_CACHE.size <= IMG_CACHE_MAX) break;
     }
   }
+}
+
+// 按 msg_idx 取整条记录（含 url）；给 `#tg` 投稿用
+function getImage(scope, idx, withinMs) {
+  const hit = IMG_CACHE.get(`${scope}|${idx}`);
+  if (!hit) return null;
+  if (withinMs && Date.now() - hit.ts > withinMs) return null;
+  return hit;
+}
+
+// 这个群最近一张图的记录（含 url）；给 `#tg` 的"刚发图紧接着发指令"兜底
+function recentImage(scope, withinMs) {
+  const hit = LAST_IMG.get(scope);
+  if (!hit) return null;
+  return (Date.now() - hit.ts > withinMs) ? null : hit;
 }
 
 // 按 msg_idx 查（用于"引用的是一条图片消息"）
@@ -538,6 +557,9 @@ module.exports = {
   rememberImage,
   getImageDesc,
   recentImageDesc,
+  // 🆕 2026-10-15 投稿（#tg）用：要的是**图片地址**（描述换不回文件）
+  getImage,
+  recentImage,
   // 给自测用
   _beijingToday: beijingToday,
   _extMap: extMap,

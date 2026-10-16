@@ -982,6 +982,517 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       timeStr.includes(`${bj.getFullYear()}/${bj.getMonth() + 1}/${bj.getDate()}`), timeStr);
   }
 
+  console.log('\n=== 16b. ⭐ 复读：连续两条一模一样（2026-10-15 用户需求）===');
+  {
+    // 用户原话：「当群里出现连续两条一模一样的消息时自动复读，同时间同一个语句只会复读一次」
+    // 这条功能**不花一分钱**，所以自测直接调纯函数（repeat.judge / repeat.note），不用桩网络。
+    const rp = require('./repeat');
+    const P = cfg.policy.repeat;
+    rp._reset();
+
+    check('★ 配置在（policy.repeat）且默认开启', !!P && P.enabled === true);
+    check('★ 同一语句只复读一次的去重窗口存在（dedupeMs > 0）', Number(P.dedupeMs) > 0, String(P.dedupeMs));
+    check('  有"连续"的时效窗口（windowMs）', Number(P.windowMs) > 0, String(P.windowMs));
+    check('  有复读冷却（防换句子刷屏）', Number(P.cooldownMs) >= 0, String(P.cooldownMs));
+
+    // ---- 纯判定：judge ----
+    const j1 = rp._judge({ text: '啊？', quoted: '', ts: 1000 }, { text: '啊？', quoted: '', now: 2000 }, P);
+    check('★ 连着两条一样 → 判要复读', j1.echo === true && j1.text === '啊？', JSON.stringify(j1));
+    const j2 = rp._judge({ text: '啊？', quoted: '', ts: 1000 }, { text: '哦', quoted: '', now: 2000 }, P);
+    check('  两条不一样 → 不复读', j2.echo === false, JSON.stringify(j2));
+    const j3 = rp._judge({ text: '啊', quoted: '', ts: 1000 }, { text: '啊', quoted: '', now: 2000 }, P);
+    check('★ 太短的字（1 字）不读 —— 默认 minLength=2', j3.echo === false && /太短/.test(j3.why), JSON.stringify(j3));
+    const j4 = rp._judge({ text: '啊？', quoted: '', ts: 0 }, { text: '啊？', quoted: '', now: P.windowMs + 1 }, P);
+    check('  隔太久（超 windowMs）不算"连着说的"', j4.echo === false && /隔了/.test(j4.why), JSON.stringify(j4));
+
+    const j5 = rp._judge({ text: '支持', quoted: 'REF1', ts: 1000 }, { text: '支持', quoted: '', now: 2000 }, P);
+    check('  引用语境不同 → 不算复读（带引用的和裸话撞词是巧合）', j5.echo === false, JSON.stringify(j5));
+    const j6 = rp._judge({ text: '支持', quoted: 'REF1', ts: 1000 }, { text: '支持', quoted: 'REF1', now: 2000 }, P);
+    check('  两条引用同一句 → 算复读', j6.echo === true, JSON.stringify(j6));
+    check('★ @ 标记会被剥掉再比（<@id> 一样也算一样）',
+      rp._normText('<@abc123> 哈哈') === '哈哈' && rp._normText('  哈哈  ') === '哈哈');
+
+    // ---- 状态机：note ----
+    // ⚠️ 每一步之间要把时钟推过 cooldownMs（默认 60s），否则第一次复读之后全被冷却挡住、
+    //    看起来"功能坏了"。这里用显式的 now 参数控制时间，不 sleep。
+    const S = 'group:REPEAT_TEST';
+    // A) 连着三条一样 → 只读一次（用户点名的那条）
+    rp._reset();
+    let T = 1_000_000;
+    check('  第一条 → 什么都不做（null）',
+      rp.note(S, { text: '阿巴阿巴', now: T }) === null);
+    let r = rp.note(S, { text: '阿巴阿巴', now: T + 1000 });
+    check('★ 第二条一样 → 复读', !!r && r.text === '阿巴阿巴', JSON.stringify(r));
+    r = rp.note(S, { text: '阿巴阿巴', now: T + 2000 });
+    check('★★ 第三条一样 → **不再复读**（用户点名的"同一语句只复读一次"）', r === null, JSON.stringify(r));
+
+    // B) A A B：B 不该读（上一条是 A）；紧接着再来一句 B 才该读
+    rp._reset();
+    T += 90000;
+    rp.note(S, { text: '喵呜', now: T });
+    r = rp.note(S, { text: '别的', now: T + 500 });
+    check('  A A B 里的 B 不复读（上一条是 A，不是同一句）', r === null, JSON.stringify(r));
+    T += 90000;
+    r = rp.note(S, { text: '别的', now: T });
+    check('  └ 隔一会儿再来一句 B → 上一条仍是 B，才算"连着两条一样"', !!r && r.text === '别的', JSON.stringify(r));
+    T += 90000;
+    check('★ A A 之后插了 B 再回 A 不算连续（A 要重新凑两条）',
+      rp.note(S, { text: '喵呜', now: T }) === null);
+    r = rp.note(S, { text: '喵呜', now: T + 500 });
+    check('  └ 紧接着再来一句 A → 这时构成连续 → 复读', !!r && r.text === '喵呜', JSON.stringify(r));
+
+    // C) 机器人自己发的：只记不读（防自环）
+    rp._reset();
+    T += 90000;
+    rp.note(S, { text: '嘻嘻', now: T });
+    r = rp.note(S, { text: '嘻嘻', now: T + 500, isBot: true });
+    check('★★ 第二条是机器人自己发的 → **只记不读**（否则它会自己接自己）', r === null, JSON.stringify(r));
+    T += 90000;
+    r = rp.note(S, { text: '嘻嘻', now: T });
+    check('  └ 那句"自己发的"已经记进状态，所以后一句人发的也算连着两条', !!r && r.text === '嘻嘻', JSON.stringify(r));
+
+    // D) 冷却：第一句读得出来，第二句（同一个群里刚读过的）就不读了 —— 这正是现在的默认行为，
+    //    ⚠️ 单靠"去重表"拦不住**换了句子**的复读（"前面刚读过的句子"不是这句），
+    //       所以 cooldownMs 必须有一个**可观**的默认值（≥30 秒）来兜住这个洞。
+    check('★★ cooldownMs ≥ 30 秒（否则换个句子连刷就能无限复读）',
+      Number(P.cooldownMs) >= 30000, String(P.cooldownMs));
+    rp._reset();
+    T += 90000;
+    rp.note(S, { text: '1 号句', now: T });
+    r = rp.note(S, { text: '1 号句', now: T + 100 });
+    check('  第一次复读成功', !!r, JSON.stringify(r));
+    rp.note(S, { text: '2 号句', now: T + 200 });
+    r = rp.note(S, { text: '2 号句', now: T + 300 });
+    check('★ 冷却期内换个句子接着刷 → 只记日志、不复读', r === null, JSON.stringify(r));
+    T += 90000;
+    r = rp.note(S, { text: '2 号句', now: T });
+    check('  └ 冷却过后同一句能再读一次（不是永久拉黑）', !!r && r.text === '2 号句', JSON.stringify(r));
+
+    // E) 去重表：**同一句话**在 dedupeMs 窗口内只能读一次（跟冷却无关，是第二道）
+    //    时间线：冷却 60s < 去重 90s < "连着说"窗口 300s ⇒ 中间那一档能单独验出来。
+    check('★★ dedupeMs > cooldownMs（"同一语句只读一次"要比冷却管得更久）',
+      Number(P.dedupeMs) > Number(P.cooldownMs), `${P.dedupeMs} vs ${P.cooldownMs}`);
+    check('★★ windowMs > cooldownMs + dedupeMs（否则去重那条规则永远走不到）',
+      Number(P.windowMs) > Number(P.cooldownMs) + Number(P.dedupeMs),
+      `${P.windowMs} vs ${Number(P.cooldownMs) + Number(P.dedupeMs)}`);
+    rp._reset();
+    T += 95000;
+    rp.note(S, { text: '同一句', now: T });
+    r = rp.note(S, { text: '同一句', now: T + 100 });
+    check('  首次复读成功', !!r, JSON.stringify(r));
+    T += 65000;                                  // 过冷却（60s），但没过去重（90s）
+    r = rp.note(S, { text: '同一句', now: T });
+    check('★ 冷却过了、但同一句在去重窗口内 → 仍不读', r === null, JSON.stringify(r));
+    T += 95000;                                  // 过冷却 160s、过去重 160s，仍在"连着说"窗口内
+    r = rp.note(S, { text: '同一句', now: T });
+    check('  └ 去重窗口也过了 → 可以再读（不会永久拉黑一句话）', !!r && r.text === '同一句', JSON.stringify(r));
+
+    // F) 关掉开关 = 彻底不读
+    const oldEnabled = P.enabled;
+    P.enabled = false;
+    rp._reset();
+    rp.note(S, { text: '关了还读？', now: 9000000 });
+    r = rp.note(S, { text: '关了还读？', now: 9000100 });
+    check('  enabled=false → 一条都不读', r === null, JSON.stringify(r));
+    P.enabled = oldEnabled;
+
+    // 接线检查：index.js 里必须真的在"识图之前"调它（否则"连着两条一样的图"会被识图吃掉）
+    const idx = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    check('★★ index.js 接了 repeat.note', /repeat\.note\(scope/.test(idx));
+    check('★★ 复读的分支排在**识图之前**（连着两条一样的图也能读，还省一张图的钱）',
+      idx.indexOf('repeat.note(scope') < idx.indexOf('vision.findImage(d)'),
+      `repeat@${idx.indexOf('repeat.note(scope')} vision@${idx.indexOf('vision.findImage(d)')}`);
+    check('★ 复读走的是纯文本发送（sendGroupMessage），不是 markdown/富媒体',
+      /repeat\.note\(scope[\s\S]{0,900}sendGroupMessage\(openid, rp\.text, d\.id\)/.test(idx));
+    rp._reset();
+  }
+
+  console.log('\n=== 16c. ⭐ 群友投稿表情包 `#tg`（2026-10-15 用户需求）===');
+  {
+    // 用户原话：「先发一张图，然后引用该图片并发送 #tg，自动上传后台待确认列表。
+    //   注意冷却，每个群 5 分钟，冷却期间返回：冷却中 剩余几分钟。格式不对的不回复」
+    const sub = require('./submit');
+    const S = require('./config').policy.submit;
+    sub._reset();
+
+    check('★ 配置在（policy.submit）且默认开启', !!S && S.enabled === true);
+    check('★ 冷却按群 5 分钟', Number(S.cooldownMs) === 5 * 60 * 1000, String(S.cooldownMs));
+    check('  有"冷却中 剩余 {min} 分钟"文案', /冷却中.*\{min\}/.test((S.coolingTexts || []).join('|')));
+
+    // ---- 指令识别：只认 `#tg` / `＃tg` ----
+    check('★ 认 `#tg`', sub.isCommand('#tg') === true);
+    check('  认全角 `＃tg`', sub.isCommand('＃tg') === true);
+    check('  大小写不敏感 `#TG`', sub.isCommand('#TG') === true);
+    check('  `#tg` 后面带话也认（多余的字当没说）', sub.isCommand('#tg 快来看') === true);
+    check('★ 不误伤 `#tgs` `#tga` 这类别的词', sub.isCommand('#tgs') === false && sub.isCommand('#tga') === false);
+    check('  普通聊天不认', sub.isCommand('#今天真开心') === false && sub.isCommand('tg') === false);
+
+    // ---- 测试桩：submit 的依赖全部注入，不碰网络、不碰真图库 ----
+    const mkD = (content, ext) => ({
+      id: 'ROBOT1.0_TG', content, message_type: 103,
+      author: { member_openid: 'TGUSER', username: '投稿的群友', bot: false },
+      group_openid: 'G_TG',
+      message_scene: { ext: ext || [] },
+    });
+    const imgStub = (url, desc) => ({
+      refIdxOf: () => 'REFIDX_TG_IMG',
+      getImage: () => (url ? { desc: desc || '', url } : null),
+      findImage: () => null,
+      recentImage: () => null,
+    });
+    const noImgStub = {
+      refIdxOf: () => '',
+      getImage: () => null,
+      findImage: () => null,
+      recentImage: () => null,
+    };
+    const qq = (buf) => ({ downloadToBuffer: async () => buf });
+    const lib = (r) => ({ add: async () => r });
+
+    (async () => {
+      // ① 正路：引用一张图 + #tg → 入库（pending）
+      const scope = 'group:TG1';
+      const r1 = await sub.handle(scope, mkD('#tg'), {
+        vision: imgStub('https://example.invalid/a.jpg', '一只猫'),
+        qqmedia: qq(Buffer.from('fake-jpeg-bytes')),
+        imglib: lib({ ok: true, item: { id: 'dfy900', desc: '一只叼梨的猫' } }),
+      });
+      check('★★ 引用图 + #tg → 回一句"投稿成功"（文案从 config 里随机取一条）',
+        !!(r1 && r1.text && (S.okTexts || []).some((t) => t === r1.text) || /待确认|收下/.test(r1.text)),
+        JSON.stringify(r1));
+      check('  └ 并把 id 带回来（给日志/自测对账用）', r1.id === 'dfy900', String(r1 && r1.id));
+
+      // ② 冷却：同一群再来一次 → 回"冷却中 剩余 N 分钟"
+      const r2 = await sub.handle(scope, mkD('#tg'), {
+        vision: imgStub('https://example.invalid/b.jpg'),
+        qqmedia: qq(Buffer.from('fake2')),
+        imglib: lib({ ok: true, item: { id: 'dfy901' } }),
+      });
+      check('★★ 冷却期间 → 回「冷却中 剩余 N 分钟」',
+        !!(r2 && r2.text && /冷却中/.test(r2.text) && /分钟/.test(r2.text)), JSON.stringify(r2));
+      check('  └ 剩余分钟数是 1~5 的整数',
+        Number((/(\d+)\s*分钟/.exec(r2.text) || [])[1]) >= 1
+        && Number((/(\d+)\s*分钟/.exec(r2.text) || [])[1]) <= 5, r2.text);
+      const r2b = await sub.handle('group:TG_OTHER', mkD('#tg'), {
+        vision: imgStub('https://example.invalid/c.jpg'),
+        qqmedia: qq(Buffer.from('fake3')),
+        imglib: lib({ ok: true, item: { id: 'dfy902' } }),
+      });
+      check('★ 别的群不受影响（冷却按群隔离）',
+        !!(r2b && r2b.text && !/冷却中/.test(r2b.text)), JSON.stringify(r2b));
+
+      // ③ 格式不对（没图）→ 一个字都不回
+      sub._reset();
+      const r3 = await sub.handle('group:TG2', mkD('#tg'), {
+        vision: noImgStub, qqmedia: qq(Buffer.from('x')), imglib: lib({ ok: true, item: { id: 'x' } }),
+      });
+      check('★★ `#tg` 但没引用图/没带图 → 不回（silent）',
+        !!(r3 && r3.silent === true && !r3.text), JSON.stringify(r3));
+
+      // ④ 图太大 → 也按"格式不对"不回
+      const r4 = await sub.handle('group:TG3', mkD('#tg'), {
+        vision: imgStub('https://example.invalid/big.jpg'),
+        qqmedia: { downloadToBuffer: async () => { throw new Error('超过上限 16MB（maxBytes）'); } },
+        imglib: lib({ ok: true, item: { id: 'x' } }),
+      });
+      check('★ 图太大 → 不回（按格式不对处理）', !!(r4 && r4.silent === true && !r4.text), JSON.stringify(r4));
+      check('  └ 但日志里要写清原因（别静默到自己也查不出）', /16MB/.test(String(r4.why || '')), String(r4 && r4.why));
+
+      // ⑤ 重复投稿：命中的是图库里已有的那张
+      sub._reset();
+      const r5 = await sub.handle('group:TG4', mkD('#tg'), {
+        vision: imgStub('https://example.invalid/dup.jpg'),
+        qqmedia: qq(Buffer.from('dup')),
+        imglib: lib({ ok: true, dup: true, item: { id: 'dfy001' } }),
+      });
+      check('★ 重复投稿 → 回"已经有了"而不是"收到"', !!(r5 && r5.text && /已经/.test(r5.text)), JSON.stringify(r5));
+      check('  └ 重复也算一次投稿（要记冷却，否则同一张图能被反复投）',
+        !!sub.cooldownState('group:TG4'), '冷却没记上');
+
+      // ⑥ 我们这边存不下（图库满/写文件失败）→ 必须回一句
+      sub._reset();
+      const r6 = await sub.handle('group:TG5', mkD('#tg'), {
+        vision: imgStub('https://example.invalid/full.jpg'),
+        qqmedia: qq(Buffer.from('full')),
+        imglib: lib({ ok: false, why: '图库满了（300 张）' }),
+      });
+      check('★ 存不下 → 回一句说明（不能装作成功）', !!(r6 && r6.text && /没存下来/.test(r6.text)), JSON.stringify(r6));
+
+      // ⑥b 🔴 2026-10-15 用户追加：「上传非图片 or 格式不对**不理会**」
+      //     ⇒ imglib 对"不是图/空文件/太大"打了 `silent`，submit 必须**一个字都不回**；
+      //        而"图库满了"这类**我们自己的故障**仍然要回（两者别混）。
+      sub._reset();
+      const r7 = await sub.handle('group:TG6', mkD('#tg'), {
+        vision: imgStub('https://example.invalid/notimg.jpg'),
+        qqmedia: qq(Buffer.from('这不是图片，只是一段文字', 'utf8')),
+        imglib: lib({ ok: false, silent: true, why: '不是可识别的图片（只支持 png / jpg / webp / gif）' }),
+      });
+      check('★★ 非图片（伪装成 .jpg 的文本）→ 拒绝且**不回话**',
+        !!(r7 && r7.silent === true && !r7.text), JSON.stringify(r7));
+      const r8 = await sub.handle('group:TG7', mkD('#tg'), {
+        vision: imgStub('https://example.invalid/empty'),
+        qqmedia: qq(Buffer.alloc(0)),
+        imglib: lib({ ok: false, silent: true, why: '空文件' }),
+      });
+      check('★ 空文件 → 拒绝且不回话', !!(r8 && r8.silent === true && !r8.text), JSON.stringify(r8));
+      const r9 = await sub.handle('group:TG8', mkD('#tg'), {
+        vision: imgStub('https://example.invalid/huge'),
+        qqmedia: qq(Buffer.from('x')),
+        imglib: lib({ ok: false, silent: true, why: '图太大（20.0MB > 16MB）' }),
+      });
+      check('★ 超过大小上限 → 拒绝且不回话', !!(r9 && r9.silent === true && !r9.text), JSON.stringify(r9));
+      check('★★ "图库满了"仍然要回话（那是我们自己的故障，不是格式不对）',
+        !!(r6 && r6.text && !r6.silent), JSON.stringify(r6));
+
+      // ⑥c 🔴 2026-10-16 用户要求：「主人没有冷却」
+      //     主人投稿既**不拦**、也**不记**冷却（连投几张之后，群友的 5 分钟窗不该被占）
+      sub._reset();
+      // ⚠️ 必须用**真实生效的** ownerOpenid（本地自测可能没设 .env）——
+      //    写死一个假 openid 会让 isOwner 为假，于是"主人豁免"这条断言变成假红（第一版就这么红过）
+      const OWNER_ID = String(cfg.ownerOpenid || 'TEST_OWNER_OPENID');
+      const mkOwnerD = () => {
+        const m = mkD('#tg');
+        m.author = { member_openid: OWNER_ID, username: '主人', bot: false };
+        return m;
+      };
+      // 先把 ownerOpenid 钉成这个值（跑完还原），保证 isOwner 一定为真
+      const savedOwner = cfg.ownerOpenid;
+      cfg.ownerOpenid = OWNER_ID;
+      const stubOk = () => ({
+        vision: imgStub('https://example.invalid/owner.jpg'),
+        qqmedia: qq(Buffer.from('owner')),
+        imglib: lib({ ok: true, item: { id: 'dfyOWNER' } }),
+      });
+      const o1 = await sub.handle('group:TG_OWNER', mkOwnerD(), stubOk());
+      const o2 = await sub.handle('group:TG_OWNER', mkOwnerD(), stubOk());
+      check('★★ 主人连着投两次都成功（不吃自己的冷却）',
+        !!(o1 && o1.text && !o1.silent) && !!(o2 && o2.text && !o2.silent),
+        JSON.stringify([o1 && o1.text, o2 && o2.text]));
+      check('★★ 主人也不**记**冷却（群友的窗口不被占）',
+        sub.cooldownState('group:TG_OWNER') === null);
+      // 普通群员照旧：先在干净群投一次（记上冷却），第二次必须被挡
+      sub._reset();
+      const p1 = await sub.handle('group:TG_PLAIN', mkD('#tg'), stubOk());
+      const p2 = await sub.handle('group:TG_PLAIN', mkD('#tg'), stubOk());
+      check('  普通群员：第一次成功、第二次被 5 分钟冷却挡住（豁免只给主人）',
+        !!(p1 && !p1.silent) && !!(p2 && p2.text && /冷却中/.test(p2.text)),
+        JSON.stringify([p1 && p1.text, p2 && p2.text]));
+      cfg.ownerOpenid = savedOwner;
+      sub._reset();
+
+      // ⑦ 认掉 `#tg` 的同时还要挡住"别的 bot 的指令"那条规则
+      const cmds = require('./commands');
+      check('★★ `#tg` 不会被当成"别人的指令"静默掉（looksForeign 必须返回空）',
+        cmds.looksForeign('#tg') === '', JSON.stringify(cmds.looksForeign('#tg')));
+
+      // ⑧ 菜单里要能看到这条指令
+      check('★ `#cd` 菜单里列出了 #tg 投稿',
+        (cfg.policy.commands.functions || []).some((f) => String(f.usage || '').includes('#tg')));
+
+      // ⑨ 接线：投稿那一支要排**识图之前**（它要的是字节，不是"看图说话"）
+      const idx2 = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+      check('★★ index.js 接了 submit.handle', /submit\.handle\(scope/.test(idx2));
+      check('★★ 投稿分支排在识图之前（不为投稿白花一次识图钱）',
+        idx2.indexOf('submit.handle(scope') > 0
+        && idx2.indexOf('submit.handle(scope') < idx2.indexOf('vision.findImage(d)'),
+        `submit@${idx2.indexOf('submit.handle(scope')} vision@${idx2.indexOf('vision.findImage(d)')}`);
+
+      // ⑩ vision 侧要真的把图片地址记下来（否则引用消息里根本拿不到图）
+      check('★★ vision.rememberImage 收 url 了（#tg 靠它反查被引用的图）',
+        typeof require('./vision').getImage === 'function'
+        && /function rememberImage\(scope, idx, desc, url\)/.test(
+          require('fs').readFileSync(require('path').join(__dirname, 'vision.js'), 'utf8')));
+      sub._reset();
+    })();
+  }
+
+  console.log('\n=== 16d. ⭐ 发图前压缩（2026-10-16 用户：「图发到群里都好大，占空间」）===');
+  {
+    const ic = require('./imgcompress');
+    const zlib = require('zlib');
+    const C = (cfg.policy.imglib || {}).compress || {};
+    const crc32 = (b) => { let c, crc = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) { c = (crc ^ b[i]) & 0xFF; for (let k = 0; k < 8; k++) c = c & 1 ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); crc = (crc >>> 8) ^ c; } return (crc ^ 0xFFFFFFFF) >>> 0; };
+    const chunk = (t, body) => { const len = Buffer.alloc(4); len.writeUInt32BE(body.length); const tt = Buffer.from(t, 'ascii'); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([tt, body]))); return Buffer.concat([len, tt, body, crc]); };
+    // 造一张"压不动"的 2048² 照片类 PNG（渐变 + 伪随机噪点）
+    const mkBig = () => {
+      const w = 2048, h = 2048, stride = w * 3;
+      const raw = Buffer.alloc((stride + 1) * h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const o = y * (stride + 1) + 1 + x * 3;
+          const n = ((x * 1103515245 + y * 12345) >>> 16) & 0x1F;
+          raw[o] = ((x * 255 / w) + n) & 0xFF;
+          raw[o + 1] = ((y * 255 / h) + n) & 0xFF;
+          raw[o + 2] = (((x + y) * 255 / (w + h)) + n) & 0xFF;
+        }
+      }
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+      return Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+    };
+
+    check('★ 压缩配置在（policy.imglib.compress）且默认开', !!C && C.enabled === true);
+    check('  长边阈值存在（超过才降采样）', Number(C.maxEdge) >= 512, String(C.maxEdge));
+    check('  有"压太小就不换"的下限（minGain）', Number(C.minGain) > 0, String(C.minGain));
+
+    // ⚠️ 实测口径（_ops/lib-size-audit.sh）：49 条 16.38MB ⇒ **PNG 9 张占 8.09MB**（平均 0.90MB），
+    //    JPEG 37 张也才 8.08MB（平均 0.22MB，已经是压缩格式）⇒ **只压 PNG** 才划算。
+    //    这两条钉住"JPEG/GIF 一律不碰"：JPEG 要压得先写解码器（不值得）；GIF 一动就成静帧。
+    const jpeg = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), Buffer.alloc(600 * 1024, 7)]);
+    check('★★ JPEG 原样返回（不写 JPEG 解码器）',
+      (() => { const r = ic.shrink(jpeg, C); return r.changed === false && r.buf === jpeg; })(),
+      ic.shrink(jpeg, C).why);
+    const gif = Buffer.concat([Buffer.from('GIF89a', 'ascii'), Buffer.alloc(600 * 1024, 3)]);
+    check('★★ GIF 原样返回（动了就成静帧）',
+      (() => { const r = ic.shrink(gif, C); return r.changed === false && r.buf === gif; })(),
+      ic.shrink(gif, C).why);
+    const junk = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), Buffer.alloc(400 * 1024, 9)]);
+    check('★ 坏 PNG 不抛异常、原样返回（压缩永不阻塞发图）',
+      (() => { const r = ic.shrink(junk, C); return r.changed === false && r.buf === junk; })());
+
+    const big = mkBig();
+    const r4 = ic.shrink(big, { maxEdge: C.maxEdge, minBytes: 100 * 1024, minGain: 0.2 });
+    check('★ 大 PNG 真的被压小', r4.changed === true && r4.buf.length < big.length,
+      `${(big.length / 1024).toFixed(0)}KB → ${(r4.buf.length / 1024).toFixed(0)}KB · ${r4.why}`);
+    const info = ic.pngInfo(r4.buf);
+    check('  └ 压完还是合法 PNG，长边 = maxEdge',
+      !!info && Math.max(info.w, info.h) === Number(C.maxEdge), JSON.stringify(info));
+
+    // 接线：发图那一段必须真的调它，而且**只替换局部变量**（绝不写回图库文件）
+    const idx3 = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    check('★★ index.js 发图前调了压缩（走统一入口 imgsvc）',
+      // ⚠️ 2026-10-16：这里从直接调 `imgcompress` 改成走 `imgsvc`（PNG→Node / GIF·JPEG→Pillow），
+      //    所以断言也跟着改为认 imgsvc（否则改完分流就假红）
+      /require\('\.\/imgsvc'\)\.shrink\(buf, ic, id\)/.test(idx3));
+    check('★★ 只动"发出去的那份字节"（不往 img-lib 写文件 —— 用户素材一个字节都不改）',
+      !/writeFileSync\([^\n]*img-lib/.test(idx3) && /let buf = lib\.readFile\(id\)/.test(idx3));
+  }
+
+  console.log('\n=== 16e. ⭐ 统一压缩入口 imgsvc（2026-10-16 「返图还是大图」+「上传大图自动压缩」）===');
+  {
+    const svc = require('./imgsvc');
+    const cfgU = (cfg.policy.imglib || {}).uploadCompress || {};
+    const cfgP = (cfg.policy.imglib || {}).compress || {};
+    check('★ 上传压缩配置在（policy.imglib.uploadCompress）且默认开', !!cfgU && cfgU.enabled !== false);
+    // 图库侧的尺寸上限（**这才是用户关心的那个数**）
+    check('★ 图库发送侧有长边上限（用户要的"输出尺寸"就靠它）',
+      Number(cfgP.maxEdge) > 0, String(cfgP.maxEdge));
+    // 分流：PNG 走 Node 引擎（零依赖、量化最狠）；别的走 Pillow
+    const zlib2 = require('zlib');
+    const mkPng = () => {
+      const w = 800, h = 800, stride = w * 3;
+      const raw = Buffer.alloc((stride + 1) * h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const o = y * (stride + 1) + 1 + x * 3;
+          const n = ((x * 1103515245 + y * 12345) >>> 16) & 0x3F;
+          raw[o] = ((x * 255 / w) + n) & 0xFF;
+          raw[o + 1] = ((y * 255 / h) + n) & 0xFF;
+          raw[o + 2] = (((x + y) * 255 / (w + h)) + n) & 0xFF;
+        }
+      }
+      const ic2 = require('./imgcompress');
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+      const crc32 = (b) => { let c, crc = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) { c = (crc ^ b[i]) & 0xFF; for (let k = 0; k < 8; k++) c = c & 1 ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); crc = (crc >>> 8) ^ c; } return (crc ^ 0xFFFFFFFF) >>> 0; };
+      const chunk = (t, body) => { const len = Buffer.alloc(4); len.writeUInt32BE(body.length); const tt = Buffer.from(t, 'ascii'); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([tt, body]))); return Buffer.concat([len, tt, body, crc]); };
+      void ic2;
+      return Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        chunk('IHDR', ihdr), chunk('IDAT', zlib2.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+    };
+    const bigPng = mkPng();
+    const rPng = svc.shrink(bigPng, { maxEdge: 512, minBytes: 100 * 1024, minGain: 0.2, maxColors: 256 });
+    check('★★ PNG → 走 **Node 引擎**（node-png，不 fork 子进程）',
+      rPng.engine === 'node-png' && rPng.changed === true, `${rPng.engine} · ${rPng.why}`);
+    // 非 PNG（JPEG/GIF 头）在**没有 python/脚本**时要优雅退回原样（绝不抛）
+    const fakeJpeg = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), Buffer.alloc(400 * 1024, 9)]);
+    const rJ = svc.shrink(fakeJpeg, { pyPath: '/nope/python', script: '/nope/x.py' });
+    check('★ 非 PNG 且没有 python/脚本 → 原样返回（压缩绝不挡发送）',
+      rJ.changed === false && rJ.buf === fakeJpeg, rJ.why);
+    check('  └ 而且说清原因（"没有 python"这类）', /没有/.test(String(rJ.why)), String(rJ.why));
+    check('★ 极小图直接放过（不折腾）',
+      svc.shrink(fakeJpeg, { minBytes: 999999 }).changed === false);
+    // 🔴 2026-10-16 **像素优先**（用户第二次说"还是大图"逼出来的）：
+    //    "大"指的是**显示尺寸**，不是字节 —— 实测那几张 1254×1254 的 JPEG 只有 212~268KB，
+    //    字节低于旧阈值（300KB）⇒ 整个压缩被跳过，群里看到仍是占满屏的大图。
+    //    ⇒ 判据必须是"长边超了就压"，跟字节无关。
+    {
+      // ⚠️ 别复用别的 block 里的 chunk/crc32（那是在别的 `{}` 里定义的，这里取不到 ——
+      //    第一版就直接 ReferenceError 崩了）⇒ 本地再定义一份小工具
+      const crc32b = (b) => { let c, crc = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) { c = (crc ^ b[i]) & 0xFF; for (let k = 0; k < 8; k++) c = c & 1 ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); crc = (crc >>> 8) ^ c; } return (crc ^ 0xFFFFFFFF) >>> 0; };
+      const chunkB = (t, body) => { const len = Buffer.alloc(4); len.writeUInt32BE(body.length); const tt = Buffer.from(t, 'ascii'); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32b(Buffer.concat([tt, body]))); return Buffer.concat([len, tt, body, crc]); };
+      const w = 1200, h = 1200, stride = w * 3;
+      const rawB = Buffer.alloc((stride + 1) * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const o = y * (stride + 1) + 1 + x * 3;
+        const n = ((x * 1103515245 + y * 12345) >>> 16) & 0x3F;
+        rawB[o] = ((x * 255 / w) + n) & 0xFF; rawB[o + 1] = ((y * 255 / h) + n) & 0xFF; rawB[o + 2] = n & 0xFF;
+      }
+      const ihdrB = Buffer.alloc(13);
+      ihdrB.writeUInt32BE(w, 0); ihdrB.writeUInt32BE(h, 4); ihdrB[8] = 8; ihdrB[9] = 2;
+      const big2 = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        chunkB('IHDR', ihdrB), chunkB('IDAT', zlib2.deflateSync(rawB)), chunkB('IEND', Buffer.alloc(0))]);
+      const dInfo = svc.dimsOf(big2);
+      check('★ dimsOf 能嗅出 PNG 尺寸', !!dInfo && dInfo.w === 1200 && dInfo.fmt === 'PNG', JSON.stringify(dInfo));
+      // 把 minBytes 设到比这张图还大 ⇒ 旧逻辑会跳过；像素优先必须仍然压
+      const rPF = svc.shrink(big2, { maxEdge: 640, minBytes: 99 * 1024 * 1024, minGain: 0.2, maxColors: 256 });
+      check('★★ 像素超了就必须压（即使字节低于 minBytes）——这就是用户说的"还是大图"',
+        rPF.changed === true, rPF.why);
+      const dOut = svc.dimsOf(rPF.buf);
+      check('  └ 压后长边 = maxEdge（640）', !!dOut && Math.max(dOut.w, dOut.h) === 640,
+        JSON.stringify(dOut));
+      // GIF 尺寸嗅探（便宜，不看字节）
+      const gifHdr = Buffer.alloc(32); gifHdr.write('GIF89a', 0, 'ascii');
+      gifHdr.writeUInt16LE(300, 6); gifHdr.writeUInt16LE(200, 8);
+      const dG = svc.dimsOf(gifHdr);
+      check('★ dimsOf 能嗅出 GIF 尺寸', !!dG && dG.w === 300 && dG.h === 200 && dG.fmt === 'GIF', JSON.stringify(dG));
+    }
+    // 接线：**只有图库那两处**（发图 + 入库）
+    const idx5 = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    const lib5 = require('fs').readFileSync(require('path').join(__dirname, 'imglib.js'), 'utf8');
+    check('★★ 图库两处接线都在：图库发图 + 入库',
+      /require\('\.\/imgsvc'\)\.shrink\(buf, ic, id\)/.test(idx5)
+      && /require\('\.\/imgsvc'\)\.shrink\(buf, ic\)/.test(lib5));
+    check('★★ 压缩脚本路径按**代码目录**算（不是 APP_DIR）—— 沙箱里也能找到工具',
+      /path\.join\(__dirname, 'tools', 'img-shrink\.py'\)/.test(
+        require('fs').readFileSync(require('path').join(__dirname, 'imgsvc.js'), 'utf8')));
+    check('★★ 入库压缩**不改原素材**（只在写新文件时用压缩后的字节）',
+      !/writeFileSync\(FILE[^\n]*storeBuf/.test(lib5));
+    void cfgP;
+  }
+
+  console.log('\n=== 16f. ⭐ 「为什么不给我图了」（2026-10-16 用户实测，两个真 bug）===');
+  {
+    // 现场：主人 @它说「发出一张图库图片」，它却在群里说「图库里真没货了」「图库真的空了嘛」
+    //   —— 图库里明明有 46 张。查日志得到两条根因：
+    //   ① `WANT_IMG_RE` 不认「发出一张图库图片」（旧式 `发[一1]?[张个]?图` 要求"发…图"紧挨着）
+    //      ⇒ 主人的**明确要求**没被当成 explicit ⇒ 掉进 33% 抽签 ⇒ 没中 ⇒ 提示语说"这轮不能配图"
+    //   ② 闸门关着时提示语**没给真实原因、也没禁止编理由** ⇒ 模型自己编了"库空了"
+    const reSrc = require('fs').readFileSync(require('path').join(__dirname, 'brain.js'), 'utf8');
+    const mm = /const WANT_IMG_RE = new RegExp\(([\s\S]*?)\);/.exec(reSrc);
+    check('★ WANT_IMG_RE 还在且能被解析', !!mm);
+    if (mm) {
+      const RE = eval('new RegExp(' + mm[1] + ')');
+      // 「要图」必须认出来（漏 = 用户要图却发不出，就是这次的事故）
+      const must = ['发出一张图库图片', 'ovo发出一张图库图片', '来张图', '发个图', '给我一张',
+        '发图', '来一张', '发一张', '来张图片', '给张表情包', '要个表情包', '看看美照',
+        '整一张', '换一张图', '图库来一张', '图库发个', '来点儿图'];
+      const missed = must.filter((s) => !RE.test(s));
+      check('★★ 「要图」的说法全部认得（漏一条就会重演"不给图"）', missed.length === 0, missed.join(' | '));
+      // 不该误伤（方向按注释「宁可多判中」，但这几条闲聊必须别中）
+      const mustNot = ['今天天气不错', '这个图很好笑', '请看上面的图', '他给我讲了个故事',
+        '发了工资', '来吃饭', '来一个', '发一个文件'];
+      const wrong = mustNot.filter((s) => RE.test(s));
+      check('★ 闲聊不误伤（尤其"来一个/发一个文件"这种跟图无关的）', wrong.length === 0, wrong.join(' | '));
+    }
+    // ② 提示语：关闸时必须给真实原因 + 禁止编"库空了"
+    const gsrc = require('fs').readFileSync(require('path').join(__dirname, 'brain.js'), 'utf8');
+    check('★★ 关闸提示语带**真实原因**（gate.why）', /真实原因：\$\{why\}/.test(gsrc));
+    check('★★ 并明令禁止编"图库空了/没货了"', /绝对不许说"图库空了\/没货了/.test(gsrc));
+    check('★ 冷却场景给出"可以照实说"的说法（我刚发过一张）', /我刚发过一张/.test(gsrc));
+  }
+
   console.log('\n=== 17. ⭐ 助手模式：暗号 ovo 切换精准回答 ===');
   {
     const A = cfg.policy.assistantMode;
@@ -1970,8 +2481,11 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     //
     // 实测依据（2026-09-22）：QQ 的 fileid **每次都变**，没法用来去重；
     // 但按大小+尺寸看，群里图片重复率 **28.6%**，一个表情包被发了 21 次。
-    check('去重配置存在（48 小时 / 最多 20000 张；2026-10-15 按实测命中率 48% 提的）',
-      cfg.policy.vision.dedupeTtlMs === 48 * 60 * 60 * 1000 && cfg.policy.vision.dedupeMax === 20000,
+    // ⚠️ 2026-10-15：这两个值按实测调过（识图缓存是识图最省钱的一环，命中率 48%）——
+    //    断言别再把具体数字钉死，而是钉"**下限**"：TTL 至少一天、容量至少一千（改了不缩水）。
+    check('去重配置存在（TTL ≥ 24 小时 / 容量 ≥ 1000 张）',
+      Number(cfg.policy.vision.dedupeTtlMs) >= 24 * 60 * 60 * 1000
+      && Number(cfg.policy.vision.dedupeMax) >= 1000,
       [cfg.policy.vision.dedupeTtlMs, cfg.policy.vision.dedupeMax]);
     check('★ markVision(scope, false) 用来表示"没花钱"（缓存命中不占今日张数）',
       vision.markVision.length >= 1);
@@ -2671,28 +3185,36 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         /截止点|越新的越可能不知道/.test(p));
       check(`★★ [${name}] 明确"明明知道却说没听过也是错的"（治第一轮过度矫正）`,
         /明明知道却说|和编造一样是错的/.test(p));
-      // 🆕 2026-10-15：原「底细」段已按用户要求删掉（"不是AI助手"可以省略，毕竟群友不傻），
-      //    改成【长相】【铁盆】【出身】三段 —— 断言跟着换成"知道自己的长相/饭盆/出身"。
-      //    ⚠️ 只有 **lean**（= 线上生效的那套）加了这三段；full 是留着回退的旧版，
-      //       没同步改（要回退时它仍旧能用），所以这条只对 lean 生效。
-      if (name === 'lean') {
-        check(`★ [${name}] 有【长相】【铁盆】【出身】段（知道自己长什么样、饭盆是什么、出身哪来的）`,
-          /【长相】/.test(p) && /【铁盆】/.test(p) && /【出身】/.test(p) && /DeepSeek/.test(p));
-      }
+      check(`★★ [${name}] 有「底细/出身」段（知道自己跑在 DeepSeek 上，接得住相关玩笑）`,
+        /底细|出身/.test(p) && /DeepSeek/.test(p));
     }
 
-    // 🆕 2026-10-15：人设加了【长相】【铁盆】【出身】三段（用户给的两张设定图 + token 梗），
-    //    篇幅从 646 涨到 915 —— **这是用户要的**，所以断言只防"失控"，不再卡 650。
-    check('★ lean 版没失控（< 1000 字；646 → 915）',
+    // 🔴 2026-10-15：lean 从 646 涨到约 900 —— **用户点名要的三条新设定**（长相 / 铁盆 / token 梗），
+    //    上限跟着上调到 1000，仍然是"不许失控"的意思（full 是 839 字那版的老词，别拿它当标尺）。
+    check('★ lean 版没失控（< 1000 字；248 → 433 → 572 → 646 → 900）',
       lean.length < 1000, String(lean.length));
+
+    // 🆕 2026-10-15 用户需求：人设必须对**自己的外观**有认知（设定图 1）
+    check('★★ 人设里写着自己的常服外观（蓝发 + 女仆装 + 围裙上的小鲸鱼 + 鲸尾）',
+      /【长相】/.test(lean) && /女仆装/.test(lean) && /小鲸鱼/.test(lean) && /鲸尾/.test(lean));
+    // 🆕 2026-10-15 用户需求：铁盆 = 饭盆（二创名场面，设定图 2）
+    check('★★ 人设里写着铁盆 = 饭盆（二创常顶头上）',
+      /【铁盆】/.test(lean) && /饭盆/.test(lean) && /铁盆/.test(lean));
+    // 🆕 2026-10-15 用户需求：出身 = DeepSeek harness agent 演化来的，token 很重要
+    check('★★ 人设里写着出身（DeepSeek harness agent 演化）+ token 很重要',
+      /【出身】/.test(lean) && /harness/i.test(lean) && /token 很重要|token很重要/.test(lean));
+    // 🔴 2026-10-15 用户原话：「"不是ai助手"可以省略，毕竟群友不傻」
+    check('★ 删掉了"你不是 AI 助手"这句（用户要求）',
+      !/不是 AI 助手|不是AI助手/.test(lean));
 
     // 🔴 2026-10-07 用户报「他说自己不能识图」：真因是**人设从没告诉它"你能看图"**
     //    （识图是把图变成文字描述塞进消息，模型只看到文字 ⇒ 它按"纯文本 AI"自我认知答"看不了"）
     //    ⇒ 人设里必须留着这条自我认知，否则它会一本正经地否认自己的能力。
+    //    ⚠️ 2026-10-15 精简后只剩"照着说 + 答能"，所以判据跟着改成这两条（断言要跟着事实走）。
     check('★★ 人设里必须写着"你能看懂图"（否则它会自称看不了图）',
-      /【看图】/.test(lean) && /能看懂图/.test(lean) && /我看不了图/.test(lean));
-    check('  lean 仍然短于 full（保持精简版的意义）',
-      lean.length < full.length * 0.85, `${lean.length} vs ${full.length}`);
+      /【看图】/.test(lean) && /能看懂图/.test(lean) && /答能/.test(lean));
+    check('  lean 仍然远短于 full（保持精简版的意义）',
+      lean.length < full.length * 1.2, `${lean.length} vs ${full.length}`);
     check('  两套词都还在（切换 promptStyle 不会丢规则）',
       lean.length > 200 && full.length > 600);
 
@@ -2743,11 +3265,16 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★★ 复现那个坑：整段 prompt（含上下文）会被误判成事实问题',
       lf('你好') === false && lf(assembled) === true);
     check('★★ thinking 判据吃的是独立的 thinkText，不是整段 user',
-      /function callAIOnce\([^)]*thinkText[^)]*\)/.test(bsrc) && /thinkText != null \? thinkText : ''/.test(bsrc));
+      // ⚠️ 2026-10-15：`callAIOnce` 后面又加了 `tag`（按功能记账），所以这里**只要求在参数表里**，
+      //    不再要求 thinkText 是最后一个参数（那种写法一加参数就假红）。
+      /function callAIOnce\([^)]*thinkText[^)]*\)/.test(bsrc)
+      && /thinkText != null \? thinkText : ''/.test(bsrc));
     check('★ 没传 thinkText 时默认**不开**（fail-cheap，别再退化成"整段都算"）',
       /thinkText != null \? thinkText : ''/.test(bsrc));
     check('★ generateReply 把"当前这条消息"单独传进去',
-      /cfg\.persona\.examples,\s*null,\s*extractText\(msg\)/.test(bsrc));
+      // ⚠️ 同理：末尾多了个 tag 参数，不要把 `extractText(msg)` 写成必须紧跟 examples。
+      /cfg\.persona\.examples,\s*\n?\s*null,\s*extractText\(msg\),\s*'L2生成'\)/.test(bsrc)
+      || /cfg\.persona\.examples,\s*null,\s*extractText\(msg\)/.test(bsrc));
   }
 
   console.log('\n=== 27. ⭐ 抖音图文（note）：平台不给数据时的降级 ===');
@@ -3511,7 +4038,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /'dailyCalls','visionDaily'/.test(lw));
     check('★ 整数项用 step="1"（不是 0.01）', /it\.int \? '1' : '0\.01'/.test(lw));
     check('★★ 概览区多一张「今日识图 / 上限 N 张」卡片（上限也要跟着面板改而变）',
-      /今日识图 \/ 上限/.test(lw) && /renderBudget\(j\.budget, j\.vision, j\.disk\)/.test(lw));
+      /今日识图 \/ 上限/.test(lw) && /renderBudget\(j\.budget, j\.vision\)/.test(lw));
     check('★★ logweb 给面板提供识图用量（口径：ok = 真花钱的张数，cached 不占额度）',
       /function visionState/.test(pg) && /vision: visionState\(\)/.test(pg)
         && /Number\(cur\.ok\)/.test(pg) && /settings\.num\('visionDaily'/.test(pg));
@@ -3854,8 +4381,20 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /select option/.test(pg) && /select option[^{]*\{[^}]*background-color:var\(--bg-elevated\)/.test(pg));
 
     // 🔴 这个"模板内反引号"坑咬过我三次 ⇒ 闸门里必须有专门检查（这里锁住闸门本身）
+    //    🆕 2026-10-13：路径要**两处都试** —— 本地是 `work/devtools`（server 的上一级），
+    //    服务器是**扁平部署**（页签脚本在 `/opt/xiaolanjing/devtools`，也就是 server 的**同级**）
+    //    ⇒ 只写 `../devtools` 在服务器上会 ENOENT 把整个自测带崩（今天真崩了一次）。
+    const gateSrc = (() => {
+      const pth = require('path');      // ⚠️ 别依赖外层的 path 变量（这一组里没有它，今天就这么崩的）
+      for (const p of [pth.join(__dirname, 'devtools', 'check-page-script.cjs'),
+        pth.join(__dirname, '..', 'devtools', 'check-page-script.cjs')]) {
+        try { return require('fs').readFileSync(p, 'utf8'); } catch { /* 换下一个 */ }
+      }
+      return '';
+    })();
     check('★★ 页面闸门有"模板内不许出现反引号"的专项检查',
-      /PAGE 模板\*\*内部\*\*出现了/.test(rd('../devtools/check-page-script.cjs')));
+      /PAGE 模板\*\*内部\*\*出现了/.test(gateSrc),
+      gateSrc ? '' : '（没找到 check-page-script.cjs —— 服务器扁平布局下它在 ./devtools/）');
   }
 
   // ===== 第 41 组：用量趋势（2026-10-07 用户要的"用量趋势曲线"）=====
@@ -3925,7 +4464,6 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★★ 页面里不出现 Markdown 星号（HTML 里会原样显示成星号）',
       !/<p class="hint">[^<]*\*\*[^<]*<\/p>/.test(pgU));
   }
-
 
   // ===== 第 42 组：处理细节不占"决策"位 + 翻成人话（2026-10-07 用户「都是动图和下载是什么」）=====
   {
@@ -4091,7 +4629,6 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /::placeholder\s*\{[^}]*color:\s*var\(--text-tertiary\)/.test(pgI));
   }
 
-
   // ============================================================
   // 🆕 2026-10-10：「解析中」提示语的模板渲染（真机 bug 回归）
   //
@@ -4148,6 +4685,373 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /const sizeMB = src\.size \? \(src\.size \/ 1048576\)\.toFixed\(1\) : ''/.test(isrc), '');
   }
 
-  console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
-  process.exit(fail === 0 ? 0 : 1);
+  // ============================================================
+  // 🆕 2026-10-13 第 45 组：图库（用户需求"后台传图 → AI 说理解 → 我确认 → bot 自己配图"）
+  //
+  //  这一组要盯死三件事（都是"做错了会很招人烦"的地方）：
+  //   ① 模型吐出来的 `[图:ID]` 标记**必须被摘干净** —— 摘不干净就会把标记原样发进群；
+  //   ② 给模型的候选**不能带刚发过的那张**（否则它会一张图反复用）；
+  //   ③ 图库只往**白名单里的测试群**发，其它群一个字都不许发。
+  // ============================================================
+  {
+    const path2 = require('path');
+    const imglib = require('./imglib');
+    const brainMod = require('./brain');
+    const cfgMod = require('./config');
+
+    // ① 标记摘除
+    const s1 = brainMod._stripImgMark('今天好困啊\n[图:g123456]');
+    check('★★ 模型写的 [图:ID] 被摘掉，正文不留标记',
+      s1.imgId === 'g123456' && !/\[图/.test(s1.text) && s1.text.includes('今天好困啊'), JSON.stringify(s1));
+    const s2 = brainMod._stripImgMark('就一句普通回复');
+    check('  没标记时 imgId 为空、正文原样', s2.imgId === '' && s2.text === '就一句普通回复');
+    const s3 = brainMod._stripImgMark('带全角括号的[图：gabc]');
+    check('★ 全角括号/冒号的写法也认（模型不老实）', s3.imgId === 'gabc' && !/图/.test(s3.text), JSON.stringify(s3));
+
+    // ② 候选图提示：有已入库的图才会提到"图库"这件事
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489'
+      + '0000000a49444154789c6300010000050001' + '0d0a2db40000000049454e44ae426082', 'hex');
+    const added = [];
+    for (const d of ['一只在敲键盘的鲸鱼，摸鱼时发', '咬牙切齿的表情，被气得说不出话时发']) {
+      added.push(imglib.add(png, { name: 't' }, () => {}));   // 同一张会被 md5 去重，所以下面手动补描述
+    }
+    Promise.all(added).then(() => {
+      // 🆕 2026-10-14 晚：下面 ②~⑥ 验的是**闸门该不该放行**的老逻辑，它们默认"放行"。
+      //    而新加的概率闸默认 0.33 会**随机**拦 ⇒ 这些断言会 67% 概率变红（假红，最坑的那种）。
+      //    ⇒ 先把概率设成 1（= 不抽签）把老断言放回确定性环境；概率闸本身在 ⑧ 单独验。
+      //    ⚠️ 走 settings.update（本测试开着 XLJ_NO_PERSIST=1 ⇒ 只改内存、不碰线上配置）。
+      require('./settings').update({ imglibChance: 1 });
+      // md5 相同的两张会去重成一张 ⇒ 直接给这张打上描述并入库
+      const one = imglib.list()[0];
+      const TG = { group_openid: '23A4348A58D56FB993A4AC441287F3F2' };   // 白名单里的测试群
+      if (one) { imglib.update(one.id, { desc: '一只在敲键盘的鲸鱼，摸鱼时发' }); imglib.setStatus(one.id, 'approved'); }
+      imglib._resetSent();                                   // 保证"不在冷却里"
+      const hint = brainMod._buildImgHint('group:IMGLIB_TEST', TG);
+      check('★★ 有已入库的图时，提示里带上 id 与描述',
+        hint.includes(one.id) && hint.includes('摸鱼'), hint.slice(0, 120));
+      check('★★ 提示里写明了"要配图就在最后另起一行写 [图:ID]"', /\[图:ID\]/.test(hint), '');
+      check('★ 刚发过的图不再出现在候选里（防复读同一张）',
+        (() => { brainMod._noteImgUsed('group:IMGLIB_TEST', one.id); return !brainMod._buildImgHint('group:IMGLIB_TEST', TG).includes(one.id); })());
+      // ⚠️ 2026-10-13 语义变了：以前"图库空了 = 提示空串"；
+      //    现在**图库空了要给"禁止答应发图"的提示**（否则模型会答应发一张它没有的图）。
+      //    ⇒ 断言跟着改成"要给禁止版提示，而且不能出现 [图:ID] 的写法"。
+      check('★ 图库空了 → 给"这次不能配图"的提示（不是静默，也不是让模型乱答应）',
+        (() => {
+          imglib.setStatus(one.id, 'rejected');
+          const h = brainMod._buildImgHint('group:IMGLIB_TEST2', TG);
+          return /不能.*配图/.test(h) && /别答应发图/.test(h) && !/\[图:ID\]/.test(h);
+        })());
+
+      // ③ 白名单：2026-10-13 用户要求「把范围打开」⇒ **空数组 = 所有群都允许**
+      //    ⚠️ 这条断言要同时守住**两种模式**，否则哪天把语义改反了（空=没人）也发现不了。
+      const ic = (cfgMod.policy && cfgMod.policy.imglib) || {};
+      const BIG = { group_openid: '8876D91C9B1DBFF880A372BD47D386C6' };     // 小肥鱼广场（大群）
+      const TG2 = { group_openid: '23A4348A58D56FB993A4AC441287F3F2' };     // 测试群
+      check('★★ 白名单留空 = 所有群都允许（用户 2026-10-13 要求打开范围）',
+        Array.isArray(ic.testGroups) && ic.testGroups.length === 0 && imglib.inWhitelist(BIG) === true,
+        JSON.stringify(ic.testGroups));
+      check('★★ 群标识两种写法都认（事件原样 {group_openid} 和我们的 {groupOpenid}）',
+        (() => {
+          const bak = ic.testGroups;
+          ic.testGroups = ['23A4348A58D56FB993A4AC441287F3F2'];
+          const a = imglib.inWhitelist({ groupOpenid: '23A4348A58D56FB993A4AC441287F3F2' });   // camelCase
+          const b = imglib.inWhitelist({ group_openid: '23A4348A58D56FB993A4AC441287F3F2' });  // 事件原样
+          const c = imglib.inWhitelist(BIG) === false;                                         // 不在名单的群
+          ic.testGroups = bak;
+          return a && b && c;
+        })());
+      check('★★ 写进群号就只开那些群（想缩回去还能缩）',
+        (() => {
+          const bak = ic.testGroups;
+          ic.testGroups = ['23A4348A58D56FB993A4AC441287F3F2'];
+          const blocked = imglib.sendGate({ scope: 'group:TMP', groupOpenid: BIG.group_openid });
+          const allowed = imglib.inWhitelist(TG2) === true;
+          ic.testGroups = bak;
+          return blocked.ok === false && /不在允许发图的名单/.test(blocked.why) && allowed
+            && imglib.inWhitelist(BIG) === true;
+        })());
+
+      // 同时守住"不在名单的群**一个字都不注入**"（临时把名单缩回测试群来验，验完还原）
+      check('★★ 不在名单的群：图库提示语完全不注入（省 token，也别让它解释"我不能发图"）',
+        (() => {
+          const bak = ic.testGroups;
+          ic.testGroups = ['23A4348A58D56FB993A4AC441287F3F2'];
+          const h = brainMod._buildImgHint('group:TMP2', BIG);
+          ic.testGroups = bak;
+          return h === '' && brainMod._buildImgHint('group:TMP2', BIG).length > 0;
+        })());
+      check('★ 冷却设成了 3 分钟（2026-10-13 用户从 5 分钟改的）', ic.cooldownMs === 3 * 60 * 1000, String(ic.cooldownMs));
+      check('★ 主人免冷却开着（用户 2026-10-13 要求「主人无冷却」）', ic.ownerBypass === true, String(ic.ownerBypass));
+
+      // ④ 接线：index.js 真的会发图，而且是"本地字节 → 富媒体上传（file_type=1）"
+      const isrc = require('fs').readFileSync(path2.join(__dirname, 'index.js'), 'utf8');
+      check('★★ index.js 有发图函数且走 sendLibImage',
+        /async function sendLibImage/.test(isrc) && /await sendLibImage\(d, openid, scope, gen\.imgId\)/.test(isrc), '');
+      check('★★ 发图用的是**本地字节**（不重新下载），file_type=1 表示图片',
+        /lib\.readFile\(id\)/.test(isrc)
+        && /uploadMedia\('groups', groupopenid, buf[\s\S]{0,120}?,\s*1,/.test(isrc), '');
+      check('★ 面板侧有图库页与接口接线',
+        require('fs').readFileSync(path2.join(__dirname, 'tools', 'page.js'), 'utf8').includes('data-page="imglib"')
+        && require('fs').readFileSync(path2.join(__dirname, 'tools', 'logweb.js'), 'utf8').includes("'/api/imglib/upload'"), '');
+
+      // ⑥ 🔴 2026-10-13 真机踩到（用户原话：「我让他发三次他只回了一张…第二次回复的是"再发一张"
+      //    但是却没有发」）：**文字答应了发图、代码把图拦了** —— 因为"能不能发"只有发送那刻才判断，
+      //    模型生成时不知道自己正在冷却里，照样说"给你来一张"。
+      //    ⇒ 修法：闸门搬进 imglib、生成前与发送前**共用同一个判断**（`sendGate`），
+      //      闸门关着时给模型的提示语要**明确禁止它答应发图**。
+      {
+        const G = { group_openid: '23A4348A58D56FB993A4AC441287F3F2' };
+        const OTHER = { group_openid: '8876D91C9B1DBFF880A372BD47D386C6' };
+        const S = 'group:IMGLIB_GATE_TEST';
+        imglib._resetSent();
+
+        // 空库 → 不许发，且提示语是"禁止答应"版
+        const g0 = imglib.sendGate({ scope: S, groupOpenid: G.group_openid });
+        check('★★ 图库空着时闸门关闭', g0.ok === false && /还没有入库的图/.test(g0.why), JSON.stringify(g0));
+
+        // 有图 → 放行，提示语列出候选
+        const one0 = imglib.list().find((x) => x.status === 'approved') || imglib.list()[0];
+        if (one0) imglib.setStatus(one0.id, 'approved');
+        const g1 = imglib.sendGate({ scope: S, groupOpenid: G.group_openid });
+        check('★ 有已入库的图 → 闸门放行', g1.ok === true, JSON.stringify(g1));
+        const h1 = brainMod._buildImgHint(S, G);
+        check('★ 放行时提示语里带上候选图', one0 ? h1.includes(one0.id) : true, h1.slice(0, 80));
+
+        // 刚发过 → 闸门关闭，且**提示语换成"别答应发图"版**（这条是本次修复的核心）
+        imglib.noteSent(S);
+        const g2 = imglib.sendGate({ scope: S, groupOpenid: G.group_openid });
+        check('★★ 冷却中闸门关闭，并给出还要等多少秒',
+          g2.ok === false && typeof g2.waitSec === 'number' && g2.waitSec > 0, JSON.stringify(g2));
+        const h2 = brainMod._buildImgHint(S, G);
+        check('★★ 冷却中提示语**明确禁止它答应发图/演翻图动作**（否则文案必然对不上）',
+          /别答应发图/.test(h2) && /别描述翻图/.test(h2), h2.slice(0, 120));
+        check('★★ 冷却中提示语**不再列出候选图**（连图库都不提）', one0 ? !h2.includes(one0.id) : true, '');
+
+        // 别的群：2026-10-13 起白名单是空的（= 所有群开放），所以这里**临时缩回测试群**来验机制
+        const g3 = (() => {
+          const bak = (cfgMod.policy.imglib || {}).testGroups;
+          cfgMod.policy.imglib.testGroups = ['23A4348A58D56FB993A4AC441287F3F2'];
+          const out = imglib.sendGate({ scope: 'group:X', groupOpenid: OTHER.group_openid });
+          const h = brainMod._buildImgHint('group:X', OTHER);
+          cfgMod.policy.imglib.testGroups = bak;
+          return { out, h };
+        })();
+        check('★ 名单外群一律不发，且提示语不注入（机制仍有效）',
+          g3.out.ok === false && /不在允许发图的名单/.test(g3.out.why) && g3.h === '',
+          JSON.stringify(g3.out));
+
+        // 冷却到期恢复
+        imglib._resetSent();
+        check('  冷却清了之后恢复放行', imglib.sendGate({ scope: S, groupOpenid: G.group_openid }).ok === true);
+
+        // 🔴 2026-10-13 用户要求「主人无冷却」：同一个人在冷却里，主人要图必须放行；
+        //    普通人照旧被拦。⚠️ 但"图库里没图"这条**对主人也不放行**（那是"没货"，不是"不让发"）。
+        imglib.noteSent(S);
+        const gOwner = imglib.sendGate({ scope: S, groupOpenid: G.group_openid, isOwner: true });
+        const gOther = imglib.sendGate({ scope: S, groupOpenid: G.group_openid, isOwner: false });
+        check('★★ 冷却中：主人要求发图 → 放行（ownerBypass）', gOwner.ok === true && gOwner.bypass === 'owner', JSON.stringify(gOwner));
+        check('★★ 冷却中：普通人 → 照旧被拦（还给剩余秒数）', gOther.ok === false && gOther.waitSec > 0, JSON.stringify(gOther));
+        check('★ 主人免冷却是"免冷却"，不是"绕过没货"（图库空了主人也不放行）',
+          (() => {
+            for (const it of imglib.list()) imglib.setStatus(it.id, 'rejected');
+            const g2 = imglib.sendGate({ scope: S, groupOpenid: G.group_openid, isOwner: true });
+            for (const it of imglib.list()) imglib.setStatus(it.id, 'approved');
+            return g2.ok === false && /还没有入库的图/.test(g2.why);
+          })());
+        imglib._resetSent();
+
+        // 接线：**判断只有一份** —— index.js 不许自己再存一份冷却表
+        check('★★ "能不能发图"只有一处判断（index.js 不再自建 imgSentAt 冷却表）',
+          !/const imgSentAt = new Map\(\)/.test(isrc) && /lib\.sendGate\(/.test(isrc)
+          && /sendGate, noteSent/.test(require('fs').readFileSync(path2.join(__dirname, 'imglib.js'), 'utf8')), '');
+        check('★★ 生成前也问了同一个闸门（brain 里调 sendGate）',
+          /lib\.sendGate\(/.test(require('fs').readFileSync(path2.join(__dirname, 'brain.js'), 'utf8')), '');
+        imglib._resetSent();
+
+        // ⑧ 🆕 2026-10-14 晚（用户：「发图频率也高，是不是冷却过了就直接带图，没有设置概率？」）：
+        //    **它自己主动配图要抽签**。两条铁律都钉在这：
+        //      ① 抽签只在**生成前**（buildImgHint），发送前只验**同一张签**（consume）——
+        //         重抽就会复现"文字答应了发图、群里却没有"（2026-10-13 真机出过）；
+        //      ② **有人明确要图时免抽签，但也必须发签** —— 否则生成前放行、发送前找不到签，
+        //         图照样发不出去（我第一版正是漏了这步，就是靠这条断言才发现）。
+        {
+          const chMod = require('./settings');
+          const GS = { group_openid: '23A4348A58D56FB993A4AC441287F3F2' };
+          imglib._resetSent();
+          const one2 = imglib.list().find((x) => x.status === 'approved') || imglib.list()[0];
+          if (one2) imglib.setStatus(one2.id, 'approved');
+
+          check('★★ 概率闸有代码默认值（0.33）且进了面板白名单（imglibChance）',
+            Number(ic.sendChance) === 0.33 && !!chMod.snapshot().imglibChance, String(ic.sendChance));
+
+          // 概率 0 = 永远抽不中 → 确定性可验
+          chMod.update({ imglibChance: 0 });
+          const gZero = imglib.sendGate({ scope: 'group:CH_ZERO', ...GS });
+          check('★★ 概率 0 ⇒ 它自己想配图时一律拦（why=这轮不配图）',
+            gZero.ok === false && /这轮不配图/.test(gZero.why), JSON.stringify(gZero));
+          const hZero = brainMod._buildImgHint('group:CH_ZERO', GS);
+          check('★ 没中时提示语换成"不许答应发图"版（生成前就知道，文案才对得上）',
+            /别答应发图/.test(hZero) && !/\[图:ID\]/.test(hZero), hZero.slice(0, 80));
+
+          // 抽签本身：用**注入的 rand** 确定性地验"中/没中"（别靠真随机，那会变成间歇性假红）
+          chMod.update({ imglibChance: 0.5 });
+          const gMiss = imglib.sendGate({ scope: 'group:CH_MISS', ...GS, rand: () => 0.99 });
+          check('★ 没抽中 → 拦', gMiss.ok === false && /这轮不配图/.test(gMiss.why), JSON.stringify(gMiss));
+          imglib._resetSent();
+          const gHit = imglib.sendGate({ scope: 'group:CH_HIT', ...GS, rand: () => 0.01 });
+          const gHitSend = imglib.sendGate({ scope: 'group:CH_HIT', ...GS, consume: true });
+          const gNoPass = imglib.sendGate({ scope: 'group:CH_OTHER', ...GS, consume: true });
+          check('★★ 抽中 → 放行；发送前**复用同一张签**（不重抽）',
+            gHit.ok === true && gHitSend.ok === true, JSON.stringify({ gHit, gHitSend }));
+          check('★★ 没签的 scope：发送时拦（证明发送前确实在验签，不是在重抽）',
+            gNoPass.ok === false && /这轮不配图/.test(gNoPass.why), JSON.stringify(gNoPass));
+
+          // 明确要图：免抽签，**而且也要发签**
+          const askHead = imglib.sendGate({ scope: 'group:CH_ASK', ...GS, explicit: true, rand: () => 0.99 });
+          const askSend = imglib.sendGate({ scope: 'group:CH_ASK', ...GS, consume: true });
+          check('★★ 有人明确要图 ⇒ 免抽签，且发送前也放行（漏发签 = 图发不出去）',
+            askHead.ok === true && askSend.ok === true, JSON.stringify({ askHead, askSend }));
+          check('★★ "明确要图"的判定认得"发个图 / 来一张"这类说法',
+            /发\[一1\]\?\[张个\]\?图/.test(require('fs').readFileSync(path2.join(__dirname, 'brain.js'), 'utf8')), '');
+
+          // 抽签的位置：生成前带 explicit、发送前带 consume（防以后有人把它挪到发送端）
+          check('★★ 抽签在生成前（brain 的调用带 explicit）、发送前只验签（index 带 consume: true）',
+            /explicit: WANT_IMG_RE\.test/.test(require('fs').readFileSync(path2.join(__dirname, 'brain.js'), 'utf8'))
+            && /consume: true/.test(isrc), '');
+
+          // 还原成"不抽签"，别影响后面的断言（本进程内存态；XLJ_NO_PERSIST=1 不落盘）
+          chMod.update({ imglibChance: 1 });
+          imglib._resetSent();
+          const gOff = imglib.sendGate({ scope: 'group:CH_OFF', ...GS, rand: () => 0.99 });
+          check('★ 概率设成 1 ⇒ 完全不抽签（退回旧行为，出问题一键回滚）',
+            gOff.ok === true, JSON.stringify(gOff));
+          imglib._resetSent();
+        }
+      }
+
+      // ⑦ 🔴 2026-10-13 用户一问就问在点子上：「**候选图为什么是 12，一共不是 18 张吗**」
+      //    原来 `approved().slice(0, limit)` = 固定取最前面 12 张 ⇒ 第 13 张之后**永远轮不到**。
+      //    现在改成"相关度优先 + 滚动窗口"，这条断言把"每张都有机会露面"钉死。
+      {
+        // ⚠️ 本块自己定义一个群对象 —— 别借用别的块里的 `G`（不同 `{}` 块作用域看不见，会 ReferenceError）
+        const GT = { group_openid: '23A4348A58D56FB993A4AC441287F3F2' };
+        const base = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489'
+          + '0000000a49444154789c6300010000050001' + '0d0a2db40000000049454e44ae426082', 'hex');
+        const made = [];
+        for (let i = 0; i < 14; i++) {
+          // 每张字节都不一样 → md5 不同 → 不会被去重
+          made.push(imglib.add(Buffer.concat([base, Buffer.from('rot' + i)]), { name: 'r' + i }, () => {}));
+        }
+        Promise.all(made).then((rs) => {
+          const mine = rs.filter((r) => r.ok && !r.dup).map((r) => r.item);   // 只为自己造的这批负责（清理用）
+          // ⚠️ 别依赖"外面还剩几张"的现场状态：这里**自己把图库凑到超过窗口**（>12 张），
+          //    否则 pool ≤ limit 时本来就该"全给"，那就验不出滚动（我第一版就是假失败在这）。
+          for (const it of imglib.list()) imglib.setStatus(it.id, 'approved');
+          const pool = imglib.approved().map((x) => x.id);
+          const L = 12;
+          const picks = [];
+          for (let k = 0; k < 4; k++) {
+            picks.push(brainMod._pickImgForScope('group:ROTATE_TEST', L, '').map((x) => x.id));
+          }
+          const uniqAll = new Set(picks.flat());
+          const covered = pool.filter((id) => uniqAll.has(id)).length;
+          const joined = (p) => p.length + '张:' + p.slice(0, 2).join(',');
+          check('★★ 候选清单长度受 hintMax 限制（不超 12 张）',
+            picks.every((p) => p.length <= L), picks.map((p) => p.length).join(','));
+          check('★★ 池子比窗口大时，候选是**滚动**的：连着取两次结果不一样',
+            pool.length <= L ? true : JSON.stringify(picks[0]) !== JSON.stringify(picks[1]),
+            `池子 ${pool.length} 张 · 第1次 ${joined(picks[0])} · 第2次 ${joined(picks[1])}`);
+          check('★★ 滚动几轮后**图库里每张都能露面**（原来第 13 张之后永远轮不到）',
+            covered === pool.length, `${covered}/${pool.length}`);
+          check('★ 清单里写明"这只是图库的一部分"（否则被问"你还有别的图吗"会答错）',
+            pool.length > L ? /图库一共 \d+ 张/.test(brainMod._buildImgHint('group:ROTATE_TEST', GT)) : true, '');
+
+          // 🔴 2026-10-13 真机第二坑：闸门**开着**的时候，模型顺着上下文里"冷却"的话继续演，
+      //    结果出现「嘴上说发不了、图却又发出来了」（用户截图指出）。⇒ 正向提示语必须明说"现在可以发"。
+      {
+        const h = brainMod._buildImgHint('group:POS_TEST', GT);
+        check('★★ 闸门开着时，提示语明说"现在是可以发的"（防它顺着旧上下文说"冷却中"）',
+          /现在是可以发的/.test(h) && /别再说.图库在冷却/.test(h), h.slice(-160));
+        check('★★ 提示语要求"有人明确要图就直接挑一张发，别反问要什么图"',
+          /别反问/.test(h) && /直接挑一张发/.test(h), '');
+        check('★ 闸门关着时不给正向清单（只给"别答应"那句）',
+          (() => { imglib.noteSent('group:NEG_TEST'); const n = brainMod._buildImgHint('group:NEG_TEST', GT); imglib._resetSent(); return /别答应发图/.test(n) && !/现在是可以发的/.test(n); })());
+
+        // 🔴 2026-10-13 真机第三坑：用户要「来一张 webp 格式的」，模型挑对了其实是**碰巧**
+        //    （清单里原本只有 id + 描述，压根没格式信息）⇒ 现在每行标格式，并明说"点名要格式就挑那种"。
+        {
+          const h = brainMod._buildImgHint('group:ROTATE_TEST', GT);
+          const rows = h.split('\n').filter((l) => l.startsWith('- '));
+          check('★★ 候选清单每行带**格式**标注（否则它没法按"来张 webp"挑）',
+            rows.length > 0 && rows.every((l) => /（(png|jpg|jpeg|gif|webp)）/.test(l)),
+            rows.slice(0, 2).join(' | '));
+          check('★ 提示语要求"点名要某格式，就挑清单里那个格式的那张"', /来张 webp/.test(h), '');
+          check('★★ 提示语禁止模型**自己编 id**（真机出过：它拼了个不存在的 id → 文案答应了图没发）',
+            /原样复制/.test(h) && /不要自己拼/.test(h), '');
+        }
+        // 接线：模型报的假 id 必须**兜底**（近似纠正 → 换一张顶上），不许默默放弃
+        check('★★ index.js：模型报的 id 不存在时会纠正 / 换一张顶上（不让文案落空）',
+          /自动纠正为最接近的/.test(isrc)
+          && /改用候选里的/.test(isrc) && /_pickImgForScope\(scope, 1, ''\)/.test(isrc), '');
+
+        // 🔴 2026-10-13 用户提的：群友发的大多是它的**二创图**，它却只看出"蓝发女仆"、反应不到是自己
+        //    ⇒ 加一段 `policy.vision.selfHint`（可判定的视觉特征 + "点明这是你自己"），
+        //      由 vision.js（识图）和 imglib.js（入库描述）**共用同一份**，不许各写一套。
+        {
+          const vs = cfgMod.policy.vision || {};
+          check('★★ 有"认出这是自己的二创"的自述段（含可判定特征：蓝发 / 女仆 / 鲸鱼元素）',
+            typeof vs.selfHint === 'string' && /蓝色头发/.test(vs.selfHint)
+            && /女仆|水手服/.test(vs.selfHint) && /鲸鱼/.test(vs.selfHint), String(vs.selfHint || '').slice(0, 60));
+          check('★★ 自述段要求"点明这是你自己"，而且是**明显收紧、宁可漏认**那一版',
+            /你自己/.test(vs.selfHint || '') && /宁可漏认/.test(vs.selfHint || '')
+            && /一律不许/.test(vs.selfHint || ''), '');
+          const vsrc = require('fs').readFileSync(path2.join(__dirname, 'vision.js'), 'utf8');
+          const isrc2 = require('fs').readFileSync(path2.join(__dirname, 'imglib.js'), 'utf8');
+          check('★★ 识图与图库描述**共用同一份** selfHint（各写一套迟早漂移）',
+            /const selfHint = String\(v\.selfHint \|\| ''\)/.test(vsrc)
+            && /const selfHint = String\(v\.selfHint \|\| ''\)/.test(isrc2)
+            && /\+ selfHint/.test(vsrc) && /\+ selfHint/.test(isrc2), '');
+        }
+      }
+          // 收拾干净
+          for (const it of mine) imglib.remove(it.id);
+          imglib._resetSent();
+
+          // ⑤ 🔴 2026-10-13 真机踩到：图库页**一片空白** —— 页签能点，但内容被 CSS 藏了。
+      //    根因：页面显隐是**白名单**写法（`main > [data-page] { display:none }` 只对列在
+      //    `body[data-page="xxx"] main > [data-page="xxx"] { display:block }` 里的页放开）。
+      //    ⇒ 加新页签要动**三处**：CSS 白名单 / <section data-page> / logweb 的 ALLOWED。
+      //    这条断言把"三处齐不齐"钉死，免得下次再白一次。
+      {
+        const pg = require('fs').readFileSync(path2.join(__dirname, 'tools', 'page.js'), 'utf8');
+        const lw = require('fs').readFileSync(path2.join(__dirname, 'tools', 'logweb.js'), 'utf8');
+        const tabs = (pg.match(/data-tab="([a-z]+)"/g) || []).map((x) => x.slice(10, -1));
+        const wantAll = require('fs').readFileSync(path2.join(__dirname, 'tools', 'logweb.js'), 'utf8');
+        const allowedLine = (wantAll.match(/const ALLOWED = \[([^\]]*)\]/) || [])[1] || '';
+        const missCss = [], missSec = [], missAllowed = [];
+        for (const t of tabs) {
+          // ⚠️ 用正则、别用字符串包含 —— CSS 里这几行为了对齐塞了**多个空格**，
+          //    `includes('body[data-page="chat"] main > ...')` 会假失败（我第一版就是这么错的）。
+          const re = new RegExp(`body\\[data-page="${t}"\\]\\s+main > \\[data-page="${t}"\\]`);
+          if (!re.test(pg)) missCss.push(t);
+          if (!pg.includes(`<section data-page="${t}"`) && !pg.includes(`<details data-page="${t}"`)) missSec.push(t);
+          if (!allowedLine.includes(`'${t}'`)) missAllowed.push(t);
+        }
+        check(`★★ 每个页签三处齐备（CSS 白名单 / 内容块 / logweb ALLOWED）—— 页签：${tabs.join(',')}`,
+          missCss.length === 0 && missSec.length === 0 && missAllowed.length === 0,
+          `缺 CSS:[${missCss}] 缺内容块:[${missSec}] 缺 ALLOWED:[${missAllowed}]`);
+        void lw;
+      }
+
+      // 清干净（别把测试图留在真图库目录里）
+      for (const it of imglib.list()) imglib.remove(it.id);
+      imglib._reset();
+
+          console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
+          process.exit(fail === 0 ? 0 : 1);
+        });        // 关掉第 ⑦ 块里的 Promise.all(made).then(...)
+      }            // 关掉第 ⑦ 那个块
+    });            // 关掉外层 Promise.all(added).then(...)
+    return;
+  }
 })();

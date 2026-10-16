@@ -27,7 +27,18 @@ const path = require('path');
 const cfg = require('./config');
 const brain = require('./brain');
 
-const STATE_DIR = path.join(__dirname, 'data');
+// 🔴 2026-10-16 修一处**契约违反**（是"灌假事件的体检"逼出来的）：
+//    这里原来是 `path.join(__dirname, 'data')` —— **不认 `APP_DIR`**。
+//    线上一时没出问题是因为"碰巧"：power.js 就在 /opt/xiaolanjing 下，而 panels 的单元
+//    设的 `APP_DIR` 也是 /opt/xiaolanjing ⇒ 两边算出同一个文件。
+//    但它违反项目自己定的**数据目录契约**（"所有落盘模块统一 `process.env.APP_DIR || __dirname`"，
+//    settings.js 2026-10-07 就按这条改过），后果是：**想给状态文件做个沙箱都做不到** ——
+//    我的事件回放体检往沙箱写 `on:false`，power.js 却一直读真身那份，
+//    于是"关机时群指令还能用"这个 bug **根本没法用假事件复现**（差点得出错误结论）。
+//    ⚠️ 线上行为零变化：bot 单元不设 APP_DIR（回落 __dirname = 同一个目录）、
+//       logweb 单元设的就是 /opt/xiaolanjing。
+const APP_DIR = process.env.APP_DIR || __dirname;
+const STATE_DIR = path.join(APP_DIR, 'data');
 const STATE_FILE = path.join(STATE_DIR, 'power.json');
 
 let on = true;            // 默认开机（文件不存在 / 读坏了都按开机处理）

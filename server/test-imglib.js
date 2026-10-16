@@ -73,6 +73,26 @@ function gifBytes() { return Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(
   ok('汇总里能看到图库目录（在 data/img-lib）', /img-lib$/.test(st.dir), st.dir);
   ok('汇总数字自洽', st.total === 1 && st.approved === 1 && st.usedTotal === 2, JSON.stringify(st));
 
+  console.log('\n=== 8. 冷却记账 & 主人豁免（2026-10-16 用户：「主人发图不该占用群友冷却」）===');
+  imglib._resetSent();
+  const gA = imglib.sendGate({ scope: 'S1', isOwner: true, explicit: true });
+  ok('主人：闸门放行、且结果里带 ownerFree 标记', gA.ok === true && gA.ownerFree === true, JSON.stringify(gA));
+  imglib.noteSent('S1', { ownerFree: gA.ownerFree });
+  ok('主人发完 → **不占**群冷却（lastSent 仍是 0）', imglib.lastSent('S1') === 0, String(imglib.lastSent('S1')));
+  const gB = imglib.sendGate({ scope: 'S1', isOwner: false, explicit: true });
+  ok('紧跟着群友要图 → 没被主人那次挡住', gB.ok === true, JSON.stringify(gB));
+  imglib.noteSent('S1', { ownerFree: gB.ownerFree });
+  ok('群友发完 → 冷却记上了', imglib.lastSent('S1') > 0);
+  const gC = imglib.sendGate({ scope: 'S1', isOwner: false, explicit: true });
+  ok('接着另一个群友要图 → 被冷却拦住、给剩余秒数', gC.ok === false && gC.waitSec > 0, JSON.stringify(gC));
+  const gD = imglib.sendGate({ scope: 'S1', isOwner: true, explicit: true });
+  ok('主人不受冷却限制', gD.ok === true, JSON.stringify(gD));
+  // 接线检查（调用点原文，别搜会出现在注释里的短词）：index.js 的记账点必须把 ownerFree 传下去
+  const idxTxt = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+  ok('index.js 记账点带上了 ownerFree（调用点原文）',
+    /lib\.noteSent\(scope, \{ ownerFree: gate\.ownerFree \}\)/.test(idxTxt));
+  imglib._resetSent();
+
   console.log(`\n结果：${pass} 通过 / ${fail} 失败（共 ${pass + fail}）`);
   process.exit(fail ? 1 : 0);
 })();

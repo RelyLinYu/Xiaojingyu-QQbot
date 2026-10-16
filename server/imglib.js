@@ -153,15 +153,58 @@ async function describeBuffer(buf, mime, log = () => {}) {
 // ---------- 对外：加一张图（上传 → 待确认）----------
 //
 // 返回 { ok, item } 或 { ok:false, why }；重复的图直接回已存在的那张（不重复存、不再调模型）
+// 🆕 2026-10-15 投稿（#tg）需求：「上传非图片 or 格式不对**不理会**」。
+//    ⇒ 这三类失败是**"你给的不是图"**，属于"格式不对"，不是我们出故障：
+//       ① 不是可识别的图片 ② 空文件 ③ 超过大小上限
+//    给它们打一个 `silent: true` 标（**只加字段、不改 why**）——
+//    面板上传照旧拿 why 显示原因（面板那边不看 silent），而 QQ 侧的 `submit.js`
+//    靠它决定"不回话"。⚠️ 别把"图库满了/写文件失败"也标成 silent：
+//    那两种是**我们这边出故障**，群友必须被告知（否则他以为投成功了，面板里却没有）。
 async function add(buf, opts = {}, log = () => {}) {
-  if (!buf || !buf.length) return { ok: false, why: '空文件' };
+  if (!buf || !buf.length) return { ok: false, silent: true, why: '空文件' };
   if (buf.length > (opts.maxBytes || MAX_BYTES)) {
-    return { ok: false, why: `图太大（${(buf.length / 1048576).toFixed(1)}MB > ${((opts.maxBytes || MAX_BYTES) / 1048576).toFixed(0)}MB）` };
+    return {
+      ok: false,
+      silent: true,
+      why: `图太大（${(buf.length / 1048576).toFixed(1)}MB > ${((opts.maxBytes || MAX_BYTES) / 1048576).toFixed(0)}MB）`,
+    };
   }
   const mime = sniff(buf);
-  if (!mime) return { ok: false, why: '不是可识别的图片（只支持 png / jpg / webp / gif）' };
+  if (!mime) return { ok: false, silent: true, why: '不是可识别的图片（只支持 png / jpg / webp / gif）' };
 
-  const hash = md5(buf);
+  // 🆕 2026-10-16 用户：「要考虑用户上传大图之后**自动压缩成小图**」
+  //    ⇒ **入库时就压**（不是只在发的时候压）：这样磁盘上存的就是小的，
+  //      而且每次发都是小图（发送路径不会再压一遍 —— `imgcompress` 那边有 `minBytes` 兜底）。
+  //    ⚠️ 两条硬约束：
+  //      ① **哈希必须用"压缩前"的字节算**（`md5(buf)`）—— 用压缩后的算会让"同一张图
+  //         两次上传"因为压缩结果不同而被当成两张（去重就废了）；
+  //      ② **GIF 绝不压**（动了就成静帧）；压缩结果**不比原来小就不换**（`imgcompress` 保证）。
+  //    ⚠️ 压缩在**识别之前**做：喂给模型的也是小的（识图一次省一点，且和存的完全一致）。
+  let storeBuf = buf;
+  let compressNote = '';
+  let origBytes = 0;
+  try {
+    const ic = (require('./config').policy.imglib || {}).uploadCompress || {};
+    if (ic.enabled !== false) {
+      // ⚠️ 走 `imgsvc`：PNG 用 Node 引擎（量化最狠）、GIF/JPEG/WebP 用 Pillow
+      //    （GIF **保持动图** —— 缩画布 + 均匀抽帧）。GIF 不排除在外是刻意的：
+      //    用户明确要"上传大图自动压缩成小图"，而 #51 那种 7.6MB 动图正是要治的对象；
+      //    `img-shrink.py` 对 GIF 只做"缩画布 + 抽帧"，不会变成静帧。
+      const r = require('./imgsvc').shrink(buf, ic);
+      if (r.changed) {
+        origBytes = buf.length;
+        storeBuf = r.buf;
+        compressNote = `${r.engine} · ${r.why}`;
+        log(`入库前压缩：${compressNote}`);
+      } else {
+        log(`入库不压缩（${r.why}）`);
+      }
+    }
+  } catch (e) {
+    log(`入库压缩异常（已忽略，存原图）：${e.message || e}`);
+  }
+
+  const hash = md5(buf);              // ← 必须用压缩**前**的字节（见上面 ①）
   const items = read().items.slice();
   if (hash) {
     const dup = items.find((x) => x.hash === hash && x.status !== 'rejected');
@@ -175,10 +218,13 @@ async function add(buf, opts = {}, log = () => {}) {
   }
 
   const id = newId();
-  const filename = id + (EXT[mime] || '.bin');
+  // ⚠️ 压完可能还是同一种格式（PNG-8 也是 .png），但**大小变了**；扩展名按 mime 走，
+  //    mime 用压缩后的真实类型判一次（别沿用压缩前的，万一将来支持转码就错了）
+  const storeMime = sniff(storeBuf) || mime;
+  const filename = id + (EXT[storeMime] || '.bin');
   let desc = '';
   try {
-    const r = await describeBuffer(buf, mime, log);
+    const r = await describeBuffer(storeBuf, storeMime, log);
     desc = r.desc;
   } catch (e) {
     // 识别失败**不拦**：先存进来、把原因记下，用户在页面上能看到、也能自己补描述
@@ -188,23 +234,28 @@ async function add(buf, opts = {}, log = () => {}) {
 
   const at = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const item = {
-    id, filename, mime, bytes: buf.length, hash,
+    id, filename, mime: storeMime, bytes: storeBuf.length, hash,
     desc, name: String(opts.name || '').slice(0, 40),
     status: 'pending',                 // pending=等确认 / approved=已入库 / rejected=弃用
     createdAt: at, updatedAt: at,
     used: 0, lastUsedAt: '',
+    // 🆕 留痕：被压过就记下原来多大、压完多大（面板/排查能看出"这张进库时被压了"）
+    ...(origBytes ? { origBytes, compressNote } : {}),
   };
 
   if (process.env.XLJ_NO_PERSIST !== '1') {
     ensureDir();
-    try { fs.writeFileSync(path.join(DIR, filename), buf); } catch (e) {
+    try { fs.writeFileSync(path.join(DIR, filename), storeBuf); } catch (e) {
       return { ok: false, why: '写文件失败：' + e.message };
     }
   }
   items.push(item);
   const w = write(items);
   if (w.ok === false) return { ok: false, why: '写索引失败：' + w.why };
-  log(`已存下 ${filename}（${(buf.length / 1024).toFixed(0)}KB）· 状态=待确认`);
+  // ⚠️ 这里必须打 `storeBuf.length`（压缩**后**的字节）—— 第一版打的是入参 `buf`，
+  //    于是日志显示"已存下 xxx.png（2210KB）"而盘上其实只有 138KB（自己骗自己）
+  log(`已存下 ${filename}（${(storeBuf.length / 1024).toFixed(0)}KB`
+    + `${origBytes ? ` · 原 ${(origBytes / 1024).toFixed(0)}KB` : ''}）· 状态=待确认`);
   return { ok: true, item };
 }
 
@@ -399,7 +450,9 @@ function sendGate({ scope, groupOpenid, groupId, isOwner, group_openid, group_id
       else return { ok: false, why: '这轮不配图', drawn: 'miss' };
     }
   }
-  return { ok: true, why: '', bypass: ownerFree ? 'owner' : undefined };
+  // ⚠️ `ownerFree` 一起返回：调用方（index.js）记账时要靠它决定"要不要占群冷却"，
+  //    判定只能有这一处，别让调用方自己再算一遍 `isOwner && ownerBypass`（会算歪）。
+  return { ok: true, why: '', ownerFree, bypass: ownerFree ? 'owner' : undefined };
 }
 
 // 生效的发图概率（**每次现取**，别在启动时读进内存 —— 面板改完要立即生效）。
@@ -415,7 +468,16 @@ function sendChance() {
   return Math.min(1, Math.max(0, v));
 }
 
-function noteSent(scope) { lastSentAt.set(scope, Date.now()); }
+// 冷却记账。
+// 🔴 2026-10-16 用户：「发图库的冷却，把主人占用扔出去，不然主人无限制发图还占用群友冷却」
+//    ⇒ 与图库投稿冷却**同一语义**：主人**既不拦也不记** —— 免冷却的人不该消耗群里的
+//      180 秒窗口（主人连发几张，群友那条路就一直是"刚发过一张，还要等 N 秒"）。
+//    `opts.ownerFree` 直接取 `sendGate()` 返回值里的那个（判定只有一处）。
+function noteSent(scope, opts) {
+  if (opts && opts.ownerFree) return false;
+  lastSentAt.set(scope, Date.now());
+  return true;
+}
 function lastSent(scope) { return lastSentAt.get(scope) || 0; }
 
 module.exports = {

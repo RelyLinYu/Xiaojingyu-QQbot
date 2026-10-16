@@ -17,8 +17,9 @@ const budget = require('./budget');   // 只为"没钱了"的节流（shouldAnno
 const qqmedia = require('./qqmedia');
 const emotion = require('./emotion');   // 🆕 情绪观察器（只观察、不注入，见 config.policy.emotionObserve）
 const memory = require('./memory');     // 🆕 记忆（全群共享便签本，见 config.policy.memory）
-const commands = require('./commands'); // 🆕 群内指令（/菜单、加Q+号 —— 0 次模型调用）
+const commands = require('./commands'); // 🆕 群内指令（#cd 菜单 —— 0 次模型调用）
 const repeat = require('./repeat');     // 🆕 连续两条一样的消息 → 复读（0 次模型调用，见 repeat.js）
+const submit = require('./submit');     // 🆕 群友投稿表情包（#tg + 引用一张图 → 进图库待确认，见 submit.js）
 
 // ============================================================
 //  🆕 2026-10-13：**引用消息必须标出"这句话是谁说的"**（用户报的真实 bug）
@@ -178,30 +179,45 @@ async function handleEvent(type, d) {
     return;   // 🛑 处理完就结束，不走下面任何流程
   }
 
-  // 3.7 🆕 群内指令：/菜单 · 加Q+QQ号（2026-10-10）
+  // 3.7 🆕 群内指令：`#cd`（菜单）
   //
-  // 🔴 位置和 power 一样讲究：**必须在"关机"判断之前** ——
-  //    关机了也得能把菜单调出来（否则关了菜单就看不见指令表了，很荒谬）。
-  //    ⇒ 也就是说它**不受开关机影响**。这是刻意的，不是漏了。
+  // 🔴 位置讲究：这段**在"关机"判断之前**，但**受 `policy.commandsWhenOff` 控制**
+  //    （2026-10-16 用户实测发现"关机了指令还能用"，问"开关机范围是不是没设置好"
+  //    ⇒ 把它做成**可配**，默认只留菜单）：
+  //      · `'all'`  = 关机时指令照常（**旧行为**：当初的理由是"关了菜单就看不见指令表了"）
+  //      · `'menu'` = **只留 `#cd` 菜单**（0 成本、0 副作用），别的指令静默 ← 现在默认
+  //      · `'none'` = 关机时一条指令都不理（除开关机命令自己）
+  //    ⚠️ 为什么默认不是 'all'：有的指令是真的**干活**（上游 fetch + 占上行带宽），
+  //       跟"关机就是什么都不做"冲突；而菜单只是拼个串发出去，留着没坏处。
   //
-  // 🔴 用 **markdown（msg_type=2）** 发，不用纯文本 —— 卡片里的"点了就跳"靠的就是
-  //    markdown 链接；纯文本里带 scheme 是死文本。
+  // 🔴 用 **markdown（msg_type=2）** 发文字，用**富媒体（msg_type=7）**发图 ——
+  //    卡片里的"点了就跳"靠的就是 markdown 链接；纯文本里带 scheme 是死文本。
   //
-  // 🔴 全程 0 次模型调用（能不用模型解决的就不用模型）：纯正则命中 → 拼串发出去。
+  // 🔴 全程 0 次模型调用（能不用模型解决的就不用模型）：纯正则命中 → 拼串/取图发出去。
   //    所以它**不花额度**，也就不需要过 budget 闸。
   //
   // ⚠️ 群友不 @ 也想收到 → 得在开放平台后台开「获取群内全部消息」（只有群主能改）。
-  //    没开的话 @它说「/菜单」照样能用。
+  //    没开的话 @它说「#cd」照样能用。
   try {
-    const cmd = d.author?.bot ? null : commands.build(String(d.content || ''), scope);
+    // 🆕 2026-10-16 关机策略闸：**先用纯正则的 `match()` 认出是哪条指令**（不发网络请求），
+    //    再决定"关机时放不放它过去" —— 放行了才调 `build()` 真干活。
+    //    ⚠️ 必须用 `match()` 而不是 `build()` 来做这个判断：`build()` 会真的去干活
+    //       （取图 / 发网络请求），关机时不该白花这个力气。
+    const rawContent = String(d.content || '');
+    const hit = d.author?.bot ? null : await commands.match(rawContent, scope, d, (m) => console.log(`  ├ 📋 ${m}`));
+    if (!power.isOn() && hit && !commands.allowedWhenOff(hit.kind, (cfg.policy.commands || {}).commandsWhenOff)) {
+      console.log(`  ├ ⏻ 已关机：指令【${hit.kind}】按策略 commandsWhenOff=`
+        + `${String((cfg.policy.commands || {}).commandsWhenOff || 'menu')} 忽略（不回）`);
+      return;
+    }
+    const cmd = d.author?.bot ? null
+      : await commands.build(rawContent, scope, d, (m) => console.log(`  ├ 📋 ${m}`));
     if (cmd && cmd.silent) {
       console.log(`  ├ 📋 命中群内指令，但跳过（${cmd.why}）`);
       return;
     }
     if (cmd) {
-      const label = cmd.kind === 'menu' ? '/菜单' : '加Q';
-      console.log(`  ├ 📋 群内指令【${label}】`
-        + `${cmd.num ? ` 号码=${cmd.num}${cmd.bad ? '（❌ 格式不对，回提示）' : ''}` : ''}`);
+      console.log('  ├ 📋 群内指令【#cd 菜单】文字回复');
       const ok = isGroup
         ? await sendGroupMarkdown(openid, cmd.text, d.id)
         : await sendPrivateMarkdown(openid, cmd.text, d.id);
@@ -255,6 +271,33 @@ async function handleEvent(type, d) {
     }
   }
 
+  // 3.9 🆕 2026-10-15 群友**投稿表情包**（`#tg` + 引用一张图）—— 用户需求
+  //
+  // 🔴 位置：**识图之前、链接解析之前**。三条理由：
+  //    · 它要的不是"看图说话"，而是**图片字节**（进图库待确认）⇒ 不该先花一次识图钱；
+  //    · `#tg` 是**我们自己**的指令，必须赶在 `commands.looksForeign()` 之前认掉
+  //      （否则"井号开头的英文指令"那条规则会把它当别家 bot 的指令静默掉）；
+  //    · 它自己的冷却/入库逻辑都在 `submit.js`，这里只负责"发那句话"。
+  //
+  // ⚠️ 三种返回，别搞混：
+  //    · `null`        → 不是 `#tg`，原样往下走；
+  //    · `{silent:true}`→ 是 `#tg` 但**格式不对 / 下载失败** ⇒ 一个字都不回（用户明确要求）；
+  //    · `{text}`      → 要回一句（投稿成功 / 重复 / 冷却中 剩余 N 分钟 / 我们这边存不下）。
+  if (isGroup && !d.author?.bot && submit.isCommand(String(d.content || ''))) {
+    try {
+      const r = await submit.handle(scope, d, { log: (m) => console.log(`  ├ 📥 ${m}`) });
+      if (r && r.text) {
+        const ok = await sendGroupMessage(openid, r.text, d.id);
+        console.log(`  └ 📥 ${ok ? '✓ 已回复' : '✗ 回复失败'}：${r.text}`);
+      } else {
+        console.log(`  └ 📥 ${(r && r.why) || '格式不对'}（不回）`);
+      }
+      return;   // 🛑 投稿这一支走完就结束：不进识图 / 链接 / L0 / L1 / L2
+    } catch (e) {
+      console.warn(`  ├ 📥 投稿处理异常（已忽略，继续正常流程）: ${e.message || e}`);
+    }
+  }
+
   // 4.4 🆕 识图（2026-09-22）：把图片/表情包变成一句可读的话
   //
   // 🔑 为什么必须放在"提取文本"**之前**：识图结果要当成"这条消息的文字"，
@@ -270,6 +313,10 @@ async function handleEvent(type, d) {
   // ⚠️ 机器人自己发的消息绝不识图（自环）：作者是 bot 就直接跳过。
   const img = d.author?.bot ? null : vision.findImage(d);
   if (img) {
+    // 🆕 2026-10-15 投稿（#tg）用：**无论识图成没成、花没花钱，都把图片地址记下来** ——
+    //    投稿要的是图片字节（描述换不回文件），而引用消息里 QQ 不会再给我们附件。
+    //    ⚠️ 记在识图**之前**：被识图闸门挡掉的图（冷却/上限），投稿也该能用。
+    vision.rememberImage(scope, vision.msgIdxOf(d), '', img.url);
     const vg = vision.visionAllowed(scope);
     if (!vg.ok) {
       // 🔴 被闸门拦掉也要**留痕**（用户 2026-10-11 要的），两份：
@@ -294,7 +341,7 @@ async function handleEvent(type, d) {
           // 🔑 把"这条消息的编号 → 描述"记下来：
           //    之后有人**引用这张图**时，QQ 不会再把图片给我们，
           //    只会给一个 ref_msg_idx —— 靠这个缓存才能查回来。
-          vision.rememberImage(scope, vision.msgIdxOf(d), desc);
+          vision.rememberImage(scope, vision.msgIdxOf(d), desc, img.url);
           console.log(`  ├ 🖼 ${r && r.cached ? '命中缓存' : '识别成功'}`
             + `（${((Date.now() - vt) / 1000).toFixed(1)}s）：${desc}`);
         } else {
@@ -793,18 +840,51 @@ async function sendLibImage(d, groupopenid, scope, imgId) {
     }
   }
   if (it.status !== 'approved') { console.log(`  ├ 🖼 图 ${id} 还没入库（状态 ${it.status}），不发`); return false; }
-  const buf = lib.readFile(id);
+  let buf = lib.readFile(id);
   if (!buf) { console.log(`  ├ 🖼 图 ${id} 的文件读不出来`); return false; }
+  // 🆕 记下"发出去时到底是什么尺寸"（压缩可能改过），日志里要用
+  let dimNote = (() => {
+    try { const d = require('./imgsvc').dimsOf(buf); return d ? `${d.w}x${d.h}` : '尺寸?'; } catch { return '尺寸?'; }
+  })();
+
+  // 🆕 2026-10-16 用户：「从图库提取出来的图发到群里都好大，占空间，能不能压缩」
+  //    ⇒ **发之前压一道**（只压 PNG、只压大图；压不小就原样发）。
+  //    ⚠️ 只动"即将发出去的这份字节"，**磁盘上的素材一个字节都不改**（红线：别碰用户数据）。
+  //    ⚠️ 失败/不划算都会 `changed:false`，行为与以前完全一致 —— 这条压缩**永不阻塞发图**。
+  try {
+    const ic = cfg.policy.imglib?.compress || {};
+    if (ic.enabled !== false) {
+      // ⚠️ 走 `imgsvc`（PNG→Node 引擎；JPEG/WebP→Pillow）而不是直接 `imgcompress`：
+      //    图库里也有 JPEG（实测 216KB 那张全屏图就是），只压 PNG 会漏掉一半。
+      // ⚠️ 第三个参数是**缓存键**（图库 id）：同一张图反复发时不重复算（CPU 不便宜）
+      const r = require('./imgsvc').shrink(buf, ic, id);
+      if (r.changed) {
+        console.log(`  ├ 🖼 发图前压缩：${r.why}`);
+        buf = r.buf;
+      } else {
+        console.log(`  ├ 🖼 不压缩（${r.why}）`);
+      }
+    }
+  } catch (e) {
+    console.warn(`  ├ 🖼 压缩模块异常（已忽略，原样发）：${e.message || e}`);
+  }
 
   try {
+    // ⚠️ 压缩可能改过尺寸 ⇒ 这里**重新嗅一次**（用压缩后的 buf），否则日志里报的是旧尺寸
+    try { const d2 = require('./imgsvc').dimsOf(buf); if (d2) dimNote = `${d2.w}x${d2.h}`; } catch { /* 忽略 */ }
     const fileInfo = await qqmedia.uploadMedia('groups', groupopenid, buf, it.filename || (id + '.png'), 1,
       (m) => console.log(`  ├ 🖼 ${m}`));
     const ok = await sendGroupMedia(groupopenid, fileInfo, d.id);
+    // 🆕 2026-10-16 把**最终尺寸**也打进日志：用户三次问"怎么有大有小"，
+    //    而日志原来只有 KB —— 光看 KB 根本答不了"显示尺寸"的问题（这次就是吃了这个亏）
     console.log(ok
-      ? `  └ 🖼 ✓ 已发图（${id} · ${(buf.length / 1024).toFixed(0)}KB）`
+      ? `  └ 🖼 ✓ 已发图（${id} · ${(buf.length / 1024).toFixed(0)}KB · ${dimNote})`
       : '  └ 🖼 ✗ 图发送失败（看上面的 err_code）');
     if (ok) {
-      lib.noteSent(scope);                       // ← 冷却以"真发出去"为准
+      // 🔴 2026-10-16 用户：「发图库的冷却，把主人占用扔出去，不然主人无限制发图还占用群友冷却」
+      //    ⇒ 主人**不占**群冷却（只免检查、照样记账 = 群友的 180 秒窗口被主人吃掉）。
+      //    判定取闸门带回来的 `gate.ownerFree`，与"免检查"那一处完全一致。
+      lib.noteSent(scope, { ownerFree: gate.ownerFree });   // ← 冷却以"真发出去"为准，但主人不占位
       try { lib.markUsed(id); brain._noteImgUsed(scope, id); } catch { /* 记账失败不影响发送 */ }
     }
     return ok;
