@@ -340,13 +340,21 @@ const msgIdxOf = (d) => extMap(d).msg_idx || '';
 // 这条消息**引用**的那条消息的编号（找图时用）
 const refIdxOf = (d) => extMap(d).ref_msg_idx || '';
 
+// 发送者的稳定标识（官方 API 只给 openid，**没有 QQ 号**）—— 给"这张图是谁发的"用。
+//   🔴 2026-10-16 加：用户实测报「`#tg` 把**未引用的他人聊天**的图片也存进去了」，
+//      根因是"本群最近一张图"那层兜底没记发送者 ⇒ 记下来才能要求"必须同一个人"。
+//   ⚠️ 只在内存里比一次，**不打印、不落盘**（脱敏红线：openid 不进日志与仓库）。
+const authorIdOf = (d) => d?.author?.member_openid || d?.author?.user_openid || '';
+
 // idx/desc 之外多收一个 `url`（可选）：**给"群友引用一张图去投稿（#tg）"用**。
 //   ⚠️ 为什么不能只记描述：投稿要的是**图片字节**（存进图库），描述换不回文件。
 //   ⚠️ 为什么不另开一张表：同一份数据一份生命周期，两张表迟早对不上（项目踩过好几次）。
-function rememberImage(scope, idx, desc, url) {
+// 🆕 2026-10-16 再收一个 `from`（发送者 openid）：`#tg` 那层"本群最近一张"的兜底
+//    **必须知道图是谁发的** —— 否则别人发的图会被这条指令投稿走（用户实测抓到过）。
+function rememberImage(scope, idx, desc, url, from) {
   if (!desc && !url) return;
   const now = Date.now();
-  const rec = { desc: desc || '', url: url || '', ts: now };
+  const rec = { desc: desc || '', url: url || '', from: from || '', ts: now };
   if (idx) IMG_CACHE.set(`${scope}|${idx}`, rec);
   LAST_IMG.set(scope, rec);
   // 超量就丢最早的（Map 保持插入顺序）
@@ -367,10 +375,15 @@ function getImage(scope, idx, withinMs) {
 }
 
 // 这个群最近一张图的记录（含 url）；给 `#tg` 的"刚发图紧接着发指令"兜底
-function recentImage(scope, withinMs) {
+// 🔴 2026-10-16 用户实测报：「**为什么 #tg 把未引用的他人聊天的图片存进去了**」
+//    ⇒ 传了 `who` 就**必须**是这个人自己发的那张（比对 openid；取不到发送者也算不匹配，
+//      宁可漏也别把别人的图存进图库）。`who === undefined` 时保持旧行为（只按时间判）。
+function recentImage(scope, withinMs, who) {
   const hit = LAST_IMG.get(scope);
   if (!hit) return null;
-  return (Date.now() - hit.ts > withinMs) ? null : hit;
+  if (Date.now() - hit.ts > withinMs) return null;
+  if (who !== undefined && (!who || hit.from !== who)) return null;
+  return hit;
 }
 
 // 按 msg_idx 查（用于"引用的是一条图片消息"）
@@ -386,6 +399,31 @@ function recentImageDesc(scope, withinMs) {
   const hit = LAST_IMG.get(scope);
   if (!hit) return '';
   return (Date.now() - hit.ts > withinMs) ? '' : hit.desc;
+}
+
+// ---------- 🆕 2026-10-17：**机器人自己发出去的图**也记一份 ----------
+//
+// 🔴 为什么必须记：群友很爱引用机器人刚发的图问「这个是你吗」——
+//    而被引用的是**我们自己**的消息，我们对自己的消息从**不识图**（防自环 + 省钱）
+//    ⇒ 索引里没有它 ⇒ 那句引用在提示词里**读不出来** ⇒ 模型转头去拿群里**别人**那张图的
+//    描述（刚识过图、就在上下文里）来回答，还答得理直气壮（实测被用户连抓两次）。
+//    既然图是**我们自己发出去的**，我们本来就知道它长什么样（图库那条的 desc），记下来就行。
+//   ⚠️ 只在内存；两条线索：① 有消息 id 就顺手进正常索引（后面按 `ref_msg_idx` **精确**命中）
+//      ② 没有 id 也留一条"我最近发过这张"（`lastSelfImage`，兜底时用）。
+const SELF_IMG = new Map();          // scope -> { desc, ts, id }
+function noteSelfImage(scope, desc, id) {
+  const d = String(desc || '');
+  const mid = String(id || '');
+  if (!d && !mid) return;
+  const rec = { desc: d, id: mid, ts: Date.now() };
+  SELF_IMG.set(scope, rec);
+  if (mid) IMG_CACHE.set(`${scope}|${mid}`, { desc: d, url: '', from: 'bot', ts: rec.ts });
+}
+// 我最近发过的那张图（过了 withinMs 就不认）
+function lastSelfImage(scope, withinMs) {
+  const hit = SELF_IMG.get(scope);
+  if (!hit) return null;
+  return (withinMs && Date.now() - hit.ts > withinMs) ? null : hit;
 }
 
 // 定期清理，防内存涨（和上面两个限流表一样的做法）
@@ -554,12 +592,16 @@ module.exports = {
   // 🆕 图片索引缓存（「引用图片 + @机器人」靠它）
   msgIdxOf,
   refIdxOf,
+  authorIdOf,      // 🆕 2026-10-16：这张图是谁发的（`#tg` 的兜底要按人校验）
   rememberImage,
   getImageDesc,
   recentImageDesc,
   // 🆕 2026-10-15 投稿（#tg）用：要的是**图片地址**（描述换不回文件）
   getImage,
   recentImage,
+  // 🆕 2026-10-17：机器人**自己发出去**的图（群友引用它问「这个是你吗」时靠这两条认领）
+  noteSelfImage,
+  lastSelfImage,
   // 给自测用
   _beijingToday: beijingToday,
   _extMap: extMap,

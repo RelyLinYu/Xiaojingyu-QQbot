@@ -213,6 +213,53 @@ console.log('\n=== 2b. ⭐ 引用消息（103）：真机数据，必须能读�
 
     check('  └ 老文案「（引用了一条消息：…）」已彻底不再出现（防回退）',
       !brain.extractText(withFrom).includes('引用了一条消息：「'), tFrom);
+
+    // 🔴🔴 2026-10-17 用户报：「**为什么回复的是最近一张图而不是引用**」
+    //    现场：群友引用**机器人自己发过的图**问「这是你吗」，QQ 的引用元素里没有文字 ⇒
+    //    老代码 qtag 为空、提示词里**一片空白** ⇒ 模型拿上下文里最近那张（别人的）图答了。
+    //    ⇒ 读不到也必须明说"读不到"，并分清是不是引用我自己。
+    const emptySelf = { ...quoted, content: '这是你吗', msg_elements: [], __quoteIsSelf: true };
+    const tES = brain.extractText(emptySelf);
+    check('★★★ 引用读不出内容（引用的是我自己发的图）→ 必须明说"读不到"，不许留白让模型猜',
+      tES.includes('读不到') && tES.includes('我自己（机器人）') && tES.includes('这是你吗'), tES);
+    const emptyNamed = { ...quoted, content: '这是你吗', msg_elements: [], __quoteFrom: '冷风' };
+    check('★★ 引用读不出内容 + 知道是谁说的 → 也要说清读不到',
+      brain.extractText(emptyNamed).includes('「冷风」说的一条消息')
+      && brain.extractText(emptyNamed).includes('读不到'), brain.extractText(emptyNamed));
+    const emptyUnknown = { ...quoted, content: '这是你吗', msg_elements: [] };
+    check('★★ 引用读不出内容 + 作者也查不到 → 同样要说清读不到',
+      brain.extractText(emptyUnknown).includes('读不到'), brain.extractText(emptyUnknown));
+    check('  └ 反面：引用**能**读出内容时不许出现"读不到"（别把正常的也染上）',
+      !brain.extractText(withFrom).includes('读不到'), brain.extractText(withFrom));
+    // ⚠️ 而且"读不到"这句**只是说明、不是内容** —— 不能让"啥都没说的纯引用"因此变成"有内容"
+    check('★★ "读不到"的说明不算内容：content 空 + 引用空 ⇒ 仍判"提不出文本"',
+      brain.hasUsableText({ ...quoted, content: ' ', msg_elements: [] }) === false);
+
+    // 🆕 2026-10-17 **第二层修**（用户报「？」的那次现场）：光说"读不到"挡不住模型 ——
+    //    别人那张图的描述就在几秒前的上下文里，它会直接抓来过用。⇒ 治本是**认领我自己的图**：
+    //    机器人发图时记下"我发出去的是什么"，引用读不出来时按它回答。
+    const vs3 = require('./vision');
+    const S3 = 'group:TEST_SELFQUOTE';
+    const SDESC = '蓝发女仆装猫耳少女举着"token烧没了怎么办"的牌子';
+    check('★★ 还没发过图 → lastSelfImage 为空（这就是出 bug 的前提）',
+      vs3.lastSelfImage(S3, 300000) === null);
+    vs3.noteSelfImage(S3, SDESC, 'MSGID_SELF_X');
+    check('★★ 记档后：按我们记下的消息 id 能**精确**取回描述（引用时用它，不靠猜）',
+      vs3.getImageDesc(S3, 'MSGID_SELF_X') === SDESC);
+    check('★★ 兜底：也知道"我最近发过这张"',
+      (vs3.lastSelfImage(S3, 300000) || {}).desc === SDESC);
+    check('★ 过了时间窗就不认（当没发过）', vs3.lastSelfImage(S3, -1) === null);
+    check('★ 按群隔离：别的群查不到我发的图',
+      vs3.lastSelfImage('group:OTHER_SELFQ', 300000) === null);
+    // 接线（⚠️ index.js 不能 require —— 一 require 就连网关，照本项目习惯查源码）
+    const idxSelf = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+    check('★★ index.js：发图成功后记档"我发出去的这张图"',
+      /vision\.noteSelfImage\(scope, it\.desc \|\| '', ok\.id \|\| ''\)/.test(idxSelf));
+    check('★★ index.js：引用读不出来时会试着认领"我发的那张"（别留白让模型抓别人的图）',
+      /if \(!quoted && refIdx\) quoted = selfQuotedImageText\(scope, d, refIdx\);/.test(idxSelf));
+    check('★ index.js：认领的前提是被引用元素"像图片消息"（有 idx、没文字）',
+      /function quotedMediaLike\(msg\)/.test(idxSelf)
+      && /if \(String\(e\.content \|\| ''\)\.trim\(\)\) return false;/.test(idxSelf));
   }
 }
 
@@ -1300,8 +1347,65 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       // ⑩ vision 侧要真的把图片地址记下来（否则引用消息里根本拿不到图）
       check('★★ vision.rememberImage 收 url 了（#tg 靠它反查被引用的图）',
         typeof require('./vision').getImage === 'function'
-        && /function rememberImage\(scope, idx, desc, url\)/.test(
+        && /function rememberImage\(scope, idx, desc, url, from\)/.test(
           require('fs').readFileSync(require('path').join(__dirname, 'vision.js'), 'utf8')));
+
+      // ⑪ 🔴🔴 2026-10-16 用户实测报：「**为什么 #tg 把未引用的他人聊天的图片存进去了**」
+      //     现场：群里 A 先发了一张图 → 过一会儿 B 打 `#tg`（**没引用任何东西**）⇒
+      //     图被存进了待确认列表（B 投的是 A 的图）。根因：第 ③ 条兜底"本群最近一张"
+      //     **没看这张图是谁发的**。⇒ 现在必须是**发指令这个人自己**刚发的那张；
+      //     取不到发送者也不给（宁可漏，别拿别人的图）。
+      //     ⚠️ 这一段必须用**真 vision** —— 判定就在它里面，上面那些 `imgStub` 测不出来。
+      {
+        const vs2 = require('./vision');
+        const sub2 = require('./submit');
+        const S2 = 'group:TG_SENDER';
+        const dOf = (who) => ({
+          content: '#tg', author: { member_openid: who, bot: false }, message_scene: { ext: [] },
+        });
+        vs2.rememberImage(S2, 'IDX_A', '一只猫', 'https://example.invalid/A.jpg', 'U_A');
+        check('★★ 同一个群：A 发过图，A 自己再来 #tg（没引用）→ 认（手机上手快分两条发）',
+          ((vs2.recentImage(S2, 120000, 'U_A') || {}).url) === 'https://example.invalid/A.jpg');
+        check('★★★ B 打 #tg（没引用）→ **绝不认**（不能把 A 的图当成 B 投稿的图）',
+          vs2.recentImage(S2, 120000, 'U_B') === null);
+        check('★★ 取不到发送者（没有 openid）→ 也不给（宁可漏，别拿别人的图）',
+          vs2.recentImage(S2, 120000, '') === null);
+        // ⚠️ 2026-10-16 用户要求默认「只认引用」（quoteOnly:true）⇒ 下面这两条测的是
+        //    ③「本人最近一张」这条**默认已关**的兜底，必须先显式打开才成立；
+        //    默认行为另有一组断言锁死（见本节末尾）。
+        //    ⚠️ ③ 是**双保险关掉的**（quoteOnly:true ＋ recentImageMs:0）⇒ 两个都要打开。
+        cfg.policy.submit.recentImageMs = 120000;
+        cfg.policy.submit.quoteOnly = false;
+        const logs2 = [];
+        check('★★★ B 走 submit 真入口 → 取不到图（这条以前会拿到 A 的图）',
+          sub2.findTargetImage(S2, dOf('U_B'), vs2, (m) => logs2.push(m)) === null);
+        check('  └ 而且日志里说清"不是这个人发的"（别静默到自己也查不出）',
+          logs2.some((l) => /不是这个人发的/.test(l)), JSON.stringify(logs2));
+        const tA2 = sub2.findTargetImage(S2, dOf('U_A'), vs2, () => {});
+        check('  └ A 走同一个入口 → 拿得到自己刚发的那张',
+          !!(tA2 && tA2.url === 'https://example.invalid/A.jpg'), JSON.stringify(tA2));
+        // 🔴 恢复用户要求的默认，并把**新默认**锁死：没引用 ⇒ 谁都不认（包括"本人刚发过的那张"）
+        cfg.policy.submit.quoteOnly = true;    // 恢复默认：只认引用
+        cfg.policy.submit.recentImageMs = 0;   // 恢复默认：③ 双保险的第二个开关
+        check('★★★ 默认只认引用（quoteOnly:true）⇒ 连"本人刚发过的那张"也不认 —— 先发日常照片再 #tg 不算投稿',
+          sub2.findTargetImage(S2, dOf('U_A'), vs2, () => {}) === null);
+        check('★★★ 默认只认引用 ⇒ 没引用时，别人刚发的图更不认',
+          sub2.findTargetImage(S2, dOf('U_B'), vs2, () => {}) === null);
+        {
+          const sc4 = cfg.policy.submit;
+          check('★★ 默认三个开关都是"关掉兜底"（quoteOnly:true / allowAttached:false / recentImageMs:0）',
+            sc4.quoteOnly === true && sc4.allowAttached === false && sc4.recentImageMs === 0,
+            JSON.stringify({ q: sc4.quoteOnly, a: sc4.allowAttached, r: sc4.recentImageMs }));
+        }
+        // 总开关：连"本人"这层兜底也能关掉（只认引用 / 本条自带）
+        cfg.policy.submit.quoteOnly = false;   // 先放开主开关，才测得出"③ 自己的开关"
+        const savedRecent = cfg.policy.submit.recentImageMs;
+        cfg.policy.submit.recentImageMs = 0;
+        check('★ `policy.submit.recentImageMs = 0` ⇒ 这一路兜底彻底关掉（只认引用/本条自带）',
+          sub2.findTargetImage(S2, dOf('U_A'), vs2, () => {}) === null);
+        cfg.policy.submit.recentImageMs = 0;   // 回到 config 的默认（③ 彻底关掉，双保险）
+        cfg.policy.submit.quoteOnly = true;    // 恢复默认：只认引用
+      }
       sub._reset();
     })();
   }

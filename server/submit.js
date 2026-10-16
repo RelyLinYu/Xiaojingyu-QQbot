@@ -96,6 +96,7 @@ function mark(scope, now = Date.now(), bypass = false) {
 //  ① 引用了一张图（`ref_msg_idx` 能反查到地址）—— 用户需求里的正路
 //  ② **本条消息自己带了图**（有人把图和 `#tg` 发在同一条，也认）
 //  ③ 本群**刚刚**发过图（`recentImageMs` 内）—— 手机上手快，"图 + 指令"分两条发
+//     🔴🔴 **必须是发指令这个人自己发的那张**（2026-10-16 修下面那个 bug）；不填 = 关掉这一路。
 //
 // 返回 `{ url, source }` 或 null。
 function findTargetImage(scope, d, vision, log) {
@@ -109,11 +110,35 @@ function findTargetImage(scope, d, vision, log) {
     log && log('引用的那条没在我们的图片索引里（可能是机器人启动前的图）');
   }
 
-  const own = vision.findImage ? vision.findImage(d) : null;
+  // 🔴 用户 2026-10-16（原话）：「彻底关掉，严格限制#tg并且带引用图片，这是我设置的要求，
+  //    为什么擅自更改范围…我先发了一张日常照片，再#tg不就提交不相关图片了？」
+  //    ⇒ **只认上面那条引用路**；引用没成（或压根没引用）就到此为止 —— 不去猜是哪张。
+  //    原因必须写进日志（否则事后连"为什么没认"都查不出来）。
+  if (s.quoteOnly === true) {
+    log && log('按用户要求只认"引用那张图" → 本条没有可用引用，不当作投稿目标');
+    return null;
+  }
+
+  // ② 本条消息自己带了图 —— 非用户要求，默认关（`allowAttached`）
+  const own = s.allowAttached === true ? (vision.findImage ? vision.findImage(d) : null) : null;
   if (own && own.url) return { url: own.url, source: '本条自带', desc: '' };
 
-  const recent = vision.recentImage(scope, within);
-  if (recent && recent.url) return { url: recent.url, source: '本群最近一张', desc: recent.desc || '' };
+  // ③ 本群最近一张 —— 🔴 2026-10-16 用户实测报：「**为什么 #tg 把未引用的他人聊天的图片
+  //    存进去了**」。现场：群里 A 先发了一张图，过一会儿 B 打 `#tg`（没引用任何东西），
+  //    图就被 B 投稿存进了待确认列表。根因就是这一路**只按"本群最近一张"取、没看是谁发的**。
+  //    ⇒ 现在两重收紧：**(a) 必须是发指令这个人自己刚发的那张**（`authorIdOf` 比对，
+  //      取不到发送者也不给 —— 宁可漏，别拿别人的图）；**(b) 留一个总开关**：
+  //      `policy.submit.recentImageMs = 0`（或 false）= 这一路兜底彻底关掉，只认引用/本条自带。
+  const rawWithin = (s.quoteOnly === true) ? 0 : s.recentImageMs;   // quoteOnly ⇒ 关掉"本群最近一张"这条兜底
+  if (rawWithin !== 0 && rawWithin !== false) {
+    const who = typeof vision.authorIdOf === 'function' ? vision.authorIdOf(d) : '';
+    const recent = vision.recentImage(scope, within, who);
+    if (recent && recent.url) return { url: recent.url, source: '本群最近一张（本人）', desc: recent.desc || '' };
+    // 光有"本群最近一张"但不是这个人发的 ⇒ 说清原因（别静默到自己也查不出）
+    if (vision.recentImage(scope, within)) {
+      log && log('本群最近那张图**不是这个人发的** → 不当作投稿目标（防把别人的图存进图库）');
+    }
+  }
 
   return null;
 }
@@ -136,7 +161,7 @@ async function handle(scope, d, opts = {}) {
   // ② 格式不对（没图 / 引用的不是图）⇒ **一个字都不回**（用户明确要求）
   const target = findTargetImage(scope, d, vision, log);
   if (!target) {
-    log('带 #tg 但没找到图（既没引用图、本条也没带图）→ 不回（格式不对）');
+    log('带 #tg 但没拿到图（按用户要求只认"引用那张图"；不是引用 / 引用读不出来 → 按格式不对处理）→ 不回');
     return { silent: true, why: '#tg 没带图（按规则不回）' };
   }
 

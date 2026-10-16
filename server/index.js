@@ -60,6 +60,41 @@ function quotedAuthor(scope, msg) {
   return { name: hit.n || '', isSelf: false };
 }
 
+// ============================================================
+//  🔴🔴 2026-10-17：引用读不出来时，**主动认领"我自己的图"**
+//
+//  用户第二次报（一个「？」）：群里引用**机器人刚发的图**问「这个是你吗」，
+//  机器人却答「不是我。棕发蓝眼还戴粉蝴蝶结，认错鱼了」—— 那描述的是**别人**刚发的那张。
+//  日志逐行看过：`brain` 那边"读不到被引用的内容"的说明**确实进了提示词**（01:24:12 那行），
+//  但光说"读不到"挡不住模型 —— 别人那张图的描述就在 3 秒前的上下文里，太近太显眼。
+//  ⇒ 治本：把**我们已知的事实**喂给它，而不是只叫它别猜。两条线索按可信度用：
+//     ① 精确：被引用的 `msg_idx` 正好命中**我们发图时记下的消息 id**
+//        （`vision.noteSelfImage` 已顺手写进正常索引 ⇒ 上面 `getImageDesc` 就命中了，走不到这儿）
+//     ② 兜底：被引用元素**像一条图片消息**（有 idx、没文字）且**我们自己刚发过图** ——
+//        群成员发的图我们**都会**识图进索引，能读到就根本不会走到这里
+//        ⇒ "读不出来 + 我刚发过图"基本就是"他引用的就是我发的那张"。
+//  ⚠️ 这不是让它猜：图是我们自己发出去的，"它长什么样"本来就在我们手里。
+// ============================================================
+const SELF_QUOTE_MS = 5 * 60 * 1000;      // 我发图后 5 分钟内被引用才算（想调就改这一行）
+
+// 被引用元素"像一条图片消息"吗（有 idx、但**没有文字** —— 图片消息的 content 就是空的）
+function quotedMediaLike(msg) {
+  const e = (Array.isArray(msg?.msg_elements) ? msg.msg_elements : [])[0];
+  if (!e) return false;
+  if (String(e.content || '').trim()) return false;       // 有文字就不是"纯图片消息"
+  return !!String(e.msg_idx || '').trim();                // 有 idx 才敢判断
+}
+
+// 引用读不出来时，尽力给出"它是我发的那张图"的说明；给不出就返回空串
+function selfQuotedImageText(scope, msg, refIdx) {
+  const recent = vision.lastSelfImage(scope, SELF_QUOTE_MS);
+  if (!recent || !recent.desc) return '';
+  if (!quotedMediaLike(msg)) return '';
+  console.log('  ├ 🖼 引用读不出来、但我刚发过图 ⇒ 按"我发的那张"告诉它'
+    + `（别再拿群里别人刚发的图当它；ref=${String(refIdx).slice(0, 12)}…）`);
+  return `（引用的是我自己刚发过的那张图，它就是：${recent.desc}）`;
+}
+
 // 🆕 记忆注入的节流表：scope -> 上次注入时间
 //    （防"每条消息都塞记忆"，见 config.policy.memory.recallMinIntervalMs）
 const lastRecallAt = new Map();
@@ -316,7 +351,9 @@ async function handleEvent(type, d) {
     // 🆕 2026-10-15 投稿（#tg）用：**无论识图成没成、花没花钱，都把图片地址记下来** ——
     //    投稿要的是图片字节（描述换不回文件），而引用消息里 QQ 不会再给我们附件。
     //    ⚠️ 记在识图**之前**：被识图闸门挡掉的图（冷却/上限），投稿也该能用。
-    vision.rememberImage(scope, vision.msgIdxOf(d), '', img.url);
+    //    🆕 2026-10-16 顺带把**发送者**也记上（`vision.authorIdOf`）：`#tg` 的"本群最近一张"
+    //       兜底必须确认"这张图是发指令那个人自己发的"，否则会把别人的图存进图库（用户实测抓到）。
+    vision.rememberImage(scope, vision.msgIdxOf(d), '', img.url, vision.authorIdOf(d));
     const vg = vision.visionAllowed(scope);
     if (!vg.ok) {
       // 🔴 被闸门拦掉也要**留痕**（用户 2026-10-11 要的），两份：
@@ -341,7 +378,7 @@ async function handleEvent(type, d) {
           // 🔑 把"这条消息的编号 → 描述"记下来：
           //    之后有人**引用这张图**时，QQ 不会再把图片给我们，
           //    只会给一个 ref_msg_idx —— 靠这个缓存才能查回来。
-          vision.rememberImage(scope, vision.msgIdxOf(d), desc, img.url);
+          vision.rememberImage(scope, vision.msgIdxOf(d), desc, img.url, vision.authorIdOf(d));
           console.log(`  ├ 🖼 ${r && r.cached ? '命中缓存' : '识别成功'}`
             + `（${((Date.now() - vt) / 1000).toFixed(1)}s）：${desc}`);
         } else {
@@ -370,7 +407,9 @@ async function handleEvent(type, d) {
     // ⚠️ ② 的判断条件是 `brain.isMentionOnly(...)`，**必须在设 `__vision` 之前问** ——
     //    设完之后它就不算"只有@"了（这是个先有鸡还是先有蛋的顺序问题）。
     const refIdx = vision.refIdxOf(d);
-    const quoted = refIdx ? vision.getImageDesc(scope, refIdx) : '';
+    let quoted = refIdx ? vision.getImageDesc(scope, refIdx) : '';
+    // 🔴 2026-10-17：读不出来时**不能就这么留白** —— 见 `selfQuotedImageText` 上面那段。
+    if (!quoted && refIdx) quoted = selfQuotedImageText(scope, d, refIdx);
     if (quoted) {
       d.__vision = quoted;
       console.log(`  ├ 🖼 引用的是一条**图片**消息 → 用之前存下的描述：${quoted}`);
@@ -886,6 +925,13 @@ async function sendLibImage(d, groupopenid, scope, imgId) {
       //    判定取闸门带回来的 `gate.ownerFree`，与"免检查"那一处完全一致。
       lib.noteSent(scope, { ownerFree: gate.ownerFree });   // ← 冷却以"真发出去"为准，但主人不占位
       try { lib.markUsed(id); brain._noteImgUsed(scope, id); } catch { /* 记账失败不影响发送 */ }
+      // 🆕 2026-10-17：把"我自己刚发出去的这张图"记一份（含它长什么样）——
+      //    群友引用它问「这个是你吗」时，我们才答得上来（见 `selfQuotedImageText`）。
+      //    ⚠️ `ok` 是发送接口的返回 JSON，`ok.id` 就是这条消息的 id；有它就能**精确**命中引用。
+      try {
+        vision.noteSelfImage(scope, it.desc || '', ok.id || '');
+        console.log(`  ├ 🖼 已记档"我发出去的这张图"（${ok.id ? 'msgid=' + ok.id : '没拿到 msgid，只能按"最近一张"兜底'}）`);
+      } catch { /* 记档失败不影响发图 */ }
     }
     return ok;
   } catch (e) {

@@ -363,6 +363,22 @@ function extractText(msg) {
       if (from) qtag = `（引用了一条消息，是「${from}」说的：「${quoted}」）`;
       else if (msg?.__quoteIsSelf) qtag = `（引用了我自己（机器人）说过的一条消息：「${quoted}」）`;
       else qtag = `（引用了一条消息（不是当前说话人说的）：「${quoted}」）`;
+    } else {
+      // 🔴🔴 2026-10-17 修（用户报：「**为什么回复的是最近一张图而不是引用**」）：
+      //    引用**读不出内容**时，这里以前是**一片空白** —— 提示词里既没有被引用的内容、
+      //    也没有"我读不到它"这句话 ⇒ 模型只能拿**上下文里最近那张图**去猜，还答得头头是道。
+      //    实测现场（01:12 日志逐行复原）：群友引用**机器人自己发过的图**问「这是你吗」，
+      //    QQ 给回的引用元素里**没有文字** ⇒ qtag 为空；而 50 秒前别人发的图刚识过图、
+      //    描述已经作为普通聊天消息在上下文里 ⇒ 它就把那句话接到了那张图上。
+      //    ⇒ 读不到也必须**明说读不到**，并且分清"引用的是我自己"；别留白让模型编。
+      if (msg?.__quoteIsSelf) {
+        qtag = '（引用了我自己（机器人）发过的一条消息 —— 但那条里没有文字，我读不到它到底是哪条，'
+          + '多半是我自己发过的配图。**别拿群里别的图当它**，也别硬说它是哪张）';
+      } else if (from) {
+        qtag = `（引用了「${from}」说的一条消息，但那条里没有文字 —— 我读不到被引用的内容，别猜）`;
+      } else {
+        qtag = '（引用了一条消息，但那条里没有文字 —— 我读不到被引用的内容，别猜）';
+      }
     }
     if (qtag && main) return withVis(`${qtag}${main}`);
     if (qtag) return withVis(qtag);
@@ -372,8 +388,18 @@ function extractText(msg) {
 }
 
 // 这条消息是不是"提不出文本"（真正该跳过的那些）
+//
+// ⚠️ 2026-10-17：**不能**再直接拿 `extractText()` 的长度来判断了 —— 引用读不出来时，
+//    extractText 会补一句「（引用了一条消息…我读不到被引用的内容，别猜）」，那句**只是说明、
+//    不是内容**。用长度判会让"啥都没说的纯引用"变成"有内容"⇒ 它就会去回一句本不该回的。
+//    ⇒ 改成看**真材料**：自己的正文 / 能读出来的被引用内容 / 识图描述，三者之一才算有。
 function hasUsableText(msg) {
-  return extractText(msg).length > 0;
+  if (stripAtMentions(msg?.content).trim()) return true;
+  if (String(msg?.__vision || '').trim()) return true;
+  // ⚠️ 只有 103（引用消息）才会把被引用内容拼进 extractText —— 别对别的类型放行，
+  //    否则会出现"判定说有材料、可 extractText 却是空"的不一致，模型拿到空提示词。
+  if ((msg?.message_type === 103) && extractQuoted(msg)) return true;
+  return false;
 }
 
 // content 里有没有 @ 占位标记（还没剥之前的原文）
@@ -669,13 +695,16 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
     if (UNSUPPORTED[msg.message_type]) {
       return { ok: false, why: `暂不支持的类型(${UNSUPPORTED[msg.message_type]})` };
     }
-    // 103 引用消息、以及未来新增的类型：只要提得出文本就放行
-    if (!text) {
+    // 103 引用消息、以及未来新增的类型：只要提得出**真材料**就放行
+    //   ⚠️ 2026-10-17：这里必须问 `hasUsableText()`，**不能**看 `text` 长不长 ——
+    //      引用读不出来时 extractText 会补一句"我读不到被引用的内容"的**说明**（那不是内容），
+    //      按长度判就会把"啥都没说的纯引用"放进来 ⇒ 它会去回一句本不该回的。
+    if (!hasUsableText(msg)) {
       return { ok: false, why: `非文本且提不出内容(type=${msg.message_type})` };
     }
   }
 
-  if (!text) return { ok: false, why: '空消息' };
+  if (!hasUsableText(msg)) return { ok: false, why: '空消息' };
 
   const at = isAtRobot(eventType, msg, opts.botOpenid);
 
