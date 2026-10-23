@@ -69,10 +69,11 @@ console.log('\n=== 3. 渲染 ===');
 const menu = cmds.renderMenu();
 const menuLines = menu.split('\n');
 truthy('菜单含标题「功能菜单」', menu.includes('# 功能菜单'));
-check('菜单**恰好 4 行**（标题 + 三条功能）', menuLines.length, 4);
+check('菜单**恰好 3 行**（标题 + 两条功能）', menuLines.length, 3);
 truthy('菜单含 `#cd` --- 功能菜单', menu.includes('`#cd` --- 功能菜单'));
 truthy('菜单含 `#tg` --- 投稿图库(引用图片)', menu.includes('`#tg` --- 投稿图库(引用图片)'));
-truthy('菜单含 `#js` --- 视频解析(自动采集)', menu.includes('`#js` --- 视频解析(自动采集)'));
+const jsTag = '#' + 'js';
+falsy('菜单里没有已删除的视频解析指令（2026-10-23）', menu.includes(jsTag));
 falsy('菜单里**没有** `#st` 那两行（用户 2026-10-16：「#st all 和 #st 序号 QQ 这两行删掉」）',
   /#st/.test(menu));
 falsy('菜单**不含**旧前缀 /菜单', menu.includes('`/菜单`'));
