@@ -103,6 +103,14 @@ const SPEC = {
       { value: 0, label: '关（只有被 @ 才回）' },
     ],
   },
+  // 🆕 2026-10-23 用户：「再加一个链接解析的开关」
+  linkParseEnabled: {
+    type: 'runtime', key: 'linkParseEnabled', label: '链接自动解析（群里贴链接就回卡片）', def: 1,
+    options: [
+      { value: 1, label: '开（B站 / 抖音 / 快手 / GitHub 自动回卡片）' },
+      { value: 0, label: '关（贴链接当普通聊天；#js 仍可手动解析）' },
+    ],
+  },
   // 🆕 2026-10-23 用户要的「插嘴概率」：和配图概率同款滑块（0~1，1 = 每次都接）
   interjectChance: {
     type: 'runtime', key: 'interjectChance', label: '主动接话的概率（0~1，1=每次都接）', def: 0.08, min: 0, max: 1,
