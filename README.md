@@ -8,6 +8,24 @@
 > 它的第一步必须是**问你**：「装到服务器，还是装在你现在这台电脑？」——不许替你默认，也不许因为"自己跑在 Windows"就选本地。
 > 没有服务器 → [docs/LOCAL_DEPLOY.md](docs/LOCAL_DEPLOY.md)；有服务器 → 往下看「快速开始」。
 
+<details>
+<summary>📋 一句话部署模板（复制整段，填好 4 项发给任意 agent）</summary>
+
+```
+https://github.com/RelyLinYu/Xiaojingyu-QQbot
+我想部署这个仓库的机器人，装到<我的服务器 / 我这台电脑上>
+appid: 填你的AppID
+secret: 填你的AppSecret
+apikey: sk-填你的DeepSeekKey
+password: 自己定一个控制台密码（至少6位）
+```
+
+- 装服务器再加两行：`服务器IP: …` / `SSH: root@… 密码 …（或先说已配置好密钥）`
+- 装本机不用加任何东西（Windows 双击 `start-local.bat`，mac/Linux 跑 `start-local.sh`）。
+- ⚠️ 密钥贴进聊天后就已进入对话记录：**这段聊天别外传**；agent 也不该把密钥回显出来。
+- 部署完它会先让你在群里 @ 机器人说一句话 —— 就这一句，用来把**主人 openid** 抓出来绑定。
+</details>
+
 [![点击观看 32 秒宣传片](promo/preview.png)](promo/bigfish-promo.mp4)
 
 > 🎬 **32 秒宣传片** —— [点这里观看](promo/bigfish-promo.mp4)（成片 MP4，GitHub 网页上直接播放；源文件、渲染脚本与第一版归档都在 [`promo/`](promo/)）
