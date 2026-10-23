@@ -1311,6 +1311,7 @@ function renderSettings(s){
     dailyCalls: '当天回复调用次数上限，到了就不再回',
     visionDaily: '每天最多识别多少张图',
     imglibChance: '这一轮抽中才主动配图；1 = 不抽签、每次都配',
+    interjectChance: '没被 @、也没命中关键词时，主动接话的概率；1 = 每次都接（会变吵）',
     submitEnabled: '关掉后 #tg 当普通聊天，不再是投稿指令',
     interjectEnabled: '关掉后没 @ 就完全不主动说话（群指令和私聊不受影响）',
     memeAuto: '让它自己从群聊里收集梗；关掉后只用已有的',
@@ -1325,7 +1326,7 @@ function renderSettings(s){
   const GROUPS = [
     { t: '模型与生成', cls: 'sec-model', keys: ['aiModel', 'aiEffort', 'aiApiKey'] },
     { t: '额度与花费', cls: 'sec-money', keys: ['budgetDaily', 'budgetTotal', 'dailyCalls', 'visionDaily'] },
-    { t: '对话与回复', cls: 'sec-dialog', keys: ['imglibChance', 'submitEnabled', 'interjectEnabled', 'memeAuto'] },
+    { t: '对话与回复', cls: 'sec-dialog', keys: ['imglibChance', 'interjectChance', 'submitEnabled', 'interjectEnabled', 'memeAuto'] },
     { t: '人设', cls: 'sec-persona', keys: ['personaText'] },
   ];
   const isBool = (it) => Array.isArray(it.options) && it.options.length === 2
@@ -1344,7 +1345,7 @@ function renderSettings(s){
       return '<span class="swwrap"><button class="sw" type="button" role="switch" data-toggle="' + k + '" aria-pressed="' + (on ? 'true' : 'false') + '"'
         + ' aria-label="' + esc(it.label) + '"><i></i></button><b class="swlab">' + (on ? '开' : '关') + '</b></span>';
     }
-    if (k === 'imglibChance') {
+    if (k === 'imglibChance' || k === 'interjectChance') {
       var pct = Math.round((Number(val) || 0) * 100);
       return '<div class="rangerow"><input id="' + id + '" data-key="' + k + '" type="range" min="0" max="1" step="0.01" value="' + esc(val) + '">'
         + '<b id="rng_' + k + '">' + pct + '%</b></div>'
@@ -1411,14 +1412,15 @@ function renderSettings(s){
       if (c) c.textContent = q ? '找到 ' + n + ' 项' : '';
     });
   }
-  // 滑块实时显示百分比
-  var rng = document.getElementById('set_imglibChance');
-  if (rng && typeof rng.addEventListener === 'function') {
+  // 滑块实时显示百分比（配图概率 + 插嘴概率共用）
+  ['imglibChance', 'interjectChance'].forEach(function (k) {
+    var rng = document.getElementById('set_' + k);
+    if (!rng || typeof rng.addEventListener !== 'function') return;
     rng.addEventListener('input', function () {
-      var b = document.getElementById('rng_imglibChance');
+      var b = document.getElementById('rng_' + k);
       if (b) b.textContent = Math.round((Number(rng.value) || 0) * 100) + '%';
     });
-  }
+  });
 }
 
 // 🆕 2026-10-07：人设框的文字计数（本项目实测过换算比：**1 字 ≈ 0.567 token**）
