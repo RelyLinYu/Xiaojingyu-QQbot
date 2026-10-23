@@ -162,6 +162,12 @@ if [ -d "$SRC_DIR/tools" ]; then
   mkdir -p "$APP_DIR/tools"
   cp -rf "$SRC_DIR/tools/." "$APP_DIR/tools/"
   echo "  ✅ tools/ 已就位（$(find "$SRC_DIR/tools" -name '*.js' -o -name '*.cjs' | wc -l | tr -d ' ') 个脚本）"
+  # 🆕 2026-10-23 仓库根的 scripts/ 也带上：check-env.cjs 给运维/agent 自检 .env 用
+  if [ -d "$(dirname "$SRC_DIR")/scripts" ]; then
+    mkdir -p "$APP_DIR/scripts"
+    cp -rf "$(dirname "$SRC_DIR")/scripts/." "$APP_DIR/scripts/"
+    echo "  ✅ scripts/ 已就位（可直接 node scripts/check-env.cjs）"
+  fi
 else
   echo "❌ 缺少 tools/ 目录 —— 网页控制台会起不来"
   exit 1

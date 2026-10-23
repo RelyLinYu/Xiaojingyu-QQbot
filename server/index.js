@@ -117,6 +117,8 @@ process.on('uncaughtException', (e) => console.error('[未捕获的异常]', e))
 
 // ---------- 重复推送去重 ----------
 // 官方原文：为确保消息可达，相同 msg_id 可能重复推送，开发者需结合 msg_seq 做去重
+const APP_DIR = process.env.APP_DIR || __dirname;
+
 const seen = new Map();     // msg_id -> ts
 
 function alreadyHandled(id) {
@@ -136,9 +138,10 @@ setInterval(() => {
 // ---------- 落盘（调试阶段最有用的东西）----------
 function logEvent(type, d) {
   try {
-    fs.mkdirSync('data', { recursive: true });
+    const dir = path.join(APP_DIR, 'data');
+    fs.mkdirSync(dir, { recursive: true });
     const day = new Date().toISOString().slice(0, 10);
-    fs.appendFileSync(`data/events-${day}.jsonl`, JSON.stringify({ t: type, d }) + '\n');
+    fs.appendFileSync(path.join(dir, 'events-' + day + '.jsonl'), JSON.stringify({ t: type, d }) + String.fromCharCode(10));
   } catch (e) {
     console.warn('[log] 事件落盘失败:', e.message);
   }
@@ -1417,11 +1420,18 @@ console.log('[小蓝鲸] 判断模型:', cfg.ai.judgeModel, '| 日额度:',
   }
 }
 
-if (!cfg.appId || !cfg.secret) {
-  console.error('[小蓝鲸] ❌ 缺少 QQ_BOT_APPID / QQ_BOT_SECRET，检查 .env');
-}
-if (!cfg.ai.apiKey) {
-  console.error('[小蓝鲸] ❌ 缺少 AI_API_KEY，检查 .env');
+{
+  const missing = [];
+  if (!cfg.appId) missing.push('QQ_BOT_APPID');
+  if (!cfg.secret) missing.push('QQ_BOT_SECRET');
+  if (!cfg.ai.apiKey) missing.push('AI_API_KEY');
+  if (missing.length) {
+    console.error('[小蓝鲸] ❌ 缺少必填环境变量：' + missing.join(', '));
+    console.error('  1) 在项目根目录运行： node scripts/check-env.cjs');
+    console.error('  2) 按提示填 .env（模板见 .env.example），再重新启动');
+    console.error('  3) 还不知道怎么拿？看 AGENT.md 第 1 节');
+    process.exit(1);
+  }
 }
 
 gateway.connect(async (type, d) => {
