@@ -35,7 +35,8 @@ const NEW_PROMPT = cfg.persona.systemPrompt;
 const PERSONA_NAME = cfg.persona.name;
 
 // 线上代码给 system 拼接的后缀（取自 brain.js generateReply）
-const SYS_SUFFIX = `\n\n你的昵称是「${PERSONA_NAME}」。直接说话，不要加昵称前缀，不要任何解释。`;
+// 🆕 2026-10-24 同步 brain：不再拼昵称
+const SYS_SUFFIX = String.fromCharCode(10, 10) + '直接说话，不要加昵称前缀，不要任何解释。';
 
 // ---------- 用户消息的三种拼装变体 ----------
 // A: 线上原样（带"注意身份"尾缀）

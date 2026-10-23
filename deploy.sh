@@ -167,6 +167,13 @@ if [ -d "$SRC_DIR/tools" ]; then
     mkdir -p "$APP_DIR/scripts"
     cp -rf "$(dirname "$SRC_DIR")/scripts/." "$APP_DIR/scripts/"
     echo "  ✅ scripts/ 已就位（可直接 node scripts/check-env.cjs）"
+  # 🆕 2026-10-24 assets/ 也要带（emotion-lexicon.json 之前放在 data/ 被 .gitignore 漏掉了，
+  #    导致情绪词表只剩 25 词兜底、自测 5 条常红）
+  if [ -d "$SRC_DIR/assets" ]; then
+    mkdir -p "$APP_DIR/assets"
+    cp -rf "$SRC_DIR/assets/." "$APP_DIR/assets/"
+    echo "  ✅ assets/ 已就位"
+  fi
   fi
 else
   echo "❌ 缺少 tools/ 目录 —— 网页控制台会起不来"

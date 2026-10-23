@@ -87,25 +87,38 @@ function run(cmd, args, timeout) {
 }
 
 async function journalLines(n) {
-  const { err, stdout } = await run('journalctl',
+  const { stdout } = await run('journalctl',
     ['-u', SERVICE, '-n', String(n), '--no-pager', '-o', 'short-iso'], 5000);
-  if (!stdout) return `(读不到日志${err ? ': ' + err.message : ''})\n（本机没有 journalctl 时属正常）`;
-  return stdout;
+  if (stdout) return stdout;
+
+  // 🆕 2026-10-24 本地版兜底：没有 journalctl（Windows/macOS）时读启动脚本写的日志文件。
+  //    注意：本地日志行**没有时间戳前缀**，解析器那边（convo.js）已兼容这种行。
+  try {
+    const f = path.join(APP_DIR, 'data', 'local-bot.log');
+    const txt = fs.readFileSync(f, 'utf8');
+    const lines = txt.split('\n').filter((x) => x.trim()).slice(-n);
+    if (lines.length) return '(本地版：来源 ' + f + ' —— 本机没有 journalctl)\n' + lines.join('\n');
+  } catch { /* 没有本地日志就继续走下面的失败提示 */ }
+
+  return '(读不到日志：本机没有 journalctl，也没有 data/local-bot.log)';
 }
 
 async function serviceState() {
   const { err, stdout } = await run('systemctl', ['is-active', SERVICE], 3000);
-  if (err && !stdout) return 'unknown';
-  return (stdout || '').trim() || 'unknown';
+  const s = (stdout || '').trim();
+  if (!err && s) return s;
+
+  // 🆕 2026-10-24 本地版：没有 systemctl 时看 start-local 写的 PID 文件，
+  //    否则面板右上角永远是个红色 unknown（看起来像故障，其实是噪音）。
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'data', 'local-pids.json'), 'utf8'));
+    const alive = (pid) => { try { process.kill(Number(pid), 0); return true; } catch { return false; } };
+    const any = [j.bot, j.panel].filter(Boolean).some(alive);
+    return any ? 'active' : 'inactive';
+  } catch { /* 没有 pid 文件 */ }
+  return 'unknown';
 }
 
-// 🆕 开关机状态（2026-09-22）
-//
-// 🔴 为什么日志网页必须显示它：这是"开关机"功能**唯一的自救入口之一**。
-//    "关机"之后它就不说话了，很容易忘了 —— 打开这个页面一眼就能看到是开是关，
-//    而不用去猜"它怎么不理人"。
-// ⚠️ 故意**不 require power.js**：那样会把 brain/config 一起拉进这个只读进程，
-//    而且两个进程各有一份内存状态、容易看串。直接读文件最准。
 function powerState() {
   try {
     const f = path.join(APP_DIR, 'data', 'power.json');
@@ -504,33 +517,53 @@ const panelGroupCache = { at: 0, map: new Map() };
 function panelGroupLastSeen() {
   const now = Date.now();
   if (now - panelGroupCache.at < 5 * 60 * 1000) return panelGroupCache.map;
-  const map = new Map();               // openid -> 最近出现的 yyyy-mm-dd
-  const d0 = new Date();
-  for (let i = 0; i < PANEL_GROUP_DAYS; i++) {
-    const d = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - i);
+  const map = new Map();               // openid -> 最近出现的本地日期
+  let files = [];
+  try {
+    const dir = path.join(APP_DIR, 'data');
+    files = fs.readdirSync(dir)
+      .filter((f) => /^events-.*\.jsonl$/.test(f))
+      .map((f) => {
+        const p = path.join(dir, f);
+        try { return { p, m: fs.statSync(p).mtimeMs }; } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.m - a.m);
+  } catch { files = []; }
+
+  // 🆕 2026-10-24 本地版修：不再"按本地日期拼文件名"（写入用 UTC 时凌晨会找不到），
+  //    改成**扫目录 + 文件 mtime** 判活，天然免疫时区与跨天。
+  const cutoff = now - PANEL_GROUP_DAYS * 24 * 3600 * 1000;
+  for (const it of files) {
+    if (it.m < cutoff) continue;
+    let txt = '';
+    try { txt = fs.readFileSync(it.p, 'utf8'); } catch { continue; }
+    const d = new Date(it.m);
     const day = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-    let txt;
-    try { txt = fs.readFileSync(path.join(APP_DIR, 'data', 'events-' + day + '.jsonl'), 'utf8'); } catch { continue; }
-    // ⚠️ 事件日志里的字段是 `"group_openid":"<id>"`（不是 scope 那种 `group:<id>`）——
-    //    第一版按 `group:` 找，扫出空 Map，导致所有群都被判"久未出现"（用户看到列表空）。
     const re = /"(?:group_openid|group_id)":"([0-9A-Fa-f]{16,64})"/g;
     let m;
-    while ((m = re.exec(txt))) { if (!map.has(m[1])) map.set(m[1], day); } // 从今天往前扫，首次即最近
+    while ((m = re.exec(txt))) { if (!map.has(m[1])) map.set(m[1], day); }
   }
   panelGroupCache.at = now;
   panelGroupCache.map = map;
   return map;
 }
+
 function panelGroups(includeAll) {
   const aliases = groupsLoad();
   const seen = panelGroupLastSeen();
   const out = [];
-  for (const key of Object.keys(aliases)) {
+  const keys = new Set(Object.keys(aliases));
+  // 🆕 2026-10-24：新部署时 groups.json 还不存在（只有用户改过群名才会创建），
+  //    但"直发页要能选群"不能依赖它 ⇒ 活跃群的 openid 也并进来。
+  for (const openid of seen.keys()) keys.add('group:' + openid);
+
+  for (const key of keys) {
     const m = /^group:([0-9A-Fa-f]{16,64})$/.exec(key);
     if (!m) continue;
     const openid = m[1];
     const lastSeen = seen.get(openid) || '';
-    if (!lastSeen && !includeAll) continue;   // 最近 7 天没出现 = 当它不在了
+    if (!lastSeen && !includeAll) continue;   // 最近 N 天没出现 = 当它不在了
     const al = aliases[key] || {};
     out.push({
       openid,
@@ -539,10 +572,10 @@ function panelGroups(includeAll) {
       lastSeen,
     });
   }
-  // 活跃的排前面，其次按名字
   out.sort((a, b) => (b.lastSeen || '').localeCompare(a.lastSeen || '') || a.name.localeCompare(b.name));
   return out;
 }
+
 function groupsLoad() {
   try {
     const j = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'));

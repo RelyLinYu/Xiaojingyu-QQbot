@@ -35,12 +35,18 @@ function trimmed(s) {
 }
 
 // 解析一行 → { time, body } 或 null（不是日志正文行）
+// 🆕 2026-10-24 本地版：日志来自文件（无 journal 时间戳前缀）。
+//    ⇒ 只对"一眼是日志正文"的行放行，判据收窄，别把 [ai]/[小蓝鲸] 这类启动噪音当对话。
+const BARE_RE = /^\[(群|私聊|频道|send:)|^[├└│]/;
+
 function parseLine(raw) {
   const line = clean(raw);
   if (!line) return null;
   const m = LINE_RE.exec(line);
-  if (!m) return null;
-  return { time: m[2], body: m[3] };
+  if (m) return { time: m[2], body: m[3] };
+  const t = trimmed(line);
+  if (BARE_RE.test(t)) return { time: '', body: line };
+  return null;
 }
 
 // 这些行是"给人看的决策/结果"，要留下

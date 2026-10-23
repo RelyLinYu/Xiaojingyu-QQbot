@@ -999,7 +999,9 @@ async function generateReply(scope, msg, linkNote, opts = {}) {
     ? `\n\n${cfg.policy.knowledgeGate.unknownNote}`
     : '';
   const sys = cfg.persona.systemPrompt
-    + `\n\n你的昵称是「${cfg.persona.name}」。直接说话，不要加昵称前缀，不要任何解释。`
+    // 🆕 2026-10-24 删掉硬拼昵称：身份唯一真源 = 人设（否则换人设后模型两边讨好，
+    //    实测会说「我是伊莉莎何雨蒙，也可以叫我蓝色大肥鱼」）。只保留格式约束。
+    + String.fromCharCode(10, 10) + '直接说话，不要加昵称前缀，不要任何解释。'
     + unknownNote;
 
   // ⭐ 反重复：把它最近说过的话摆出来，要求换一种说法

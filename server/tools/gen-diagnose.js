@@ -30,8 +30,9 @@ const cfg = require('../config.js');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 复刻 brain.js generateReply 的拼装
+// 🆕 2026-10-24 同步 brain：删掉硬拼昵称（身份唯一真源 = 人设）
 const SYS = cfg.persona.systemPrompt
-  + `\n\n你的昵称是「${cfg.persona.name}」。直接说话，不要加昵称前缀，不要任何解释。`;
+  + String.fromCharCode(10, 10) + '直接说话，不要加昵称前缀，不要任何解释。';
 
 function buildUser(who, name, text) {
   return `群里最近的对话：\n小明: 大家好\n\n`

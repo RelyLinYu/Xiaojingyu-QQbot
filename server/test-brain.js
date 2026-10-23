@@ -4309,7 +4309,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       /'dailyCalls',\s*'visionDaily'/.test(lw));
     check('★ 整数项用 step="1"（不是 0.01）', /it\.int \? '1' : '0\.01'/.test(lw));
     check('★★ 概览区多一张「今日识图 / 上限 N 张」卡片（上限也要跟着面板改而变）',
-      /今日识图 \/ 上限/.test(lw) && /renderBudget\(j\.budget, j\.vision\)/.test(lw));
+      /今日识图 \/ 上限/.test(lw) && /renderBudget\(j\.budget,\s*j\.vision/.test(lw));
     check('★★ logweb 给面板提供识图用量（口径：ok = 真花钱的张数，cached 不占额度）',
       /function visionState/.test(pg) && /vision: visionState\(\)/.test(pg)
         && /Number\(cur\.ok\)/.test(pg) && /settings\.num\('visionDaily'/.test(pg));

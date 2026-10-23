@@ -117,6 +117,8 @@ process.on('uncaughtException', (e) => console.error('[未捕获的异常]', e))
 
 // ---------- 重复推送去重 ----------
 // 官方原文：为确保消息可达，相同 msg_id 可能重复推送，开发者需结合 msg_seq 做去重
+const path = require('path');
+
 const APP_DIR = process.env.APP_DIR || __dirname;
 
 const seen = new Map();     // msg_id -> ts
@@ -140,10 +142,14 @@ function logEvent(type, d) {
   try {
     const dir = path.join(APP_DIR, 'data');
     fs.mkdirSync(dir, { recursive: true });
-    const day = new Date().toISOString().slice(0, 10);
+    // ⚠️ 2026-10-24：原来用 toISOString（UTC）命名，而面板按**本地日期**找文件 ⇒
+    //    北京时间 00:00–08:00 期间面板找不到当天文件（直发页群列表空）。改用本地日期。
+    const _d = new Date();
+    const day = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
     fs.appendFileSync(path.join(dir, 'events-' + day + '.jsonl'), JSON.stringify({ t: type, d }) + String.fromCharCode(10));
   } catch (e) {
-    console.warn('[log] 事件落盘失败:', e.message);
+    // 提升到 error：事件日志是观测地基，静默 warn 会让人误判成"群权限没开"
+    console.error('[log] 事件落盘失败:', e.stack || e.message);
   }
 }
 

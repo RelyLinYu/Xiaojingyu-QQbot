@@ -23,18 +23,61 @@ $pidFile = Join-Path $dataDir 'local-pids.json'
 
 function Say($msg, $color = 'Gray') { Write-Host $msg -ForegroundColor $color }
 
+# 读 .env 里的 PORT（没有就 8080）
+function Get-LocalPort() {
+  try {
+    $line = Get-Content $envFile -Encoding UTF8 | Where-Object { $_ -match '^\s*PORT\s*=' } | Select-Object -Last 1
+    if ($line) { $v = ($line -split '=', 2)[1].Trim(); if ($v -match '^\d+$') { return [int]$v } }
+  } catch { }
+  return 8080
+}
+
+# 谁占着端口？（Get-NetTCPConnection 优先，netstat 兜底）
+function Get-ProcCmdLine([int]$procId) {
+  try { return (Get-CimInstance Win32_Process -Filter ("ProcessId=" + $procId)).CommandLine } catch { return '' }
+}
+
+# 只认"我们的"进程：命令行里带 logweb.js（防止误杀占着 8080 的别的 node 服务）
+function Test-OurPanel($proc) {
+  if (-not $proc) { return $false }
+  if ($proc.ProcessName -ne 'node') { return $false }
+  return ((Get-ProcCmdLine $proc.Id) -match 'logweb.js')
+}
+
+function Get-PortOwner([int]$port) {
+  try {
+    $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop | Select-Object -First 1
+    if ($c) { return (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue) }
+  } catch { }
+  try {
+    $line = (netstat -ano | Select-String (':' + $port + 's') | Select-Object -First 1)
+    if ($line) {
+      $pidStr = (($line.ToString().Trim()) -split 's+')[-1]
+      if ($pidStr -match '^d+$') { return (Get-Process -Id ([int]$pidStr) -ErrorAction SilentlyContinue) }
+    }
+  } catch { }
+  return $null
+}
+
 # ---------- 停止 ----------
 if ($Stop) {
-  if (-not (Test-Path $pidFile)) { Say '没有在运行的实例（找不到 data/local-pids.json）' 'Yellow'; exit 0 }
-  $pids = Get-Content $pidFile -Raw | ConvertFrom-Json
+  $pids = $null
+  if (Test-Path $pidFile) { $pids = Get-Content $pidFile -Raw | ConvertFrom-Json }
+  else { Say '没有 pid 文件，仍尝试按端口清理我们自己的面板进程…' 'Yellow' }
   foreach ($name in @('bot', 'panel')) {
-    $p = $pids.$name
+    $p = if ($pids) { $pids.$name } else { $null }
     if ($p) {
       try { Stop-Process -Id $p -Force -ErrorAction Stop; Say "已停止 $name (PID $p)" 'Green' }
       catch { Say "$name (PID $p) 已经不在了" 'Yellow' }
     }
   }
   Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+  # 🆕 2026-10-24：pid 文件之外的孤儿（重复启动会覆盖 pid 文件）也收掉 —— 只杀占着端口的 node
+  $port = Get-LocalPort
+  $owner = Get-PortOwner $port
+  if ((Test-OurPanel $owner)) {
+    try { Stop-Process -Id $owner.Id -Force -ErrorAction Stop; Say ("已停止占用 " + $port + " 端口的 node (PID " + $owner.Id + ")") 'Green' } catch { }
+  }
   exit 0
 }
 
@@ -63,6 +106,21 @@ if ($LASTEXITCODE -ne 0) { Say '❌ 自检没过，先按上面的提示补齐 .
 if ($Check) { exit 0 }
 
 # ---------- 启动 ----------
+# 🆕 2026-10-24：先查端口。被占就**一个进程都不拉**（避免"机器人起来了、面板崩了"的半残状态）
+$port = Get-LocalPort
+$owner = Get-PortOwner $port
+if ($owner) {
+  $ours = Test-OurPanel $owner
+  Say ("❌ 端口 " + $port + " 被占用：PID " + $owner.Id + "（" + $owner.ProcessName + "）") 'Red'
+  if ($ours) {
+    Say "   这看起来是本项目上一次启动的面板（孤儿进程）。先跑：" 'Yellow'
+    Say "   powershell -ExecutionPolicy Bypass -File start-local.ps1 -Stop" 'Yellow'
+  } else {
+    Say "   它**不是**本项目的进程，别乱杀。换端口更稳：在 .env 里加一行 PORT=9090" 'Yellow'
+  }
+  Say ("   或直接结束它（确认无害后）：Stop-Process -Id " + $owner.Id + " -Force") 'Yellow'
+  exit 1
+}
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 $logBot   = Join-Path $dataDir 'local-bot.log'
 $logPanel = Join-Path $dataDir 'local-panel.log'
@@ -102,7 +160,7 @@ if (-not $botOk -or -not $panelOk) {
   Say ''
   Say '有进程没起来，看日志最后 20 行：' 'Red'
   foreach ($f in @($logBot, $errBot, $logPanel, $errPanel)) {
-    if (Test-Path $f) { Say "--- $f ---" 'Yellow'; Get-Content $f -Tail 20 }
+    if (Test-Path $f) { Say "--- $f ---" 'Yellow'; Get-Content $f -Tail 20 -Encoding UTF8 }
   }
   exit 1
 }

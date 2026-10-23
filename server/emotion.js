@@ -31,8 +31,14 @@ const path = require('path');
 // ---------- 词表 ----------
 // 数据结构：{ emotions: { 情绪名: [词...] }, severe?: {...}, softers?: [...] }
 // 位置：server/data/emotion-lexicon.json（由 devtools 从朋友那份 lexicon.py 导出）
+// 🆕 2026-10-24 词表挪到 assets/（data/ 在 .gitignore 里，导致仓库/部署都没有它，
+//    自测 5 条情绪断言常红、线上也只能用 25 词兜底表）。先找 assets，再兼容旧 data。
 const DATA_DIR = path.join(__dirname, 'data');
-const LEXICON_FILE = path.join(DATA_DIR, 'emotion-lexicon.json');
+const LEXICON_FILE = (() => {
+  const a = path.join(__dirname, 'assets', 'emotion-lexicon.json');
+  try { if (fs.existsSync(a)) return a; } catch { /* ignore */ }
+  return path.join(DATA_DIR, 'emotion-lexicon.json');
+})();
 
 // 最低限度的内建词表 —— 只在词表文件缺失/读坏时兜底。
 // ⚠️ 故意写得很小：宁可"读不出什么"，也不要"用一个没审查过的表瞎判"。
