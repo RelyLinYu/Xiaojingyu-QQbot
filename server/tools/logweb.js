@@ -603,10 +603,19 @@ function buildConvos(journalText, opts = {}) {
     let how = '';
 
     if (isPriv) {
-      // ⚠️ 私聊：事件里**昵称是空的**（实测 `username: ""`）、身份只有 `user_openid`，
-      //    而日志里私聊行的昵称是"未知"。⇒ 用**发信人**当键，让同一个人的私聊归到一张卡。
-      key = `private:${whoKey(c.who) || 'unknown'}`;
-      how = 'private';
+      // ⚠️ 私聊：事件里**昵称是空的**（实测 `username: ""`），日志行统一显示「私聊用户」⇒
+      //    以前用昵称当键，**不同人的私聊会并成同一张卡**（2026-10-23 用户实测：
+      //    「我两个账号和他私聊都算到一个对话卡片里面去了」）。
+      //    ⇒ 现在优先用日志里的稳定 id（`#scope=private:<openid>`）；老日志没标记时，
+      //      退回"按时间在事件里找这条私聊的 scope"，最后才用昵称兜底。
+      const pm = /^private:([0-9A-Za-z_-]{8,64})$/.exec(c.scopeHint || '');
+      let pkey = pm ? 'private:' + pm[1] : '';
+      if (!pkey) {
+        const h = map.lookupByTime(c.time);
+        if (h && /^private:/.test(h.scopeId || '')) pkey = h.scopeId;
+      }
+      key = pkey || `private:${whoKey(c.who) || 'unknown'}`;
+      how = pkey ? 'marker' : 'private';
     } else {
       // 🆕 2026-10-23 **优先用日志里的稳定 id**（`#scope=group:xxx`）：
       //    学 qq-bridge —— 会话身份只认 id，昵称只当显示。这样昵称是全角空格 / 改过名 /
@@ -658,7 +667,15 @@ function buildConvos(journalText, opts = {}) {
     const realId = mReal ? mReal[1] : ((aliases[key] && aliases[key].id) || '');
 
     const al = aliases[key] || {};
-    const fallbackName = isPriv ? '私聊' : `群 ${n}（未命名）`;
+    // 🆕 私聊没登记名字时：主人显示名字（从 .env 读），其他人带 openid 尾 4 位
+    //    （否则两个人的卡都叫「私聊」，看不出区别）
+    const privRawId = realId || ((/^private:(.+)$/.exec(key) || [])[1] || '');
+    const privTail = String(privRawId).slice(-4);
+    const ownerId = String(process.env.BOT_OWNER_OPENID || '');
+    const ownerName = String(process.env.BOT_OWNER_NAME || '主人');
+    const fallbackName = isPriv
+      ? (privRawId && privRawId === ownerId ? ownerName : ('私聊' + (privTail ? ' ' + privTail : '')))
+      : `群 ${n}（未命名）`;
     return {
       kind: c.kind,
       scope: key,
