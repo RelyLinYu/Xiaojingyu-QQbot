@@ -1,0 +1,1699 @@
+// ============================================================
+//  链接解析：从群消息里找出 GitHub / B站 链接，抓元信息，渲染成 Markdown 卡片
+//
+//  ⚠️ 零依赖铁律：只用 Node 内置的 fetch / URL，不引任何 npm 包。
+//
+//  三种来源都要认（2026-09-21 用户明确要求）：
+//    ① 转发的卡片（message_type=3）—— 链接在 ark_data.fields 里（字段名不固定，递归扫）
+//    ② 带 bilibili.com 的普通链接
+//    ③ b23.tv 短链 —— 要先跟随跳转拿到真实地址
+//
+//  🔴 安全设计（必读，别绕过）：
+//    · 域名白名单 —— 绝不抓白名单外的 URL（防 SSRF：让它去读内网 / 元数据服务）
+//    · b23.tv 跳转后要**再校验一次最终域名**，否则短链可以被指到任意地方
+//    · 抓回来的标题/简介是**用户可控文本**，本模块**只做模板拼接、绝不喂给模型**
+//      → 天然免疫提示注入
+// ============================================================
+const cfg = require('./config');
+// ⚠️ md5 只用于 B站的 wbi 签名（见下面"小程序卡片反查"），Node 内置，不算引第三方依赖
+const crypto = require('crypto');
+// 🆕 2026-10-19 封面比对：下载封面到临时文件 + 调 Pillow 脚本算 dHash（零依赖铁律不破）
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+// 🆕 抖音无水印直链（2026-10-09）—— 内部走**无头浏览器**（系统装的 chrome-headless-shell，
+//    不是 npm 包，零依赖铁律不破）。配置见 config.js 的 linkParse.douyinDirect。
+const douyinDirect = require('./douyin-direct');
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+  + '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// ---------- 平台识别 ----------
+// 只用"域名后缀"判断，不用 includes —— 防止 evil.com/?x=bilibili.com 这种绕过
+const PLATFORM_RULES = [
+  ['github', /(^|\.)github\.com$/],
+  ['bilibili', /(^|\.)bilibili\.com$/],
+  ['bilibili', /(^|\.)b23\.tv$/],
+  ['douyin', /(^|\.)douyin\.com$/],
+  ['douyin', /(^|\.)iesdouyin\.com$/],
+  ['kuaishou', /(^|\.)kuaishou\.com$/],
+  // 快手短链的**中转域**：v.kuaishou.com → v.m.chenzhongtech.com → www.kuaishou.com
+  // 不认它的话，resolveShort 的每一跳白名单校验会在中间那跳就把自己拦下来
+  ['kuaishou', /(^|\.)chenzhongtech\.com$/],
+];
+
+function hostOf(url) {
+  try { return new URL(url).hostname.toLowerCase(); } catch { return ''; }
+}
+
+function platformOf(host) {
+  for (const [name, re] of PLATFORM_RULES) if (re.test(host)) return name;
+  return null;
+}
+
+// 域名是否在白名单内（白名单是"根域"，子域自动放行：www./m./api. 都行）
+function hostAllowed(host) {
+  if (!host) return false;
+  const list = cfg.policy.linkParse?.hosts || [];
+  return list.some((h) => host === h || host.endsWith('.' + h));
+}
+
+// ---------- 链接「身份」：去重要按"指向什么"算，不能按 URL 字符串算 ----------
+//
+// 🔴 两个真实 bug 都出在这里（2026-09-23 用户报「群友引用我发的链接会二次解析」）：
+//
+//  ① 一条合并转发里有 **3 个 issue 链接**，全指向同一个仓库：
+//       .../issues/141、.../issues/140、.../issues/136
+//     按 URL 去重 → 三个都不重复 → **发了 2 张一模一样的仓库卡片**。
+//  ② 群友**引用机器人自己发的卡片**时，QQ 会把卡片的 markdown **原样喂回来**
+//     （实测 `msg_elements[0].content` 就是整张卡片，含
+//      `[🔗 在 抖音 打开](https://www.iesdouyin.com/share/video/7687919372530262739/)`）
+//     → 我们把自己刚发的链接又解析了一遍 → **卡片又发一次**。
+//
+// 所以需要一个"这条链接到底指向什么"的 key：
+//   · 解析前能算的（从 URL 里抠 id）—— 在**一条消息内部**去重，省掉多余的 API 调用
+//   · 解析后才能算的（info.id / bvid / fullName）—— 判断"是不是刚发过"
+//   ⚠️ 两者格式必须**一致**，否则"短链"和"长链"指向同一个东西却对不上。
+function linkKey(url, platform) {
+  const u = String(url || '');
+  try {
+    if (platform === 'github') {
+      const m = u.match(/github\.com\/([^/\s?#]+)\/([^/\s?#]+)/i);
+      if (m) return `github:${m[1]}/${m[2]}`.toLowerCase().replace(/\.git$/, '');
+    }
+    if (platform === 'bilibili') {
+      const m = u.match(/(BV[0-9A-Za-z]{10})/);
+      if (m) return `bilibili:${m[1]}`;
+    }
+    if (platform === 'douyin') {
+      const m = u.match(/\/(?:video|share\/video)\/(\d{6,})/);
+      if (m) return `douyin:${m[1]}`;
+    }
+    if (platform === 'kuaishou') {
+      const m = u.match(/\/(?:short-video|photo|fw\/photo)\/([0-9A-Za-z_-]{6,})/);
+      if (m) return `kuaishou:${m[1]}`;
+    }
+  } catch { /* 落回 URL */ }
+  // 短链（v.douyin.com/xxx、b23.tv/xxx）里没有 id，只能先用 URL 当 key；
+  // 解析出真 id 之后会再补一个 infoKey（见 index.js）
+  return `url:${u}`;
+}
+
+// 解析之后的身份（和 linkKey 同一套格式）
+function infoKey(info) {
+  if (!info) return '';
+  if (info.platform === 'github') return `github:${String(info.fullName || '').toLowerCase()}`;
+  const id = info.bvid || info.id || '';
+  return id ? `${info.platform}:${id}` : '';
+}
+
+// ---------- "刚发过" 记忆：防止把自己发过的卡片再解析一遍 ----------
+//
+// 为什么不能只靠"作者是 bot 就跳过"：那个守卫（index.js 里的 `d.author?.bot`）
+// 只能挡住**机器人自己的消息**；而这里的情况是**群友引用/转发了机器人的卡片** ——
+// 消息是群友发的，但内容是我们刚发出去的东西。
+//
+// ⚠️ 必须**按群隔离**：同一个链接发到另一个群，那边的群友没见过，该发。
+const cardedAt = new Map();     // `${scope}|${key}` -> ts
+
+function cardedTtl() {
+  return cfg.policy.linkParse?.cardedTtlMs ?? 10 * 60 * 1000;
+}
+
+// 返回"多少秒前发过"；没发过返回 0
+function wasCarded(scope, keys) {
+  const now = Date.now();
+  const ttl = cardedTtl();
+  const list = Array.isArray(keys) ? keys : [keys];
+  for (const k of list) {
+    if (!k) continue;
+    const t = cardedAt.get(`${scope}|${k}`);
+    if (t && now - t < ttl) return Math.max(1, Math.round((now - t) / 1000));
+  }
+  return 0;
+}
+
+function markCarded(scope, keys) {
+  const now = Date.now();
+  const list = Array.isArray(keys) ? keys : [keys];
+  for (const k of list) if (k) cardedAt.set(`${scope}|${k}`, now);
+}
+
+// ---------- 🆕 刚刚处理过的链接（2026-10-05）----------
+//
+// 🔴 真实案例：群友发了一条 B站 15 小时半的视频链接 → 我们**正常发了卡片**、
+//    并按规矩**跳过了视频**（时长超上限）。45 秒后他问「给我解析刚刚发的链接」，
+//    鱼答：「链接点开就是个 b23.tv 的跳转，**我这边又看不到视频画面，解析不了**。」
+//    —— **答偏了**：它不知道自己刚发过卡片、也不知道视频为什么没发。
+//
+// ⇒ 这里记一笔"本群刚刚处理过什么"，生成回复时告诉模型一句，
+//    让它能答「15 个半小时的片，我可搬不动」这种**对的话**。
+//
+// ⚠️ 按群隔离（别的群跟这事无关）、带 TTL（聊过去了就别再提）、
+//    只记**结构化事实**（平台/标题/跳过原因），不记消息原文。
+const recentAt = new Map();     // scope -> { ts, cards: [...], videoSkip: '...' }
+
+function recentTtl() {
+  return cfg.policy.linkParse?.recentTtlMs ?? 5 * 60 * 1000;
+}
+
+// 记一张"刚发出去的卡片"。kind: 'video' 表示视频也发成功过
+function noteCard(scope, info, kind) {
+  try {
+    const now = Date.now();
+    const cur = recentAt.get(scope) || { ts: now, cards: [], videoSkip: '' };
+    cur.ts = now;
+    cur.cards.push({
+      platform: String(info?.platform || ''),
+      title: String(info?.title || '').slice(0, 30),
+      duration: String(info?.duration || ''),
+      kind: kind || 'card',
+    });
+    if (cur.cards.length > 3) cur.cards = cur.cards.slice(-3);
+    recentAt.set(scope, cur);
+  } catch { /* 记不上就算了，绝不能影响发卡片 */ }
+}
+
+// 记一笔"视频被跳过了"（原因写具体，模型才知道怎么答）
+function noteVideoSkip(scope, reason) {
+  try {
+    const now = Date.now();
+    const cur = recentAt.get(scope) || { ts: now, cards: [], videoSkip: '' };
+    cur.ts = now;
+    cur.videoSkip = String(reason || '跳过');
+    recentAt.set(scope, cur);
+  } catch { /* 同上 */ }
+}
+
+// 给模型看的那句话；没东西可说就返回 ''（**纯函数**，自测直接调它）
+function contextNote(scope) {
+  const cur = recentAt.get(scope);
+  if (!cur) return '';
+  if (Date.now() - cur.ts > recentTtl()) { recentAt.delete(scope); return ''; }
+
+  const parts = [];
+  const last = cur.cards[cur.cards.length - 1];
+  if (last) {
+    const name = { bilibili: 'B站', kuaishou: '快手', douyin: '抖音', github: 'GitHub' }[last.platform] || last.platform;
+    const extra = last.duration ? `（时长 ${last.duration}）` : '';
+    parts.push(`本群刚刚已经因为一条${name}链接发过卡片：「${last.title}」${extra}`);
+  }
+  if (cur.videoSkip && cur.videoSkip !== 'ok') {
+    parts.push(`视频**没有发**：${cur.videoSkip}`);
+  } else if (last && last.kind === 'video') {
+    parts.push('视频也一起发过了');
+  }
+  if (!parts.length) return '';
+  return parts.join('；') + '。如果现在被问到"解析/发一下那个链接"，说明**卡片已经发过了**，别再说"我解析不了"；'
+    + '视频没发的话，就把原因如实说一句（语气照常）。';
+}
+
+// 定期清理
+setInterval(() => {
+  const now = Date.now();
+  const ttl = recentTtl() * 4;
+  for (const [k, v] of recentAt) if (now - (v.ts || 0) > ttl) recentAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
+// 定期清理，防内存涨
+setInterval(() => {
+  const now = Date.now();
+  const ttl = cardedTtl() * 2;
+  for (const [k, t] of cardedAt) if (now - t > ttl) cardedAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
+// ---------- 从各种来源里抠出 URL ----------
+// ⚠️ 中文标点也要当分隔符 —— 群里常见「看看这个 https://b23.tv/xxx 挺好笑」
+//
+// 🔴 2026-10-09 改成**白名单**（原来是黑名单：只排除了空白 + 中文标点，**没排除中文汉字**）：
+//    线上真实翻车（测试群 19:01，用户原话「那个 github 明明能搜到，为什么他说没用」）：
+//      群友发的是 `https://github.com/lyogavin/airllm可以研究一下这个`
+//      —— **链接后面直接跟中文、中间没有空格**，这在群里是最常见的写法。
+//      旧正则把「可以研究一下这个」也吃进了 URL ⇒ 去请求 `…/airllm可以研究一下这个` ⇒ **HTTP 404**
+//      ⇒ 用户看到的就是"机器人说这条没用"，而他自己在浏览器里点（浏览器会自动在中文处断）是好的。
+//    ⇒ 改成只允许 RFC 3986 的 URL 合法字符，碰到中文自然停住。
+//    ⚠️ 别改回黑名单：只要漏掉任何一类字符（中文 / 日文 / 韩文 / emoji），就会被"粘"进 URL。
+//    ⚠️ 下面那句"去掉尾部英文标点"的兜底**保留**（括号、句号紧贴链接也是常见写法）。
+const URL_RE = /https?:\/\/[A-Za-z0-9\-._~:\/?#\[\]@!$&'()*+,;=%]+/gi;
+
+function extractUrls(text) {
+  const out = [];
+  const seen = new Set();
+  const s = String(text || '');
+  let m;
+  URL_RE.lastIndex = 0;
+  while ((m = URL_RE.exec(s))) {
+    // 去掉尾部可能粘上的英文标点
+    const u = m[0].replace(/[.,;:!?）)】」"']+$/, '');
+    // 去重 —— 同一条消息里链接常出现两次（正文一次、引用/卡片里一次），
+    // 不去重的话上游会以为是两个链接
+    if (seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+    if (out.length > 30) break;
+  }
+  return out;
+}
+
+// 递归收集一个对象里所有字符串值。
+// 为什么不用固定字段名：卡片的 ark_type 有多种（feed / tuwen / news / contact_card…），
+// 每种 fields 的键都不一样。扫"值"比猜"键"稳得多。
+function deepStrings(obj, out = [], depth = 0) {
+  if (depth > 6 || out.length > 300) return out;
+  if (typeof obj === 'string') { out.push(obj); return out; }
+  if (Array.isArray(obj)) { for (const v of obj) deepStrings(v, out, depth + 1); return out; }
+  if (obj && typeof obj === 'object') { for (const v of Object.values(obj)) deepStrings(v, out, depth + 1); }
+  return out;
+}
+
+// ---------- 主入口：从一条消息里找出**我们认得的**链接 ----------
+//
+// 🆕 返回**数组**（最多 max 个）。
+// 🔴 为什么必须支持多个（2026-09-22 用户实测踩到）：
+//    用户一条消息里贴了**两个**链接（`v.douyin.com/xxx v.kuaishou.com/yyy`），
+//    旧版只解析第一个 → **快手那条被静默丢掉**，用户看到的是
+//    "抖音有卡片没视频、快手干脆没反应"，完全不知道发生了什么。
+//    一条消息贴多个链接是很常见的用法，静默丢弃是最糟的失败方式。
+function findLinks(msg, max = 2) {
+  const lp = cfg.policy.linkParse;
+  if (!lp?.enabled || !msg) return [];
+
+  // 🔴 不看**转发的聊天记录**（`message_type === 102`）—— 2026-09-23 用户要求
+  //
+  // 起因是他截图报的"两张一模一样的 GitHub 卡片"。查下来那张卡片的源头是一条
+  // **转发的「GitHub 监控」聊天记录**：一条 102 消息里塞了 3 个 issue 链接
+  //（…/issues/141、/140、/136，全指向同一个仓库）→ 发了 2 张一样的卡。
+  //
+  // 上一轮我修的是**去重**（按"指向什么"算，3 条并成 1 条）。
+  // 但用户的意思是更彻底：**这种消息压根不该被解析**。
+  //
+  // 为什么这个判断是对的（不只是"少个来源"）：
+  //   · 102 是**别人聊天的合并转发**，里面出现链接往往只是"记录里的内容"，
+  //     **不是有人在这个群里分享东西** —— 群友没打算看卡片
+  //   · 实际源头还是**别的机器人**（那个「GitHub 监控」），等于**机器人之间互相喂消息**，
+  //     很容易变成卡片刷屏
+  //   · ⚠️ 而且这种消息正文是 QQ 拼出来的**文本摘要**
+  //     （`=== 消息 1 === [发送者] … [消息内容] …`），
+  //     里面同时含**发送者和内容** —— 语义上根本分不清"谁在分享什么"
+  //
+  // ⚠️ 只挡 102（聊天记录）。**引用消息 103 不挡** ——
+  //    那是"有人指着一条链接问"，是正常的分享意图（见下面 msg_elements 的处理）。
+  // ⚠️ 想恢复（比如你确实想让转发记录也能出卡片）：把 `skipForwarded` 改成 false。
+  if (lp.skipForwarded !== false && Number(msg.message_type) === 102) {
+    // 只在"本来能解析出东西"时才吭一声，免得每条转发记录都刷一行
+    if (/https?:\/\//i.test(JSON.stringify(msg).slice(0, 4000))) {
+      console.log('  ├ 🔗 转发的聊天记录（message_type=102），按配置不解析里面的链接');
+    }
+    return [];
+  }
+
+  const sources = [];
+
+  // 🔴 先剔除"**这是我们自己卡片的原文**"的那种来源。
+  //
+  // 群友引用机器人发的卡片时，QQ 会把卡片的 markdown **原样喂回来**（实测）：
+  //   msg_elements[0].content = "# 戴夫…\n![封面 #480px #360px](https://qqbot.ugcimg.cn/…)\n
+  //                              …[🔗 在 抖音 打开](https://www.iesdouyin.com/share/video/…)​"
+  // 于是我们把自己刚发的链接又解析了一遍 → 卡片再发一次。
+  //
+  // 指纹就是**我们自己插进去的零宽空格 + 换行**（`\u200B\n`）：
+  // 卡片每一行之间都是它，而**用户手打不出来**这个字符 —— 所以它很可靠。
+  // （这是第二道防线；第一道是下面的"刚发过"记忆，见 wasCarded）
+  const isOurCard = (s) => String(s || '').includes('\u200B\n');
+
+  // ① 正文
+  sources.push(String(msg.content || ''));
+
+  // ② 被引用的原文（引用消息时，链接常在引用里）
+  //    ⚠️ 但"机器人自己刚发过的卡片"要排除 —— 见上面
+  let skipOurCard = 0;
+  for (const el of (Array.isArray(msg.msg_elements) ? msg.msg_elements : [])) {
+    const c = String(el?.content || '');
+    if (isOurCard(c)) { skipOurCard++; continue; }
+    sources.push(c);
+  }
+  // 正文本身也可能就是被引用的卡片（有些形态会把引用内容拼进 content）
+  if (isOurCard(sources[0]) && sources.length === 1) {
+    console.log('  ├ 🔗 这条消息内容本身就是机器人发过的卡片，跳过（防自解析）');
+    return [];
+  }
+  if (skipOurCard) {
+    console.log(`  ├ 🔗 引用的原文里有 ${skipOurCard} 段是机器人自己发过的卡片，跳过（防自解析）`);
+  }
+
+  // ③ 卡片：ark_data 里所有字符串值
+  if (msg.ark_data) sources.push(...deepStrings(msg.ark_data));
+
+  // ④ 卡片/富媒体的其他可能位置
+  for (const k of ['ark_data_raw', 'attachments', 'msg_elements']) {
+    if (msg[k]) sources.push(...deepStrings(msg[k]));
+  }
+
+  const blob = sources.filter((s) => !isOurCard(s)).join('\n').slice(0, lp.maxTextLen || 2000);
+
+  const out = [];
+  const seen = new Set();
+  for (const url of extractUrls(blob)) {
+    const host = hostOf(url);
+    if (!hostAllowed(host)) continue;               // 🔒 SSRF 第一道闸
+    const platform = platformOf(host);
+    if (!platform) continue;
+    if (lp.platforms && lp.platforms[platform] === false) continue;   // 平台开关
+
+    // 🔴 按**身份**去重，不是按 URL 字符串去重。
+    //    实测踩到：一条合并转发里有 3 个 issue 链接（141/140/136），
+    //    全指向同一个仓库 → 按 URL 去重一个都不少 → 发了 2 张一模一样的卡片。
+    const key = linkKey(url, platform);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({ url, host, platform, key });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+// 只取第一个（老接口，保持兼容）
+function findLink(msg) {
+  return findLinks(msg, 1)[0] || null;
+}
+
+// ---------- 限流 / 开关（在 index.js 里调用）----------
+const lastAt = new Map();      // scope -> ts
+let linkDay = '';
+let linkCount = 0;
+
+function beijingToday() {
+  const d = new Date();
+  const bj = new Date(d.getTime() + d.getTimezoneOffset() * 60000 + 8 * 3600 * 1000);
+  return `${bj.getFullYear()}-${bj.getMonth() + 1}-${bj.getDate()}`;
+}
+
+function inQuietHours() {
+  if (cfg.policy.quietHoursEnabled === false) return false;
+  const d = new Date();
+  const bj = new Date(d.getTime() + d.getTimezoneOffset() * 60000 + 8 * 3600 * 1000);
+  const h = bj.getHours();
+  const [a, b] = cfg.policy.quietHours;
+  return a <= b ? (h >= a && h < b) : (h >= a || h < b);
+}
+
+// 能不能解析：返回 { ok, why }
+function linkAllowed(scope) {
+  const lp = cfg.policy.linkParse || {};
+  if (!lp.enabled) return { ok: false, why: '链接解析已关闭' };
+  if (inQuietHours()) return { ok: false, why: '静默时段' };
+
+  const today = beijingToday();
+  if (today !== linkDay) { linkDay = today; linkCount = 0; }
+  if (linkCount >= (lp.dailyLimit || 200)) return { ok: false, why: `今日链接解析已达上限(${lp.dailyLimit})` };
+
+  const gap = lp.cooldownMs ?? 3000;
+  const last = lastAt.get(scope) || 0;
+  if (Date.now() - last < gap) {
+    return { ok: false, why: `同群冷却中(${Math.round((gap - (Date.now() - last)) / 1000)}s)` };
+  }
+  return { ok: true };
+}
+
+function markLink(scope) {
+  lastAt.set(scope, Date.now());
+  linkCount++;
+}
+
+// 每 5 分钟清一次冷却表，防内存涨
+setInterval(() => {
+  const now = Date.now();
+  const max = Math.max(cfg.policy.linkParse?.cooldownMs || 3000, 60 * 1000) * 2;
+  for (const [k, t] of lastAt) if (now - t > max) lastAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
+// ---------- HTTP 小工具 ----------
+function timeout() { return cfg.policy.linkParse?.timeoutMs || 8000; }
+
+async function getJson(url, headers = {}) {
+  const r = await fetch(url, {
+    headers: { 'User-Agent': UA, ...headers },
+    signal: AbortSignal.timeout(timeout()),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+// 取网页文本（可自定义 UA）
+async function getText(url, headers = {}) {
+  const r = await fetch(url, {
+    headers: {
+      'User-Agent': UA,
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+      ...headers,
+    },
+    signal: AbortSignal.timeout(timeout()),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.text();
+}
+
+const MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 '
+  + '(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+
+// 🔴🔴 抖音必须用**爬虫 UA** —— 这是整条路的关键（2026-09-22 实测，试了 6 种 UA 才找到）：
+//      · 普通 UA / 手机 UA → 只返回**空壳**：
+//          `_ROUTER_DATA` 里只有页面上下文（ua/webId/itemId/abParams），**没有视频数据**；
+//          `iesdouyin.com/web/api/v2/aweme/iteminfo` 和 `douyin.com/aweme/v1/web/aweme/detail`
+//          两个接口都是 **HTTP 200 但正文长度为 0**（抖音把数据放在签名请求后面了）。
+//      · 爬虫 UA（Googlebot / Baiduspider / bingbot / Sogou，实测都行）→ 返回 **SEO 页面**，
+//        里面带 `application/ld+json` 的 **VideoObject**：
+//        标题 / 作者 / 发布日期 / 时长 / 封面 / 点赞评论数，**全都有** ✅
+//     本质仍是普通 HTTP GET（不是协议破解），但属于「伪装爬虫」，
+//     平台哪天改 SEO 策略就可能失效 —— 所以解析失败时要能安静降级，别报错刷屏。
+const BOT_UA = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
+// 从 s 的 pos 处（必须是 { 或 [）向后配平，返回结束下标（跳过字符串里的括号）
+function matchFrom(s, pos) {
+  const open = s[pos];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0, inStr = false, esc = false;
+  for (let j = pos; j < s.length; j++) {
+    const c = s[j];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === open) depth++;
+    else if (c === close) { depth--; if (depth === 0) return j + 1; }
+  }
+  return -1;
+}
+
+// 找「能包住 anchor 的最小 JSON 对象」
+//
+// 用途：快手的分享页把作品数据内嵌在一个**没有变量名**的 JSON 块里，
+//       只能靠"先找到 `"caption"`，再往回找一个能包住它的 `{`"来定位。
+// ⚠️ 不能简单地"往前找最近的 `{`" —— 那个可能是个已经闭合的兄弟对象，
+//    必须逐个往前试、正向配平，取**第一个结束位置在 anchor 之后**的。
+function enclosingJson(s, anchor, win = 400000) {
+  const starts = [];
+  for (let j = anchor; j > Math.max(0, anchor - win); j--) if (s[j] === '{') starts.push(j);
+  for (const st of starts.slice(0, 80)) {
+    const end = matchFrom(s, st);
+    if (end > anchor) return { start: st, end, raw: s.slice(st, end) };
+  }
+  return null;
+}
+
+// 抽 <script type="application/ld+json"> 里 @type 匹配的那一块
+function extractLdJson(html, type) {
+  for (const m of html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const o = JSON.parse(m[1]);
+      if (o && o['@type'] === type) return o;
+    } catch { /* 跳过坏块 */ }
+  }
+  return null;
+}
+
+// ISO8601 时长 → 秒（YouTube/抖音 用的是 `PT0H13M4S` 这种）
+function parseIsoDuration(s) {
+  const m = /P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?/.exec(String(s || ''));
+  if (!m) return 0;
+  const [, d, h, mi, se] = m;
+  return (Number(d || 0) * 86400) + (Number(h || 0) * 3600) + (Number(mi || 0) * 60) + Math.round(Number(se || 0));
+}
+
+// ---------- 封面尺寸 ----------
+//
+// 🔴🔴 为什么需要这个（用户 2026-09-22 反馈「竖屏都被压缩了」）：
+//    QQ 的图片语法是 `![alt #宽px #高px](url)` —— **两个数都得给**，
+//    而且 QQ **不会按比例缩放**，是**硬拉到指定尺寸**。
+//    旧版一律写 `#480px #270px`（16:9），于是：
+//      · 快手封面 320×640（1:2 竖屏）→ 被拉成 480×270 → **压扁成一张饼**
+//      · 抖音封面 440×330（4:3）      → 被拉成 480×270 → 横向拉长
+//    实测就是用户截图里那种"人变宽变矮"的变形。
+//
+// 解法：先读出封面的**真实**宽高比，再按比例算框。
+//     竖屏给窄框（宽 240），横屏给宽框（宽 480），高度按比例算并夹在 150~480。
+function coverSize(w, h) {
+  if (!w || !h) return '#480px #270px';      // 读不出来就退回 16:9（跟以前一样）
+  const ratio = w / h;
+  const W = ratio < 1 ? 240 : 480;           // 竖屏窄一点，不然卡片会很高
+  const H = Math.min(480, Math.max(150, Math.round(W / ratio)));
+  return `#${W}px #${H}px`;
+}
+
+// 只取图片**前 16KB** 就能读出尺寸 —— JPEG 的 SOF / PNG 的 IHDR / WebP 的 VP8X 都在文件头。
+// 用 Range 请求，不把整张图下下来（实测抖音封面 13KB、快手 27KB，只取 8KB 就够）。
+//
+// ⚠️ 读不出来时**返回 null 让调用方降级**，绝不抛异常 ——
+//    这只是"让卡片更好看"的加分项，不能因为它挂掉整个解析。
+async function imageSize(url) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': UA, Range: 'bytes=0-16383' },
+      signal: AbortSignal.timeout(timeout()),
+    });
+    // 206 = 支持 Range（正常）；200 = 服务器不理 Range，也照样能用
+    if (!r.ok && r.status !== 206) return null;
+    const b = Buffer.from(await r.arrayBuffer());
+    if (b.length < 20) return null;
+
+    // JPEG：扫 SOF0~SOF15（跳过 C4=DHT / C8=JPG / CC=DAC，那些不是 SOF）
+    if (b[0] === 0xFF && b[1] === 0xD8) {
+      for (let i = 2; i < b.length - 9; i++) {
+        if (b[i] !== 0xFF) continue;
+        const mk = b[i + 1];
+        if (mk >= 0xC0 && mk <= 0xCF && mk !== 0xC4 && mk !== 0xC8 && mk !== 0xCC) {
+          // SOF 段里：**高在 +5，宽在 +7**（大端 16 位）—— 顺序反了会得到转置的卡片
+          return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+        }
+      }
+      return null;
+    }
+    // PNG：IHDR 固定在 16/20
+    if (b[0] === 0x89 && b.slice(1, 4).toString() === 'PNG') {
+      return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+    }
+    // WebP：三种子格式，尺寸位置都不一样
+    if (b.slice(0, 4).toString() === 'RIFF' && b.slice(8, 12).toString() === 'WEBP') {
+      const fmt = b.slice(12, 16).toString();
+      if (fmt === 'VP8X') return { w: 1 + b.readUIntLE(24, 3), h: 1 + b.readUIntLE(27, 3) };
+      if (fmt === 'VP8 ') return { w: b.readUInt16LE(26) & 0x3FFF, h: b.readUInt16LE(28) & 0x3FFF };
+      if (fmt === 'VP8L') {
+        const n = b.readUInt32LE(21);
+        return { w: 1 + (n & 0x3FFF), h: 1 + ((n >> 14) & 0x3FFF) };
+      }
+    }
+    if (b.slice(0, 3).toString() === 'GIF') return { w: b.readUInt16LE(6), h: b.readUInt16LE(8) };
+    return null;
+  } catch { return null; }
+}
+
+// ---------- GitHub ----------
+// 官方 REST API，未认证 60 次/小时（够个人群用；要更高就配 GITHUB_TOKEN）
+async function fetchGithub(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  const m = u.pathname.match(/^\/([^/]+)\/([^/]+)/);
+  if (!m) return null;
+  const owner = m[1];
+  const repo = m[2].replace(/\.git$/, '');
+  if (/^(issues|pull|pulls|releases|actions|blob|tree|commit|commits)$/i.test(owner)) return null;
+
+  const headers = { Accept: 'application/vnd.github+json' };
+  if (cfg.policy.linkParse?.githubToken) headers.Authorization = 'Bearer ' + cfg.policy.linkParse.githubToken;
+
+  const j = await getJson(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, headers);
+  if (!j || !j.full_name) return null;
+  return {
+    platform: 'github',
+    fullName: j.full_name,
+    desc: j.description || '',
+    owner: j.owner?.login || owner,
+    language: j.language || '',
+    stars: j.stargazers_count || 0,
+    forks: j.forks_count || 0,
+    issues: j.open_issues_count || 0,
+    created: fmtDate(j.created_at),
+    pushed: fmtDate(j.pushed_at),
+    license: j.license?.spdx_id && j.license.spdx_id !== 'NOASSERTION' ? j.license.spdx_id : '',
+    topics: Array.isArray(j.topics) ? j.topics.slice(0, 5) : [],
+    htmlUrl: j.html_url || url,
+    // 🆕 仓库预览图
+    //
+    // ⚠️ 这张图是**给 QQ 去下载的**，我们自己不拉 —— 所以不占我们带宽、也不涉及 SSRF。
+    // ⚠️ 路径里的 hash 部分**随便填都行**（实测 `1` 和 `abc123` 返回同一张图），
+    //    所以不用为了拿图多调一次 API。
+    //
+    // 🔴 但**不要直接把 GitHub 的地址给 QQ**（用户 2026-09-22 反馈"图读取不到的情况还是太多"）：
+    //    · 官方文档说 markdown 里的图「**开放平台会下载转存该资源**」
+    //      → QQ 是**发卡片那一刻抓一次**，抓失败**不重试，这张卡片的图就永远没了**
+    //    · 而 `opengraph.githubassets.com` **间歇性限流**（实测密集请求 20%~50% 是 429）
+    //    ⇒ 所以走我们自己的中转（`policy.linkParse.ogProxy`）：我们抓的时候能**重试 + 缓存**。
+    //      实测 QQ 会来抓我们（日志里能看到腾讯的 IP），而且**接受 http://**。
+    //      没配 ogProxy 就退回直连 GitHub —— 和以前一样，不会更差。
+    ogImage: ogImageUrl(owner, repo),
+  };
+}
+
+// 仓库预览图的地址：优先走自己的中转，没配就直连 GitHub
+function ogImageUrl(owner, repo) {
+  const g = cfg.policy.linkParse?.ogProxy;
+  const base = String(g?.base || '').replace(/\/+$/, '');
+  if (g?.enabled && base) {
+    // ⚠️ 只拼 owner/repo，**绝不接受任意 URL**；服务端还会再校验一次字符集
+    return `${base}/og/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.png`;
+  }
+  return `https://opengraph.githubassets.com/1/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+}
+
+// 🆕 发卡片**之前**先把预览图预热好（2026-09-22）
+//
+// 🔴 为什么必须"提前"抓，而不是等 QQ 抓（这是这一版最重要的设计点）：
+//    · 官方文档说 markdown 里的图「开放平台会下载转存该资源」
+//      → QQ 是**发卡片那一刻抓一次，且失败不重试**
+//    · 而 GitHub 的预览图接口会 **429**，实测**重试隔 1 秒仍是 429**
+//      （限流窗口比"QQ 那一下就抓完"的时间长得多）
+//    ⇒ 所以"QQ 来抓的时候我们才去抓"这个时机**太被动**：它没有时间等，我们有。
+//
+// ✅ 现在改成：**我们先把图抓进缓存，再发卡片**。
+//    这样 QQ 来抓的时候是**缓存命中**，必定成功。
+//    （实测：QQ 确实会来抓我们，而且接受 http://，见 tools/ogcache.js 的文件头）
+//
+// ⚠️ 抓不到时**把图从卡片里去掉**，而不是留着让它显示成破图 ——
+//    "没有图但卡片干净"比"有一个加载不出来的框"体验好。
+//
+// 返回 true = 图可用，false = 已经把它从卡片里摘掉了
+async function warmOgImage(info, log = () => {}) {
+  if (!info?.ogImage) return false;
+  const g = cfg.policy.linkParse?.ogProxy;
+  const t0 = Date.now();
+  try {
+    const r = await fetch(info.ogImage, {
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(g?.warmTimeoutMs || 6000),
+    });
+    if (r.ok) {
+      const len = (await r.arrayBuffer()).byteLength;
+      log(`预览图预热成功 ${len}B（${Date.now() - t0}ms）`);
+      return true;
+    }
+    log(`预览图预热失败 HTTP ${r.status}（${Date.now() - t0}ms）→ 卡片里不放图`);
+  } catch (e) {
+    log(`预览图预热异常 ${e.name}（${Date.now() - t0}ms）→ 卡片里不放图`);
+  }
+  info.ogImage = '';
+  info.ogImageDropped = true;
+  return false;
+}
+
+// ---------- B站 ----------
+// b23.tv 短链 → 手动跟随跳转，**每一跳都校验域名**
+//
+// 🔴 为什么不能图省事用 redirect:'follow' + 事后检查 r.url：
+//    那样内网请求**在校验之前就已经发出去了**。
+//    只要白名单域名上挂一个开放重定向（b23.tv/x → http://169.254.169.254/），
+//    就能把我们带去读云元数据 —— 这是教科书级 SSRF。
+//    ✅ 正解：redirect:'manual'，拿到 Location 后**先校验域名再发下一跳**。
+async function resolveShort(url) {
+  let current = url;
+  for (let hop = 0; hop < 5; hop++) {
+    const r = await fetch(current, {
+      redirect: 'manual',
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(timeout()),
+    });
+
+    // 不是 3xx → 这里就是终点
+    if (r.status < 300 || r.status >= 400) {
+      const h = hostOf(current);
+      if (!hostAllowed(h) || !platformOf(h)) throw new Error('短链落点在白名单外：' + h);
+      return current;
+    }
+
+    const loc = r.headers.get('location');
+    if (!loc) throw new Error('短链返回了 ' + r.status + ' 但没有 Location');
+    const next = new URL(loc, current).href;
+
+    // ⚠️ 关键：**这一跳的目标**先校验，再决定要不要发下一个请求
+    const nh = hostOf(next);
+    if (!hostAllowed(nh)) {
+      throw new Error(`短链跳转到了白名单外的地址：${nh}`);
+    }
+    // 🆕 2026-10-21 修 412：短链一跳就落到平台页面（如 b23.tv → bilibili.com/video/BV…），
+    //   **别再抓那个页面** —— B站对服务器 IP 的 HTML 页面会回 412（WAF），
+    //   而我们要的只是 URL（BV 号从 URL 里就能取，后面全走 API）。
+    //   实测：只取 Location 不跟随 → 302 正常；跟着抓页面 → 412。
+    if (nh !== hostOf(current) && platformOf(nh)) return next;
+    current = next;
+  }
+  throw new Error('短链跳转次数过多（>5 跳）');
+}
+
+function extractVideoId(u) {
+  const s = String(u);
+  const bv = s.match(/BV[0-9A-Za-z]{10}/);
+  if (bv) return { kind: 'bvid', id: bv[0] };
+  const av = s.match(/\/av(\d+)/i);
+  if (av) return { kind: 'aid', id: av[1] };
+  const ep = s.match(/\/ep(\d+)/i);
+  if (ep) return { kind: 'ep', id: ep[1] };
+  return null;
+}
+
+async function fetchBilibili(url) {
+  let target = url;
+  if (/(^|\.)b23\.tv$/.test(hostOf(url))) target = await resolveShort(url);
+
+  const vid = extractVideoId(target);
+  if (!vid) return null;
+
+  const H = { Referer: 'https://www.bilibili.com' };
+  // 🔴 2026-10-21 修 412：`/x/web-interface/view` 对**浏览器 UA** 会回 412（WAF），
+  //   而 curl/无 UA 是 200（实测 iPhone/Android/桌面 Chrome 全 412，空 UA 与 curl 默认都 200）。
+  //   这不是封 IP —— playurl 带桌面 UA 仍是 200。⇒ 只有 view 这层换非浏览器 UA。
+  const HVIEW = { ...H, 'User-Agent': 'curl/8.5.0' };
+  let view = null;
+
+  if (vid.kind === 'bvid' || vid.kind === 'aid') {
+    const q = vid.kind === 'bvid' ? `bvid=${vid.id}` : `aid=${vid.id}`;
+    const j = await getJson(`https://api.bilibili.com/x/web-interface/view?${q}`, HVIEW);
+    if (j.code !== 0 || !j.data) return null;
+    view = j.data;
+  } else {
+    // 番剧 ep → 先换 bvid
+    const j = await getJson(`https://api.bilibili.com/x/web-interface/view?ep_id=${vid.id}`, HVIEW);
+    if (j.code !== 0 || !j.data) return null;
+    view = j.data;
+  }
+
+  const d = view;
+  return {
+    platform: 'bilibili',
+    bvid: d.bvid,
+    aid: d.aid,
+    cid: d.cid,
+    title: String(d.title || '').trim(),
+    desc: String(d.desc || '').replace(/\s+/g, ' ').trim(),
+    up: d.owner?.name || '',
+    upMid: d.owner?.mid,
+    pubdate: fmtDate(d.pubdate ? new Date(d.pubdate * 1000).toISOString() : ''),
+    duration: fmtDuration(d.duration),
+    durationSec: d.duration || 0,
+    view: d.stat?.view || 0,
+    like: d.stat?.like || 0,
+    danmaku: d.stat?.danmaku || 0,
+    cover: String(d.pic || '').replace(/^http:/, 'https:'),   // ⚠️ API 给的是 http，统一升到 https
+    tname: d.tname || '',
+    htmlUrl: `https://bilibilix.com/video/${d.bvid}/`,
+    // 🆕 2026-10-21：短域名换 b23.lol —— 302 到可播放的 mp4，手机浏览器 UA 下 200 video/mp4
+    shareUrl: d.bvid ? `https://b23.lol/${d.bvid}` : '',
+  };
+}
+
+// ---------- 🆕 B站「小程序卡片」反查（2026-10-08）----------
+//
+// 🔴 治的是用户 2026-10-08 报的：「b站卡片**读取不到视频，只能走链接**」。
+//
+// 线上事件原文（data/events-2026-10-08.jsonl，2026-10-08T17:59:55）—— 群友从 B站 App
+// 分享到群里，QQ 给机器人的**整条消息里一个 URL 都没有**：
+//
+//   message_type: 3
+//   ark_data: { ark_name: "小程序", ark_type: "miniapp",
+//               fields: { source: "哔哩哔哩",
+//                         source_logo: "https://open.gtimg.cn/open/app_icon/00/95/17/76/…",
+//                         title: "家人们路边捡到个鱼",
+//                         preview: "https://qq.ugcimg.cn/v1/90l2fj452ueusetgle7i3le8f…" } }
+//
+// ⇒ findLinks 扫遍 ark_data 也扫不出链接 → 走到 L0 → 被「暂不支持的类型(卡片)」拒掉。
+//   线上日志就是那行：`└ 不回（暂不支持的类型(卡片)）`。
+//
+// ⚠️ 别和**另一种** B站卡片搞混：`ark_type: "tuwen"` 那种「图文H5」,
+//    fields 里带 `jump_url: https://b23.tv/xxxx` —— 那种 findLinks 本来就能解析，
+//    不归这里管（bilibiliCardTitle 会主动把它排除掉，免得抢了原来的活）。
+//
+// ✅ 出路：卡片里**唯一有用的是标题**，而它是视频标题的**原样拷贝**
+//    （实测「家人们路边捡到个鱼」= BV1PahH6SEL3 的标题，一字不差）
+//    ⇒ 拿标题去 B站搜，要求搜到**完全同名**的那条 → 还原出 bvid → 后面全走老路
+//      （同一张卡片、同一个视频直链，连"刚发过就不再发"的去重都能复用）。
+//
+// 📊 召回率实测（2026-10-08，拿线上 92 张真实卡片逐条打）：
+//    · 只按默认排序搜第 1 页            → **40%**
+//    · 同一标题按 totalrank/click/pubdate **各搜一页** → **90%**（83/92）
+//    ⇒ 三种排序是**从 40% 提到 90% 的关键**（默认排序会把完全同名的那条压到 20 名开外），
+//      不是"多打几次保险"，别图省事删掉。
+//    ⚠️ 剩下那 10% 多半是**已删除 / 番剧 / 直播回放 / 动态**这类没有正常视频页的东西 ——
+//      搜不到就**安静落回正常聊天流程**（不报错、不发卡、不占配额）。
+//
+// 🔒 安全：全程只对**平台自己**做只读搜索，不抓消息里给的 URL、结果也不喂模型
+//    （拼卡片走的是和别的平台一样的模板拼接）→ 依旧免疫提示注入、不花模型钱。
+
+// wbi 签名的置换表（B站前端写死的，官方接口校验用）
+const WBI_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+  33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
+  26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
+  20, 34, 44, 52,
+];
+
+// 标题归一化：**只用来判断"是不是同一条"**，别拿它去搜（搜索要用原始标题）
+//
+// ⚠️ 搜索结果里的 title 带着 `<em class="keyword">…</em>` 高亮（B站的老习惯），
+//    不剥掉的话"完全同名"永远匹配不上 —— 实测第一版就栽在这（命中率 0）。
+function normTitle(s) {
+  return String(s || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/[\s\u200B\u3000]/g, '')
+    .toLowerCase();
+}
+
+function wbiMixinKey(raw) {
+  let out = '';
+  for (const i of WBI_TAB) out += raw[i] || '';
+  return out.slice(0, 32);
+}
+
+let wbiCache = { key: '', at: 0 };
+
+// 拿 wbi 签名密钥（= nav 接口给的两张图的文件名拼起来过一遍置换表）
+//
+// ⚠️ 不登录也能拿（实测 code=0），但**每天轮换** → 缓存 1 小时，失败就抛给上层。
+async function getWbiKey() {
+  const cl = cfg.policy.linkParse?.cardLookup || {};
+  if (wbiCache.key && Date.now() - wbiCache.at < (cl.wbiTtlMs ?? 60 * 60 * 1000)) {
+    return wbiCache.key;
+  }
+  const r = await fetch('https://api.bilibili.com/x/web-interface/nav', {
+    headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com' },
+    signal: AbortSignal.timeout(cl.timeoutMs ?? 6000),
+  });
+  if (!r.ok) throw new Error('nav HTTP ' + r.status);
+  const j = await r.json();
+  const base = (u) => String(u || '').split('/').pop().split('.')[0];
+  const key = wbiMixinKey(base(j?.data?.wbi_img?.img_url) + base(j?.data?.wbi_img?.sub_url));
+  if (key.length !== 32) throw new Error('nav 没给出 wbi 密钥');
+  wbiCache = { key, at: Date.now() };
+  return key;
+}
+
+// 给参数表签名：时间戳 + 键排序 + urlencode（B站只认这套顺序）+ md5
+function wbiSign(params, key) {
+  const all = { ...params, wts: Math.floor(Date.now() / 1000) };
+  const q = Object.keys(all).sort()
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(String(all[k]).replace(/[!'()*]/g, ''))}`)
+    .join('&');
+  return q + '&w_rid=' + crypto.createHash('md5').update(q + key).digest('hex');
+}
+
+// 搜索接口：不签名会被反爬挡下（实测返回一页 HTML 而不是 JSON）
+async function searchBilibiliVideos(keyword, order, key) {
+  const cl = cfg.policy.linkParse?.cardLookup || {};
+  const qs = wbiSign({ search_type: 'video', keyword, page: 1, order }, key);
+  const r = await fetch('https://api.bilibili.com/x/web-interface/wbi/search/type?' + qs, {
+    headers: {
+      'User-Agent': UA,
+      Referer: 'https://www.bilibili.com',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+    },
+    signal: AbortSignal.timeout(cl.timeoutMs ?? 6000),
+  });
+  if (!r.ok) throw new Error('搜索 HTTP ' + r.status);
+  const j = await r.json();
+  if (j?.code !== 0) throw new Error(`搜索被拒 code=${j?.code} ${j?.message || ''}`);
+  return Array.isArray(j?.data?.result) ? j.data.result : [];
+}
+
+// 播放量可能是数字、也可能是 "1.2万" 这种字符串
+function numOf(v) {
+  const n = Number(v);
+  if (Number.isFinite(n)) return n;
+  const m = String(v || '').match(/^([\d.]+)\s*万/);
+  return m ? Number(m[1]) * 1e4 : 0;
+}
+
+// ---------- 🆕 封面比对（2026-10-19）----------
+//
+// 🔴 用户报：「B站卡片解析仅凭标题经常发错短标题视频，能不能再加上封面来锁定原视频」。
+//    现场原因就在 `findBilibiliByTitle`：短标题（比如「这个视频」）在 B站 有大量**完全同名**的
+//    视频，旧逻辑在"同名多条"时直接取**播放量最高**的那条 —— 那不是被分享的那个。
+//    卡片里其实有封面（`ark_data.fields.preview`），所以同名多条时**用封面挑**：
+//      · 计算卡片封面与每个候选视频封面（搜索结果的 `pic`）的 **dHash**（64 位）
+//      · 汉明距离最小、且 ≤ 阈值的那条 = 同一个视频
+//    ⚠️ 仍然只在**完全同名**的候选里挑 —— 不靠封面去扩大召回（那会引入"像但不同"的风险）。
+//    ⚠️ 全程 fail-open：没 python / 没 Pillow / 图下载失败 / 哈希异常 ⇒ 返回 null，退回按播放量。
+//    ⚠️ 只在**候选 ≥2** 时才跑（大多数卡片只有一条，不多花一次下载）。
+
+// 汉明距离（两个 16 位 hex 的 dHash）
+function hammingHex(a, b) {
+  if (!/^[0-9a-f]{16}$/.test(a) || !/^[0-9a-f]{16}$/.test(b)) return 99;
+  let x = BigInt('0x' + a) ^ BigInt('0x' + b);
+  let d = 0;
+  while (x) { d += Number(x & 1n); x >>= 1n; }
+  return d;
+}
+
+async function pickByCover(previewUrl, list, log = () => {}) {
+  const cl = cfg.policy.linkParse?.cardLookup || {};
+  if (cl.coverMatch === false) return null;
+  if (!previewUrl || !Array.isArray(list) || list.length < 2) return null;
+  const py = String(cl.pyPath || '/opt/meme-api/.venv/bin/python');
+  const script = String(cl.phashScript || path.join(__dirname, 'tools', 'img-phash.py'));
+  if (!fs.existsSync(py) || !fs.existsSync(script)) return null;
+  const cands = list
+    .filter((v) => /^https?:\/\//.test(String(v?.pic || '')))
+    .slice(0, Number(cl.coverMaxCandidates) > 0 ? Number(cl.coverMaxCandidates) : 5);
+  if (!cands.length) return null;
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bili-cover-'));
+  try {
+    const urls = [previewUrl, ...cands.map((v) => String(v.pic))];
+    const files = [];
+    for (let i = 0; i < urls.length; i++) {
+      const r = await fetch(urls[i], {
+        headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com' },
+        signal: AbortSignal.timeout(Number(cl.timeoutMs) > 0 ? Number(cl.timeoutMs) : 6000),
+      });
+      if (!r.ok) return null;
+      const b = Buffer.from(await r.arrayBuffer());
+      // 封面正常几十 KB；超过 2MB 基本不是封面（或下到了网页），直接放弃
+      if (!b.length || b.length > 2 * 1024 * 1024) return null;
+      const f = path.join(dir, `${i}.img`);
+      fs.writeFileSync(f, b);
+      files.push(f);
+    }
+    const r = spawnSync(py, [script, ...files], { encoding: 'utf8', timeout: 15000 });
+    const hs = String(r.stdout || '').trim().split('\n').map((s) => s.trim());
+    if (hs.length !== files.length || hs.some((h) => !/^[0-9a-f]{16}$/.test(h))) return null;
+    const base = hs[0];
+    let best = null;
+    let bestD = 99;
+    for (let i = 1; i < hs.length; i++) {
+      const d = hammingHex(base, hs[i]);
+      if (d < bestD) { bestD = d; best = cands[i - 1]; }
+    }
+    const th = Number(cl.phashThreshold) > 0 ? Number(cl.phashThreshold) : 14;
+    if (best && bestD <= th) {
+      log(`封面比对命中：${best.bvid}（距离 ${bestD}/64）`);
+      return String(best.bvid);
+    }
+    log(`封面比对没命中（最近 ${bestD}/64 > 阈值 ${th}）→ 退回播放量`);
+    return null;
+  } catch (e) {
+    log(`封面比对异常（忽略）：${e.message || e}`);
+    return null;
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 清不掉也无妨 */ }
+  }
+}
+
+// "标题 → bvid" 的记忆：同一个视频被反复转发时不再重复搜
+const titleHits = new Map();
+
+async function findBilibiliByTitle(title, opts = {}) {
+  const log = typeof opts === 'function' ? opts : (opts.log || (() => {}));
+  const preview = (typeof opts === 'object' && opts.preview) ? String(opts.preview) : '';
+  const cl = cfg.policy.linkParse?.cardLookup;
+  if (!cl?.enabled) return null;
+  const want = normTitle(title);
+  if (!want) return null;
+  // 封面也进缓存键：同名不同视频靠封面区分，只按标题缓存会把错的记下来
+  const cacheKey = preview
+    ? `${want}#${crypto.createHash('md5').update(preview).digest('hex').slice(0, 10)}`
+    : want;
+
+  const ttl = cl.ttlMs ?? 12 * 60 * 60 * 1000;
+  const cached = titleHits.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ttl) {
+    log(`标题反查命中记忆：${cached.bvid}`);
+    return cached.bvid;
+  }
+
+  let wkey;
+  try { wkey = await getWbiKey(); } catch (e) {
+    log(`拿不到 B站 wbi 密钥：${e.message || e}`);
+    return null;
+  }
+
+  const orders = Array.isArray(cl.orders) && cl.orders.length
+    ? cl.orders : ['totalrank', 'click', 'pubdate'];
+
+  // 先把**所有排序**里完全同名的收集起来（去重）—— 只取第一个命中的排序，
+  // 拿到的是"那个排序下最像的那条"，同名视频被分在不同排序页时根本看不到。
+  const exactAll = [];
+  const seen = new Set();
+  for (const order of orders) {
+    let list;
+    try { list = await searchBilibiliVideos(title, order, wkey); } catch (e) {
+      log(`B站搜索失败（${order}）：${e.message || e}`);
+      continue;
+    }
+    // 🔴 **必须完全同名**才算。模糊匹配会把"标题相似"的另一个视频发出去 ——
+    //    那比不发糟得多（等于造谣）。封面比对也只在同名候选里挑，不扩大召回。
+    for (const v of list) {
+      const bv = String(v?.bvid || '');
+      if (!/^BV[0-9A-Za-z]{10}$/.test(bv) || seen.has(bv)) continue;
+      if (normTitle(v.title) !== want) continue;
+      seen.add(bv);
+      exactAll.push(v);
+    }
+    if (exactAll.length >= 2) break;            // 已经有多条同名可挑，别再打更多排序
+    if (exactAll.length === 1 && !preview) break; // 只有一条且没封面可对 → 就是它，不必再搜
+  }
+  if (!exactAll.length) return null;
+
+  let chosen = exactAll[0];
+  if (exactAll.length > 1) {
+    // 🆕 2026-10-19：同名多条时**先用封面比对**；封面挑不出来再退回播放量
+    const byCover = preview ? await pickByCover(preview, exactAll, log) : null;
+    if (byCover) {
+      chosen = exactAll.find((v) => String(v.bvid) === byCover) || chosen;
+    } else {
+      exactAll.sort((a, b) => numOf(b.play) - numOf(a.play));
+      chosen = exactAll[0];
+      log(`搜到 ${exactAll.length} 条同名视频，封面没锁定 → 取播放最高的 ${chosen.bvid}`);
+    }
+  }
+  const bvid = String(chosen.bvid);
+  titleHits.set(cacheKey, { bvid, ts: Date.now() });
+
+  // 超上限就删最旧的一条（不引 LRU 库，Map 的插入顺序就够用）
+  if (titleHits.size > (cl.maxCache ?? 500)) {
+    const oldest = titleHits.keys().next().value;
+    if (oldest !== undefined) titleHits.delete(oldest);
+  }
+  return bvid;
+}
+
+// 纯函数（**不发任何请求**）：这条消息是不是"没有链接的 B站小程序卡片"？是就返回标题。
+//
+// ⚠️ 之所以拆成纯函数：反查要打 B站搜索接口，**必须等限流闸门都过了再打**
+//    （在冷却期/静默时段里白打一次接口是纯浪费），所以 index.js 先问它、
+//    过了闸门才去 resolveBilibiliCard。
+// 卡片 → `{ title, preview }`（preview 是卡片自带的封面，用于同名多条时锁原视频）。
+// ⚠️ 仍是纯函数、不发请求（index 先过限流闸门，再调 resolveBilibiliCard）。
+function bilibiliCard(msg) {
+  if (!cfg.policy.linkParse?.cardLookup?.enabled) return null;
+  // 卡片消息（3）才看 —— 别的类型没这套结构
+  if (Number(msg?.message_type) !== 3) return null;
+  const ad = msg.ark_data || {};
+  if (String(ad.ark_type) !== 'miniapp') return null;
+  const f = ad.fields || {};
+  // 带 URL 的形态（tuwen 的 jump_url 等）不归这里管 —— findLinks 本来就能处理，别抢它的活
+  if (f.jump_url || f.url) return null;
+  // 只认 B站的小程序卡片（source 就是 B站；别的平台的小程序卡片没有可靠的反查手段）
+  if (!/哔哩哔哩|bilibili/i.test(String(f.source || ''))) return null;
+  const t = String(f.title || '').trim();
+  if (t.length < 2) return null;
+  return { title: t, preview: String(f.preview || f.cover || '').trim() };
+}
+
+// 兼容旧调用：只要标题
+function bilibiliCardTitle(msg) {
+  const c = bilibiliCard(msg);
+  return c ? c.title : '';
+}
+
+// 反查 → 拼成一条和 findLinks 输出**同构**的"链接"，后面全走老路
+async function resolveBilibiliCard(title, preview, log = () => {}) {
+  const l = typeof preview === 'function' ? preview : log;
+  const pv = typeof preview === 'string' ? preview : '';
+  if (cfg.policy.linkParse?.platforms?.bilibili === false) return [];
+  const t = String(title || '').trim();
+  if (!t) return [];
+  const bvid = await findBilibiliByTitle(t, { preview: pv, log: l });
+  if (!bvid) return [];
+  const url = `https://www.bilibili.com/video/${bvid}`;
+  return [{ url, host: hostOf(url), platform: 'bilibili', key: linkKey(url, 'bilibili'), fromCard: true }];
+}
+
+// ---------- 格式化 ----------
+
+// ISO 时间串的**容错**处理
+//
+// 🔴 抖音给的是**坏值**：`"2026-09-05T17:00:00+08:00Z"`
+//    —— 已经有 `+08:00` 时区偏移了，末尾**还多一个 `Z`**。
+//    `new Date('2026-09-05T17:00:00+08:00Z')` → **Invalid Date**，
+//    于是卡片上的「发布」被静默跳过（用户 2026-09-22 反馈「抖音卡片没有发布时间」）。
+//    ⚠️ 这是抖音自己的 bug，但**得我们兜着**：解析失败原本只是"当没有"，
+//       而"当没有"的后果是信息缺失且**没有任何日志**，是最难发现的那类问题。
+//    这里统一把"偏移量后面多余的 Z"剪掉。
+function fixIso(s) {
+  return String(s || '').trim().replace(/([+-]\d{2}:?\d{2})Z$/i, '$1');
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(fixIso(iso));
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function fmtDuration(sec) {
+  const s = Number(sec) || 0;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+    : `${m}:${String(ss).padStart(2, '0')}`;
+}
+
+function fmtNum(n) {
+  const v = Number(n) || 0;
+  if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿';
+  // ⚠️ 用 2 位小数（原来 1 位）—— 249732 显示成「25.0 万」太糊了，Star 数要看得出量级差
+  if (v >= 1e4) return (v / 1e4).toFixed(2) + ' 万';
+  return String(v);
+}
+
+// Markdown 转义：**只转义真正会影响"行内渲染"的字符**。
+//
+// ⚠️ 别图省事把 `- . + ! # >` 也一起转义（第一版就这么干的，实测卡片里出现了
+//    `Xiaojingyu\-QQbot`、`正则规则 \+ L1` 这种）。它们在正文里毫无副作用；
+//    而且 QQ 的 markdown 是**自研方言**，多出来的反斜杠有被**原样显示**的风险。
+//
+// ⚠️ `#` 和 `>` 也**不用**转义 —— 它们只在"行首"才起作用，而我们在上面
+//    已经把换行压成空格了，行首语义根本不会出现。
+const MD_ESC = /[\\`*_[\]|~]/g;
+
+function mdEsc(s) {
+  return String(s || '').replace(MD_ESC, '\\$&').replace(/[\r\n]+/g, ' ').trim();
+}
+
+// 截断 + 省略号（直接 slice 会像"说了一半"）
+function cut(s, n) {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  return t.length > n ? t.slice(0, n) + '…' : t;
+}
+
+// ---------- 抖音（2026-09-22 新增）----------
+//
+// 链路：v.douyin.com/IbTyOLmZyDY/ → www.iesdouyin.com/share/video/{id}/ → www.douyin.com/video/{id}
+//
+// 🔴 关键：**必须伪装爬虫 UA（BOT_UA），且要落到 www.douyin.com/video/{id}**。
+//    数据（`ld+json` 的 VideoObject）在这个页面上，不在 share 页 ——
+//    share 页只是个 302 跳板。普通 UA 拿到的是空壳，原因见上面 BOT_UA 的注释。
+//
+// ⚠️⚠️ 抖音**拿不到视频直链**。这不是没试够，是**试遍了**（2026-09-22 实测）：
+//    | 入口 / 接口                              | 结果 |
+//    |------------------------------------------|------|
+//    | iesdouyin / m.douyin / www.douyin 分享页  | 只有元信息，无视频字段 |
+//    | www.douyin.com/light/{id}（嵌入播放页）   | 只有 dns-prefetch 提示，无真地址 |
+//    | aweme/v1/web/aweme/detail（4 组参数）     | **HTTP 403 `Blocked by ArgusSecurityPlugin Uifid Not Found`** |
+//    | web/api/v2/aweme/iteminfo                 | HTTP 200 但**正文长度 0** |
+//    | 4 种 UA（WeChat/Weibo/AwemeApp/Googlebot）| 全部零视频线索 |
+//    一共 11 种组合，**一个 .mp4 都没有**。
+//    要拿到只有一条路：**逆向 `a_bogus` 签名 + 采集 `msToken`/`ttwid` cookie** ——
+//    那是正面硬刚字节的反爬（Argus），会随平台改版不断失效，
+//    还容易让服务器 IP 被标记。**决定不做**，抖音只发卡片。
+// 🆕 从**分享文案**里提标题和作者（零请求）。
+//
+// 为什么需要它：抖音有两种内容 —— 视频（`/video/`）和**图文**（`/note/`），
+// 而**图文页抖音不给数据**（详见 fetchDouyin 里的实测），只能退回用分享文案。
+//
+// 文案长这样（就是群友粘贴的那段）：
+//   「6.43 复制打开抖音，看看【小张不吃香菜.的图文作品】喜欢来聊 https://v.douyin.com/xxx/ WMw:/ 02/15」
+//      → 作者「小张不吃香菜.」· 正文「喜欢来聊」
+// ⚠️ 正文取「】之后、第一个链接之前」——链接后面那截（`WMw:/ 02/15`）是抖音加的分享码，不要。
+function parseDouyinShareText(text) {
+  const s = String(text || '');
+  const m = /【([^】]{1,60})】/.exec(s);
+  if (!m) return { author: '', caption: '', kind: '' };
+  const inside = m[1];
+  const kind = /图文/.test(inside) ? 'note' : (/视频/.test(inside) ? 'video' : '');
+  const author = inside.replace(/的(图文|视频)?作品$/, '').trim();
+  const rest = s.slice(m.index + m[0].length);
+  const urlAt = rest.search(/https?:\/\//);
+  const caption = (urlAt >= 0 ? rest.slice(0, urlAt) : rest).replace(/\s+/g, ' ').trim();
+  return { author, caption, kind };
+}
+
+// 🆕 判断一个（已展开的）抖音地址是**视频**还是**图文**，并取出 id。
+//    抽成纯函数是为了能单测 —— 这个判断错了会静默跳过，测试是唯一的防线。
+function douyinTargetOf(target) {
+  const t = String(target || '');
+  const noteId = (t.match(/\/note\/(\d{6,})/) || [])[1]
+    || (t.match(/\/share\/note\/(\d{6,})/) || [])[1];
+  if (noteId) return { kind: 'note', id: noteId };
+  const videoId = (t.match(/\/video\/(\d{6,})/) || [])[1]
+    || (t.match(/\/share\/video\/(\d{6,})/) || [])[1]
+    || (t.match(/[?&]modal_id=(\d{6,})/) || [])[1];
+  if (videoId) return { kind: 'video', id: videoId };
+  return null;
+}
+
+async function fetchDouyin(url, shareText) {
+  let target = url;
+  if (/^v\.douyin\.com$/i.test(hostOf(url))) target = await resolveShort(url);
+
+  const t = douyinTargetOf(target);
+
+  // 🔴🔴 图文（note）：抖音**不给数据**，所以**连请求都不发**。
+  //
+  // 实测（2026-10-04）：
+  //   · 视频页 `www.douyin.com/video/{id}` → **62KB**，带 `VideoObject`（标题/作者/时长/封面全有）
+  //   · 图文页 `www.douyin.com/note/{id}` → **2KB 空壳，0 个 ld+json**
+  //   · 试遍 4 种入口 × 3 种 UA = 12 组合（www/note、iesdouyin/share/note、m/share/note、
+  //     discover?modal_id × Googlebot / iPhone / Baiduspider），最好的也只有"有壳无内容"的 33KB
+  //     ——`_ROUTER_DATA` 在，但 `desc` / `nickname` / `url_list` 全是 0 次。
+  //   ⇒ 这是抖音对不同类型内容的区别对待，不是我们的 bug。
+  //
+  // 出路：**用分享文案**（消息里本来就带着「【作者.的图文作品】正文」）—— 零请求、零成本。
+  // ⚠️ 只对图文这么做。**视频抓不到时仍然安静跳过** ——
+  //    否则私有/已删除/翻车的链接会一张接一张冒卡（参考"没钱了刷屏 285 次"那类事故）。
+  if (t && t.kind === 'note') {
+    // 🆕 2026-10-09：图文（note）现在**也能拿到真实数据**了 ——
+    //    走无头浏览器取 detail 里的 `images[]`（实测 2 张图、14 秒）。
+    //    ⚠️⚠️ 必须放在下面"分享文案兜底"**之前**！否则当消息里只有链接、没带分享文案时，
+    //        会在那个 `return null` 提前退出，永远走不到这里
+    //        （2026-10-09 部署当天实测到的 bug：纯链接消息 0.6 秒就安静跳过了）
+    let directNote = null;
+    if (cfg.linkParse?.douyinDirect?.enabled !== false) {
+      try { directNote = await douyinDirect.fetchDirect(t.id, cfg.linkParse?.douyinDirect); } catch { }
+    }
+
+    const st = parseDouyinShareText(shareText);
+    if (!directNote && !st.author && !st.caption) {
+      console.log('  │  └ 抖音图文：无头浏览器没拿到、分享文案也提取不到 → 安静跳过');
+      return null;
+    }
+    if (directNote) {
+      console.log(`  │  └ 抖音图文直链 OK（${directNote.images.length} 张图）`);
+    } else {
+      console.log(`  │  └ 抖音图文：无头浏览器没拿到 → 退回分享文案`
+        + `（作者「${st.author || '?'}」· 正文 ${st.caption ? st.caption.length + ' 字' : '无'}）`);
+    }
+    return {
+      platform: 'douyin',
+      kind: 'note',
+      id: t.id,
+      title: st.caption || st.author || '抖音图文',
+      author: st.author,
+      partial: !directNote,   // 拿到真实数据就不再"部分"了
+      images: (directNote?.images || []).map((x) => x.url),
+      cover: directNote?.cover || '',
+      htmlUrl: `https://www.iesdouyin.com/share/note/${t.id}/`,
+    };
+  }
+
+  const id = t && t.id;
+  if (!id) return null;
+
+  const html = await getText(`https://www.douyin.com/video/${id}`, { 'User-Agent': BOT_UA });
+  const ld = extractLdJson(html, 'VideoObject');
+  if (!ld) return null;
+
+  // interactionStatistic 是个数组，每项形如 { interactionType: {'@type':'LikeAction'}, userInteractionCount: 34146 }
+  //
+  // ⚠️ 它挂在 `creator` 下面，但里面装的其实是**这条视频**的数据（不是作者总量）：
+  //      LikeAction   = 本条点赞
+  //      FollowAction = 作者的粉丝数（这个我们**不用**）
+  //    抖音的 SEO 数据里**只有这两个**，**没有播放量**（详见下面 view 的注释）。
+  const stat = (kind) => {
+    for (const it of (ld.creator?.interactionStatistic || [])) {
+      const t = String(it.interactionType?.['@type'] || it.interactionType || '');
+      if (t.toLowerCase().includes(kind.toLowerCase())) return Number(it.userInteractionCount) || 0;
+    }
+    return 0;
+  };
+
+  const sec = parseIsoDuration(ld.duration);
+
+  // 🆕 无水印直链（2026-10-09）：要起无头浏览器，**约 11~15 秒**，是现在这张卡片的主要耗时。
+  //    拿不到就安静跳过 —— 只少一行直链，上面的元信息照常出。
+  let direct = null;
+  if (cfg.linkParse?.douyinDirect?.enabled !== false) {
+    try { direct = await douyinDirect.fetchDirect(id, cfg.linkParse?.douyinDirect); } catch { }
+    console.log(direct
+      ? `  │  └ 抖音直链 OK（${direct.playUrl ? '视频' : '图文 ' + direct.images.length + ' 图'}）`
+      : '  │  └ 抖音直链：没拿到（卡片照常发，只是不带直链）');
+  }
+
+  return {
+    platform: 'douyin',
+    id,
+    // 🆕 无水印直链（就是上面刚取到的那个；拿不到就是空串，卡片少一行而已）
+    playUrl: direct?.playUrl || '',
+    // 🆕 2026-10-12：**贴给用户点的是 shareUrl**（抖音官方播放接口，裸访问能播），
+    //    不是 playUrl（CDN 直链，裸访问 403 —— 用户 2026-10-12 报的"直链 403"就是这个）。
+    //    playUrl 仍然保留：**服务器自己下载/发群**时用它（带 Referer 能下，且能挑 h264 高码率）。
+    shareUrl: direct?.shareUrl || '',
+    // 体积（抖音会给 data_size）—— 上层据此判断能不能直接发进群
+    playSize: direct?.playSize || 0,
+    images: (direct?.images || []).map((x) => x.url),
+    // ⚠️ 抖音的 name 结尾自带「 - 抖音」，得剪掉，否则卡片标题很脏
+    title: String(ld.name || '').replace(/\s*[-–]\s*抖音\s*$/, '').trim(),
+    author: ld.creator?.name || '',
+    authorUrl: ld.creator?.url || '',
+    // ⚠️ uploadDate 是**坏值**（末尾多一个 Z），fmtDate 里已统一容错
+    pubdate: fmtDate(ld.uploadDate),
+    durationSec: sec,
+    duration: fmtDuration(sec),
+    cover: (Array.isArray(ld.thumbnailUrl) ? ld.thumbnailUrl[0] : ld.thumbnailUrl) || '',
+    like: stat('Like'),
+    // 🔴 评论数在**顶层** `commentCount`，**不在** creator.interactionStatistic 里。
+    //    早期只扫了 interactionStatistic → 卡片上"评论"永远不显示（已修）。
+    comment: Number(ld.commentCount) || stat('Comment'),
+    // 🔴 抖音**没有播放量**：VideoObject 顶层字段里根本没有 viewCount，
+    //    interactionStatistic 里也只有 LikeAction / FollowAction（没有 ViewAction）。
+    //    这是抖音自己的数据就不给，不是我们没读到。所以卡片上**不显示播放**。
+    view: stat('View') || stat('Watch'),
+    // 🔴 卡片上的「打开」链接**不能用 `www.douyin.com/video/{id}`** ——
+    //    那个地址在**手机**上打开的是「抖音精选」PC 版网页（用户 2026-09-22 反馈），
+    //    不是那个视频。手机上的视频 H5 页是 `iesdouyin.com/share/video/{id}/`
+    //    （实测手机 UA 直出该页、不跳转；PC 上它会 302 回 douyin.com，也没有损失）。
+    htmlUrl: `https://www.iesdouyin.com/share/video/${id}/`,
+  };
+}
+
+// ---------- 快手（2026-09-22 新增）----------
+//
+// 链路：v.kuaishou.com/JJYSn5HT → v.m.chenzhongtech.com/fw/photo/3x2qw55sgce69uq
+//                                → www.kuaishou.com/short-video/3x2qw55sgce69uq
+// 🔴 必须用 **手机 UA** 抓最终的 www.kuaishou.com 页面（163KB）：
+//    作品数据是一个**没有变量名**的 8.6KB JSON 内嵌在 HTML 里，
+//    靠「先找 `"caption"`，再先后找一个能包住它的 `{`」定位（见 enclosingJson）。
+// ✅ 快手**有视频直链** —— 同一个 JSON 里的 `mainMvUrls[].url`，
+//    实测能下（HTTP 206 / video/mp4 / 2.1MB）。
+async function fetchKuaishou(url) {
+  let target = url;
+  if (/^v\.kuaishou\.com$/i.test(hostOf(url))) target = await resolveShort(url);
+
+  const html = await getText(target, { 'User-Agent': MOBILE_UA });
+  const at = html.indexOf('"caption"');
+  if (at < 0) return null;
+
+  const box = enclosingJson(html, at + 5);
+  if (!box) return null;
+
+  let o;
+  try { o = JSON.parse(box.raw); } catch { return null; }
+  if (!o || (!o.caption && !o.photoId)) return null;
+
+  const firstUrl = (v) => {
+    const arr = Array.isArray(v) ? v : [v];
+    for (const x of arr) {
+      const u = typeof x === 'string' ? x : (x && (x.url || x.cdn)) || '';
+      if (/^https?:/.test(u)) return u;
+    }
+    return '';
+  };
+
+  // ⚠️ 直链带签名参数（pkey），**有时效**，拿到就得马上下载，别缓存
+  const mv = (Array.isArray(o.mainMvUrls) ? o.mainMvUrls : []).map((x) => x && (x.url || x.cdn)).filter(Boolean);
+  // 优先非 hd 档（hd 体积大，容易撞 30MB 上限）
+  const videoUrl = mv.find((u) => !/\/hd\d*\.mp4/.test(u)) || mv[0] || '';
+
+  const sec = Math.round((Number(o.duration) || 0) / 1000);
+  return {
+    platform: 'kuaishou',
+    id: String(o.photoId || ''),
+    title: String(o.caption || '').trim(),
+    author: o.userName || '',
+    pubdate: fmtDate(o.timestamp ? new Date(Number(o.timestamp)).toISOString() : ''),
+    durationSec: sec,
+    duration: fmtDuration(sec),
+    cover: firstUrl(o.coverUrls) || firstUrl(o.webpCoverUrls),
+    like: Number(o.likeCount) || 0,
+    view: Number(o.viewCount) || 0,
+    comment: Number(o.commentCount) || 0,
+    htmlUrl: o.photoId ? `https://www.kuaishou.com/short-video/${o.photoId}` : target,
+    _mvUrl: videoUrl,      // 仅供 getKuaishouVideoUrl 用，不进卡片
+  };
+}
+
+// ---------- 快手视频直链（P2 用）----------
+// 和 B站不同：快手的直链**就在解析时已经拿到了**，不用再发一次请求。
+// 但签名有时效，所以必须在解析完的**几秒内**下载完。
+async function getKuaishouVideoUrl(info, maxBytes) {
+  const v = cfg.policy.linkParse?.video;
+  if (!v?.enabled) return null;
+  if (!info?._mvUrl) return null;
+  return {
+    url: info._mvUrl,
+    size: 0,                       // 快手不给 size，只能边下边卡
+    headers: { 'User-Agent': MOBILE_UA, Referer: 'https://www.kuaishou.com/' },
+  };
+}
+
+// ---------- 渲染成 QQ Markdown 卡片 ----------
+// 语法来自官方文档（实测确认）：# 标题 / **加粗** / [文字](url) / ![alt #宽px #高px](url)
+// ⚠️ 长文本折行要用零宽空格 \u200B，不能用 \n
+const ZWSP = '\u200B';
+
+function renderCard(info) {
+  if (!info) return null;
+  if (info.platform === 'github') return renderGithub(info);
+  if (info.platform === 'douyin') return renderDouyin(info);
+  if (info.platform === 'kuaishou') return renderKuaishou(info);
+  return renderBilibili(info);
+}
+
+// 抖音 / 快手 共用一个"短视频"版式（字段完全一样，只有平台名和按钮文字不同）
+function renderShortVideo(v, brand, siteName) {
+  const lines = [];
+  lines.push(`# ${mdEsc(cut(v.title, 40))}`);
+  // ⚠️ 尺寸用 coverSize() 算出来的**真实比例** ——
+  //    抖音/快手 绝大多数是竖屏，写死 16:9 会把画面压扁（用户反馈过）
+  if (v.cover) lines.push(`![封面 ${v.coverSize || '#480px #270px'}](${v.cover})`);
+
+  const pub = [
+    v.author && `**作者**：${mdEsc(v.author)}`,
+    v.duration && `**时长**：${v.duration}`,
+  ].filter(Boolean).join('　');
+  if (pub) lines.push(pub);
+  if (v.pubdate) lines.push(`**发布**：${v.pubdate}`);
+
+  const nums = [];
+  if (v.view) nums.push(`播放 ${fmtNum(v.view)}`);
+  if (v.like) nums.push(`点赞 ${fmtNum(v.like)}`);
+  if (v.comment) nums.push(`评论 ${fmtNum(v.comment)}`);
+  if (nums.length) lines.push(nums.join('　·　'));
+
+  lines.push(`[🔗 在 ${brand} 打开](${v.htmlUrl})`);
+  return lines.join(ZWSP + '\n');
+}
+
+function renderDouyin(v) {
+  // 🆕 无水印直链（2026-10-09）：用 Markdown 链接给出，和卡片其他链接风格一致，
+  //    点开就能看/存（比糊一条几百字符的裸 URL 清爽得多）。
+  //
+  // 🔴 2026-10-12 修：这里原来贴的是 `v.playUrl`（CDN 直链 `*.douyinvod.com`）——
+  //    抖音现在给 CDN 加了防盗链，**不带 `Referer: https://www.douyin.com/` 就是 403**，
+  //    而用户在 QQ 里点开是浏览器直连、带不上我们的 Referer ⇒ 点开只有一个 403 页
+  //    （用户当天反馈「抖音返回的卡片的直链是 403，bz 和 ks 正常」）。
+  //    ⇒ 改成贴 `v.shareUrl`（抖音官方播放接口），实测裸访问 302 → 206 video/mp4，点开就能播。
+  //    ⚠️ 老教训（2026-10-09 B站那次）又应验了一遍：**"我们能下"不等于"用户能打开"**，
+  //       产出给终端用户点的 URL 之前，必须按用户的访问方式（无 Referer / 无 UA）再测一次。
+  const directLines = [];
+  if (v.shareUrl) directLines.push(`[🎬 无水印视频直链](${v.shareUrl})`);
+
+  // ⚠️ 图文的图片链接（`*.douyinpic.com`）**我还没按"裸访问"验过**（这次只验了视频）。
+  //    如果用户反馈图文原图打不开，按同一套办法处理（很可能也加了防盗链）。
+  if (v.images && v.images.length) {
+    const picks = v.images.slice(0, 3).map((u, i) => `[原图${i + 1}](${u})`);
+    directLines.push(`🖼 图文共 ${v.images.length} 张　${picks.join('　')}`);
+  }
+
+  // 🆕 图文（note）：平台不提供封面/时长/点赞，卡片只能给"作者 + 分享文案里的正文"，
+  //    并且**如实说明**这不是抓来的内容（不装成完整预览）。
+  //    ⚠️ 但现在能走无头浏览器拿到 images 了 —— 拿到就 normal 渲染，不再标"partial"。
+  if (v.kind === 'note') {
+    const lines = [`# ${mdEsc(cut(v.title, 40))}`];
+    if (v.cover) lines.push(`![封面](${v.cover})`);
+    if (v.author) lines.push(`**作者**：${mdEsc(v.author)}　**类型**：图文`);
+    if (v.partial) lines.push('📷 图文作品（抖音不提供图文页数据，标题取自分享文案）');
+    if (directLines.length) lines.push(...directLines);
+    lines.push(`[🔗 在 抖音 打开](${v.htmlUrl})`);
+    return lines.join(ZWSP + '\n');
+  }
+
+  const card = renderShortVideo(v, '抖音', '抖音');
+  if (!directLines.length) return card;
+  return card + ZWSP + '\n' + directLines.join(ZWSP + '\n');
+}
+
+function renderKuaishou(v) {
+  const card = renderShortVideo(v, '快手', '快手');
+
+  // 🆕 2026-10-09：快手直链**可以像抖音一样直接贴在卡片里**。
+  //    实测（服务器上做过对照）：快手 CDN `*.kwimgs.com` 直链
+  //      · 不带 Referer → HTTP 200 video/mp4   ✅
+  //      · 带自己的 UA/Referer → HTTP 200      ✅
+  //    ⇒ 用户从 QQ 里直接点开就能下。
+  //
+  // 🔴 而 **B站不行**（所以 renderBilibili 特意不贴直链）：
+  //    B站 CDN `upos-*.bilivideo.com` **强制校验 Referer** ——
+  //      · 不带 Referer → HTTP **403**
+  //      · 带 Referer   → HTTP 200
+  //    用户在 QQ 里点开是浏览器直连，带不上 bilibili 的 Referer，拿到的一定是 403。
+  //    要做就得在服务器上挂中转代理，55MB 视频走 3M 带宽不划算 —— 不做。
+  //
+  // ⚠️ 直链是解析阶段顺手带出来的（`_mvUrl`，下划线=内部字段），不额外发请求。
+  // ⚠️ 措辞用"视频直链"而**不是**"无水印直链"：快手这条源**是否无水印我没有抽帧验证过**，
+  //    不写没验过的断言（抖音那行写"无水印"是因为我抽帧看过画面）。
+  if (!v._mvUrl) return card;
+  return card + ZWSP + '\n' + `[🎬 视频直链](${v._mvUrl})`;
+}
+
+function renderBilibili(b) {
+  const lines = [];
+  lines.push(`# ${mdEsc(b.title)}`);
+  // ⚠️ 尺寸用 coverSize() 算出来的**真实比例**（竖屏 B站 视频的封面也是竖的）
+  if (b.cover) lines.push(`![封面 ${b.coverSize || '#480px #270px'}](${b.cover})`);
+
+  // ⚠️ 标签后面用**全角冒号**，不要用半角空格 ——
+  //    实测（2026-09-22）QQ 的 markdown 会把 `**加粗**` 后面的半角空格**吃掉**，
+  //    于是「**发布** 2020-01-01」渲染成「发布2020-01-01」，挤在一起很难看。
+  const pub = [
+    b.pubdate && `**发布**：${b.pubdate}`,
+    b.duration && `**时长**：${b.duration}`,
+  ].filter(Boolean).join('　');
+  if (pub) lines.push(pub);
+
+  if (b.up) lines.push(`**UP主**：${mdEsc(b.up)}`);
+
+  const nums = [`播放 ${fmtNum(b.view)}`];
+  if (b.like) nums.push(`点赞 ${fmtNum(b.like)}`);
+  if (b.danmaku) nums.push(`弹幕 ${fmtNum(b.danmaku)}`);
+  lines.push(nums.join('　·　'));
+
+  if (b.desc && b.desc !== '-') lines.push(`> ${mdEsc(cut(b.desc, 80))}`);
+  // 🆕 2026-10-21：额外给一条「直接播放」（b23.lol 302 到 mp4，手机浏览器能直接播）
+  if (b.shareUrl) lines.push(`[▶ 直接播放](${b.shareUrl})`);
+  lines.push(`[🔗 在 B站打开](${b.htmlUrl})`);
+  return lines.join(ZWSP + '\n');
+}
+
+function renderGithub(g) {
+  const lines = [];
+  lines.push(`# ${mdEsc(g.fullName)}`);
+  // 预览图放标题下面（和 B站卡片一致）。GitHub 的 OG 图是 1200×600 = 2:1，所以用 #600px #300px
+  if (g.ogImage) lines.push(`![仓库预览 #600px #300px](${g.ogImage})`);
+  if (g.desc) lines.push(`> ${mdEsc(cut(g.desc, 100))}`);
+  lines.push(`**作者**：${mdEsc(g.owner)}${g.language ? `　**语言**：${mdEsc(g.language)}` : ''}`);
+  lines.push(`**Star**：${fmtNum(g.stars)}　**Fork**：${fmtNum(g.forks)}　**Issue**：${g.issues}`);
+  lines.push(`**创建**：${g.created}　**最近推送**：${g.pushed}${g.license ? `　**许可**：${g.license}` : ''}`);
+  if (g.topics?.length) lines.push(`**标签** ${g.topics.map(mdEsc).join(' / ')}`);
+  lines.push(`[🔗 在 GitHub 打开](${g.htmlUrl})`);
+  return lines.join(ZWSP + '\n');
+}
+
+// ---------- B站视频直链（P2 用）----------
+//
+// 🔴 必须带 `Referer: https://www.bilibili.com` —— B站直链有防盗链。实测（2026-09-22）：
+//     · 我们自己的服务器**带 Referer** 能下（10MB / 10.2s ✅）
+//     · 让 QQ 平台去下（URL 转存）**下不到**，报 `40093007 富媒体文件下载失败`
+//     · 同一个 URL 不带 Referer 也是 403
+//    所以 P2 只能「我们自己下载 → 分片上传」，不能把直链丢给 QQ。
+//
+// ⚠️ 返回的 url 带签名参数（`?e=...`），**有时效**，拿到就要马上下载。
+async function getBilibiliVideoUrl(info, maxBytes) {
+  const v = cfg.policy.linkParse?.video;
+  if (!v?.enabled) return null;
+  const H = { Referer: 'https://www.bilibili.com' };
+
+  const fetchOne = async (qn) => {
+    const j = await getJson(
+      `https://api.bilibili.com/x/player/playurl?bvid=${info.bvid}&cid=${info.cid}&qn=${qn}&fnval=1`, H);
+    if (j.code !== 0 || !j.data || !j.data.durl || !j.data.durl.length) return null;
+    const d = j.data.durl[0];
+    return {
+      url: d.url,
+      size: d.size || 0,
+      quality: j.data.quality,
+      format: j.data.format,
+      accept: j.data.accept_quality || [],
+      headers: H,          // 下载时带同样的 Referer
+    };
+  };
+
+  let r = await fetchOne(v.quality || 16);   // 默认 16 = 360P
+  if (!r) return null;
+
+  // 首选清晰度就超限 → 试更低档里最小的一档（能省一次就省一次）
+  if (maxBytes && r.size && r.size > maxBytes && r.accept.length) {
+    const lower = r.accept.filter((q) => q < r.quality).sort((a, b) => a - b);
+    if (lower.length) {
+      const r2 = await fetchOne(lower[0]);
+      if (r2 && r2.size && r2.size < r.size) {
+        r2.downgraded = true;
+        return r2;
+      }
+    }
+  }
+  return r;
+}
+
+// ---------- 对外主流程 ----------
+// 返回 { platform, info, card } 或 null
+// `msgText` = 这条消息的原文（只有抖音图文用得到：它要靠分享文案兜底，见 fetchDouyin）
+async function parse(link, msgText) {
+  let info = null;
+  if (link.platform === 'github') info = await fetchGithub(link.url);
+  else if (link.platform === 'bilibili') info = await fetchBilibili(link.url);
+  else if (link.platform === 'douyin') info = await fetchDouyin(link.url, msgText);
+  else if (link.platform === 'kuaishou') info = await fetchKuaishou(link.url);
+  if (!info) return null;
+
+  // 封面的**真实**尺寸 → 决定卡片里图片框的比例（竖屏别被压扁）
+  // ⚠️ 这一步是"加分项"：探测失败就退回 16:9，绝不让它影响主流程
+  if (info.cover && cfg.policy.linkParse?.probeCoverSize !== false) {
+    const dim = await imageSize(info.cover);
+    info.coverSize = coverSize(dim?.w, dim?.h);
+    if (dim) console.log(`  ├ 封面 ${dim.w}×${dim.h} → ${info.coverSize}`);
+  }
+
+  // 🆕 GitHub 预览图：**发卡片之前**先预热（原因见 warmOgImage 的注释）
+  //    ⚠️ 必须在 renderCard **之前** —— 因为预热失败时会把 ogImage 清空，
+  //       卡片要按"最终有没有图"来渲染。
+  if (link.platform === 'github') {
+    await warmOgImage(info, (m) => console.log(`  ├ 🖼 ${m}`));
+  }
+
+  return { platform: link.platform, info, card: renderCard(info), fromCard: !!link.fromCard, url: link.url };
+}
+
+module.exports = {
+  // 🆕 给自测用：短链解析（2026-10-21 修 412 后要能验证）
+  _resolveShort: resolveShort,
+  findLink,
+  findLinks,
+  parse,
+  linkAllowed,
+  markLink,
+  renderCard,
+  getBilibiliVideoUrl,
+  getKuaishouVideoUrl,
+  extractUrls,
+  hostOf,
+  platformOf,
+  hostAllowed,
+  // 🆕 发卡片前预热 GitHub 预览图（也导出给自测用）
+  warmOgImage,
+  ogImageUrl,
+  // 🆕 链接身份与"刚发过"记忆（防自我二次解析 / 防同内容重复发卡）
+  linkKey,
+  infoKey,
+  wasCarded,
+  markCarded,
+  // 🆕 刚刚处理过的链接：发卡片时记一笔，生成回复时问一句
+  noteCard,
+  noteVideoSkip,
+  contextNote,
+  _recentReset: () => recentAt.clear(),
+  // 给自测用
+  _fmtDuration: fmtDuration,
+  _fmtNum: fmtNum,
+  _extractVideoId: extractVideoId,
+  _mdEsc: mdEsc,
+  _enclosingJson: enclosingJson,
+  _extractLdJson: extractLdJson,
+  _parseIsoDuration: parseIsoDuration,
+  _coverSize: coverSize,
+  _imageSize: imageSize,
+  _fixIso: fixIso,
+  _fmtDate: fmtDate,
+  // 🆕 抖音图文（note）那套：分享文案解析 + 视频/图文判定
+  _parseDouyinShareText: parseDouyinShareText,
+  _douyinTargetOf: douyinTargetOf,
+  // 🆕 B站「小程序卡片」反查（2026-10-08）
+  bilibiliCard,
+  bilibiliCardTitle,
+  resolveBilibiliCard,
+  findBilibiliByTitle,
+  // 给自测用：封面 dHash 距离 / 选片
+  _pickByCover: pickByCover,
+  _hammingHex: hammingHex,
+  _normTitle: normTitle,
+  _wbiMixinKey: wbiMixinKey,
+  _wbiSign: wbiSign,
+  _numOf: numOf,
+  _WBI_TAB: WBI_TAB,
+  // 自测用：清掉两处记忆，保证每条断言都从干净状态开始
+  _resetCardLookup: () => { titleHits.clear(); wbiCache = { key: '', at: 0 }; },
+  _cardLookupCacheSize: () => titleHits.size,
+};
