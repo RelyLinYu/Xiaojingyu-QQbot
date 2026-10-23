@@ -1050,7 +1050,6 @@ const PAGE = (opts) => `<!doctype html>
       <label class="chk"><input id="memeEcho" type="checkbox"><span>镜像替换</span></label>
       <button class="primary" type="button" onclick="memeAdd()" id="memeAddBtn">添加</button>
     </div>
-    <p class="hint">例：「康神开播了」→「真的假的」+勾「固定暗号」；「token来」→「来→回」+勾「镜像替换」；「隐晦」→「是不是在说淫秽」+语境「暧昧/擦边」。普通梗的接法可用 | 写多个。</p>
     <div class="card"><div id="memeList"><p class="hint">载入中…</p></div></div>
   </section>
 </main>
