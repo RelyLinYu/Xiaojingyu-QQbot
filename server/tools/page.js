@@ -1041,7 +1041,6 @@ const PAGE = (opts) => `<!doctype html>
   <!-- 🆕 2026-10-23 用户：「把梗库面板删掉，让bot自己加」⇒ 新增交给自动采集，这里只留 改 / 停用 / 删 -->
   <section data-page="memes">
     <h2>群内梗库</h2>
-    <p class="hint">它会自己从群聊里收集梗（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度）；也可以在这里手动加。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
     <p class="hint">它会自己从群聊里收集梗（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度），这里只负责 <b>改错、停用、删除</b>。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
     <div class="card"><div id="memeList"><p class="hint">载入中…</p></div></div>
   </section>
