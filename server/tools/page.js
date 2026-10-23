@@ -909,7 +909,8 @@ const PAGE = (opts) => `<!doctype html>
        然后点击卡片可以切换不同的人设预设」）-->
   <details data-page="settings" class="pcard">
     <summary>人设预设（点卡片就能切换性格）</summary>
-    <div class="card" style="margin-top:12px">
+    <!-- 🆕 2026-10-23 用户：「中间那层卡片是不是没必要，多套了一层」⇒ 去掉这层 .card，卡片直接铺在页面上 -->
+    <div style="margin-top:12px">
       <div class="exbar" style="margin:0 0 12px">
         <input type="text" id="psName" placeholder="给这套性格起个名字（如：甜系傲娇 / 冷静毒舌）" maxlength="20" style="flex:1;min-width:180px">
         <button class="primary sm" onclick="psCapture()" type="button">＋ 把当前人设+示范存成预设</button>
