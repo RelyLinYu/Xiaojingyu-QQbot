@@ -1,0 +1,660 @@
+// ============================================================
+//  识图：把群里的图片 / 表情包变成一句可读的话，接进正常对话流程
+//
+//  用户需求（2026-09-22）：「给 bot 增加识图功能，不然发表情包他都看不懂」
+//
+//  🔑 下面这几条都是**实测结论**，别重复踩（都是先踩了才写下来的）：
+//
+//  1. QQ 推图片来的时候 **message_type 是 0**，不是 1！
+//     图片在 `attachments[]` 里：
+//       {content_type, filename, width, height, size, url}
+//     ⚠️ 旧版把它当"空消息"直接扔了（线上日志里就是 `不回（空消息）`），
+//        所以群友发多少表情包机器人都毫无反应。
+//     历史事件统计：image/jpeg ×131、image/gif ×59、image/png ×19。
+//
+//  2. 那个 URL 长这样：
+//       https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=...&rkey=...
+//     · **裸 GET 就能下载**（实测不需要任何 header / UA / Referer）
+//     · 长度约 250 字符（模型侧上限 8192，够用）
+//     · 🔴 **`rkey` 有时效** → 收到消息必须**立刻**下载，
+//       不能排队、不能缓存、不能"等一会儿再说"（社区里"图片地址过期"的
+//       问题就是这个，见 AstrBot issue #1004）
+//
+//  3. **模型不用换**：现有的 `deepseek-flash` 本身就支持图片输入 ——
+//     旧的 `deepseek-v4-flash-vision-exp` 已下线，它的请求由最新 Flash 承接。
+//     所以 **同一个 key、同一个 baseUrl、同一个模型名**，零新增依赖、
+//     零新增凭证，也天然不会触发"跨服务商误配"那个坑。
+//     （官方文档：https://api-docs.deepseek.com/zh-cn/guides/vision）
+//
+//  4. 成本：一张图 ≈ 220 token（`detail: 'low'` 会缩到 512×512），
+//     输出 40~70 token。合计**约 ¥0.0004/张** —— 基本等于免费。
+//     实测单张耗时 1.1 ~ 1.6 秒。
+//
+//  5. ⚠️ **`filename` 的后缀会骗人**：实测有个 `xxx.jpg` 实际内容是 GIF
+//     （content_type 也写着 image/gif、magic 是 474946）。
+//     DeepSeek 是按**字节**判格式的所以能容错，但我们仍按 magic 嗅探一次，
+//     免得把一个 GIF 当 JPEG 报上去。
+//
+//  6. ⚠️ 图片**只能放在 `user` 消息里**，塞进 `system`/`assistant` 会 400。
+// ============================================================
+const cfg = require('./config');
+const qqmedia = require('./qqmedia');
+const brain = require('./brain');
+const gif = require('./gif');       // 动图采样拼网格（API 只认第一帧）
+const fs = require('fs');
+const path = require('path');
+
+// ---------- 格式嗅探（按字节，不信 filename）----------
+function sniffMime(buf) {
+  if (!buf || buf.length < 12) return '';
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf.slice(1, 4).toString() === 'PNG') return 'image/png';
+  if (buf.slice(0, 3).toString() === 'GIF') return 'image/gif';
+  if (buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP') return 'image/webp';
+  return '';
+}
+
+// ---------- 从一条消息里找出图片 ----------
+// 两个地方都要看：
+//   · `attachments[]` —— 普通图片/表情包走这里（实测）
+//   · `msg_elements[]` —— 引用消息(103)里的图可能走这里
+// 返回第一张，够用了：一条消息多图时描述一张即可，免得一条消息烧好几次钱。
+function findImage(msg) {
+  if (!cfg.policy.vision?.enabled || !msg) return null;
+
+  const cands = [];
+  for (const a of (Array.isArray(msg.attachments) ? msg.attachments : [])) cands.push(a);
+  for (const e of (Array.isArray(msg.msg_elements) ? msg.msg_elements : [])) cands.push(e);
+
+  for (const a of cands) {
+    if (!a) continue;
+    const ct = String(a.content_type || '');
+    if (!/^image\//.test(ct)) continue;                       // 视频/文件/合并转发都不管
+    // url 优先；有些形态把地址放在 content 里，也认（下面会校验是 http 开头）
+    let url = String(a.url || '');
+    if (!/^https?:\/\//i.test(url)) {
+      url = /^https?:\/\//i.test(String(a.content || '')) ? String(a.content) : '';
+    }
+    if (!url) continue;
+    return {
+      url,
+      contentType: ct,
+      width: Number(a.width) || 0,
+      height: Number(a.height) || 0,
+      size: Number(a.size) || 0,
+      filename: String(a.filename || ''),
+    };
+  }
+  return null;
+}
+
+// 这条消息带没带图（不看开关，纯看数据）—— 给 brain.isMentionOnly 用
+function hasImage(msg) {
+  const cands = [
+    ...(Array.isArray(msg?.attachments) ? msg.attachments : []),
+    ...(Array.isArray(msg?.msg_elements) ? msg.msg_elements : []),
+  ];
+  return cands.some((a) => a && /^image\//.test(String(a.content_type || '')));
+}
+
+// ---------- 限流 ----------
+//
+// 为什么识图要**自己一套**限流，不共用 brain 的 dailyCallLimit：
+//   · 图片/表情包是**高频**消息（群里动不动连发一串），
+//     而 dailyCallLimit（现在是 1600）是给"真的要回话"留的。
+//     不隔离的话，一波表情包就能把当天的聊天额度烧光。
+//   · 所以这里**单独**限流，默认 800 张/天（2026-10-11 由 300 调大；实证见 config.js 注释）。
+//   · ⚠️ 但识图的模型调用**仍然会计入** brain 的 callCount 和 budget ——
+//     那不是重复限制，是应该的：钱是真的花了。
+const lastAt = new Map();     // scope -> ts
+let visionDay = '';
+let visionCount = 0;
+
+function beijingToday() {
+  const d = new Date();
+  const bj = new Date(d.getTime() + d.getTimezoneOffset() * 60000 + 8 * 3600 * 1000);
+  return `${bj.getFullYear()}-${bj.getMonth() + 1}-${bj.getDate()}`;
+}
+
+// 每日张数上限：**每次现取**（和 brain.dailyLimit 同一个理由）——
+//   ① 面板可改（settings.json 的 `visionDaily`，2026-10-11 用户要的）；
+//   ② 改完**立即生效**：当天撞满上限后把它调大，下一张图当场就能认，不用重启也不用等第二天。
+// ⚠️ require 放在函数里（和 brain.dailyLimit 一样的写法）：settings ⇄ vision 之间别在
+//    加载期互相拽着，取不到就退回 config 里的值。
+function visionLimit() {
+  const n = Number((cfg.policy.vision || {}).dailyLimit);
+  const fallback = n > 0 ? n : 800;
+  try { return require('./settings').num('visionDaily', fallback); }
+  catch { return fallback; }
+}
+
+// 返回 { ok, key, why }：
+//   · `key` 是给"没看成时的固定说明"用的稳定标识（limit/cooldown/disabled/quiet），
+//     文案在 config.policy.vision.missWhy 里 —— 别把中文 why 当键用，改字就断了。
+function visionAllowed(scope) {
+  const v = cfg.policy.vision || {};
+  if (!v.enabled) return { ok: false, key: 'disabled', why: '识图已关闭' };
+  if (brain.inQuietHours()) return { ok: false, key: 'quiet', why: '静默时段' };
+
+  const today = beijingToday();
+  if (today !== visionDay) { visionDay = today; visionCount = 0; }
+  const limit = visionLimit();
+  if (visionCount >= limit) {
+    return { ok: false, key: 'limit', why: `今日识图已达上限(${visionCount}/${limit})` };
+  }
+
+  const gap = v.cooldownMs ?? 2000;
+  const last = lastAt.get(scope) || 0;
+  if (Date.now() - last < gap) {
+    return {
+      ok: false,
+      key: 'cooldown',
+      why: `同群识图冷却中(${Math.round((gap - (Date.now() - last)) / 1000)}s)`,
+    };
+  }
+  return { ok: true, key: '', why: '' };
+}
+
+// ---------- 「这张图没看成」的固定说明（2026-10-11）----------
+//
+// 为什么要有：图没看成时模型手上是**空的**，它会自己编理由（线上实例：
+// 「图还是没传上来啊，你那儿网络是不是又卡了」）。所以这里由代码写死一句
+// 事实说明，让模型"照实说"，把它编造的路堵掉。
+//
+// ⚠️ 纯函数（喂 key、出字符串），自测直接调，不碰网络/配置以外的状态。
+function missNote(key, why) {
+  const v = cfg.policy.vision || {};
+  const tpl = String(v.missNotice || '').trim();
+  if (!tpl) return '';
+  const table = v.missWhy || {};
+  const reason = String(table[key] || why || '这次没看成').trim();
+  return tpl.replace('{why}', reason);
+}
+
+// ---------- 「没看成」留痕（落盘，供事后查"今天为什么看不了图"）----------
+//
+// 用户 2026-10-11 要的：闸门拦掉时要**留痕**。console 里本来就有那一行，
+// 但它只活在 journal 里、翻起来费劲，也看不出"今天一共被拦了多少张"。
+// 所以按天记一份 `data/vision-stats.json`：
+//     { days: { "2026-10-11": { seen, ok, cached, miss:{limit,cooldown,...}, lastMissAt } } }
+//
+// ⚠️ 三条纪律（和 usage.js 一致）：
+//   ① 数据目录统一 `process.env.APP_DIR || __dirname`（否则又会出现"机器人读一个目录、
+//      面板写另一个目录"那个坑）；
+//   ② **绝不抛错**：读不到/写不了就静默降级，绝不能影响识图和回话；
+//   ③ 写入是"tmp → rename"原子写 + 改前备份 .bak；`XLJ_NO_PERSIST=1` 时不碰磁盘
+//      （自测用，同 settings/usage 的做法）。
+const APP_DIR = process.env.APP_DIR || __dirname;
+const DATA_DIR = path.join(APP_DIR, 'data');
+const STATS_FILE = path.join(DATA_DIR, 'vision-stats.json');
+const STATS_KEEP_DAYS = 30;
+
+let statsCache = null;
+let statsDirty = false;
+
+// 只有本进程写这个文件，所以读一次就够（不像 settings 那份会被面板改）。
+function readStats() {
+  if (process.env.XLJ_NO_PERSIST === '1') return statsCache || (statsCache = { days: {} });
+  if (statsCache) return statsCache;
+  try {
+    const obj = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+    statsCache = (obj && typeof obj.days === 'object' && obj.days) ? { days: obj.days } : { days: {} };
+  } catch {
+    statsCache = { days: {} };          // 读不到/坏了当空，绝不因此不干活
+  }
+  return statsCache;
+}
+
+function writeStats() {
+  if (process.env.XLJ_NO_PERSIST === '1') { statsDirty = false; return; }
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const json = JSON.stringify(statsCache, null, 2);
+    if (fs.existsSync(STATS_FILE)) { try { fs.copyFileSync(STATS_FILE, STATS_FILE + '.bak'); } catch { /* 忽略 */ } }
+    const tmp = STATS_FILE + '.tmp';
+    fs.writeFileSync(tmp, json, 'utf8');
+    fs.renameSync(tmp, STATS_FILE);
+    statsDirty = false;
+  } catch { /* 留痕失败绝不能影响主流程 */ }
+}
+
+function todayBucket() {
+  const days = readStats().days;
+  const date = beijingToday();
+  let cur = days[date];
+  if (!cur) {
+    cur = days[date] = { seen: 0, ok: 0, cached: 0, miss: {}, lastMissAt: '' };
+  }
+  if (!cur.miss || typeof cur.miss !== 'object') cur.miss = {};
+  return cur;
+}
+
+function pruneStats() {
+  const days = readStats().days;
+  const keys = Object.keys(days).sort();
+  while (keys.length > STATS_KEEP_DAYS) delete days[keys.shift()];
+}
+
+// 每次**看到一张图**（不管成没成）都要留着 —— 这样"今天群里进了 500 张图、
+// 只有 300 张看成"这种账才记得下来。
+function recordSeen(cached, ok) {
+  try {
+    const cur = todayBucket();
+    cur.seen += 1;
+    if (ok) { if (cached) cur.cached += 1; else cur.ok += 1; }
+    pruneStats();
+    scheduleWrite();
+  } catch { /* 忽略 */ }
+}
+
+// 被闸门拦 / 取图失败 / 空描述 —— 都走这里
+function recordMiss(key, why) {
+  try {
+    const cur = todayBucket();
+    cur.seen += 1;
+    const k = String(key || 'other');
+    cur.miss[k] = (Number(cur.miss[k]) || 0) + 1;
+    const now = new Date();
+    cur.lastMissAt = String(now.getHours()).padStart(2, '0') + ':'
+      + String(now.getMinutes()).padStart(2, '0') + ':'
+      + String(now.getSeconds()).padStart(2, '0');
+    cur.lastMissWhy = String(why || '');
+    pruneStats();
+    scheduleWrite();
+  } catch { /* 忽略 */ }
+}
+
+// 限频落盘：撞满上限时每分钟可能十几次 miss，没必要每次都写盘。
+let writeTimer = null;
+function scheduleWrite() {
+  if (process.env.XLJ_NO_PERSIST === '1') { statsDirty = false; return; }
+  statsDirty = true;
+  if (writeTimer) return;
+  writeTimer = setTimeout(() => { writeTimer = null; if (statsDirty) writeStats(); }, 5000);
+  if (writeTimer.unref) writeTimer.unref();
+}
+
+// 给自测/排查用：今天的统计 + 上限
+function stats() {
+  return { date: beijingToday(), limit: visionLimit(), ...todayBucket(), count: visionCount };
+}
+
+// counted=false 表示"这次没花钱"（缓存命中）→ 不该占今日张数
+function markVision(scope, counted = true) {
+  lastAt.set(scope, Date.now());
+  if (counted) visionCount++;
+}
+
+// 每 5 分钟清一次冷却表，防内存涨（和 linkparse 一样的做法）
+setInterval(() => {
+  const now = Date.now();
+  const max = Math.max(cfg.policy.vision?.cooldownMs || 2000, 60 * 1000) * 2;
+  for (const [k, t] of lastAt) if (now - t > max) lastAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
+// ---------- 图片索引缓存（专门解决「引用图片 + @机器人」）----------
+//
+// 🔴 为什么需要（2026-09-22 用户真机踩到，线上日志原样是）：
+//
+//     [群] GROUP_MESSAGE_CREATE | spaceyee: (无文本内容)
+//       ├ message_type=103 mentions=[{... "is_you":true ...}]
+//       └ 只有@没有内容 → 回固定应答
+//     [send:group] ✓ 咋了
+//
+//   「引用一张图 + @机器人」时，QQ 推来的消息是：
+//     · message_type = 103（引用消息）
+//     · content      = `<@机器人>`（**只有 @ 标记**）
+//     · msg_elements = 空     ← 被引用的是**图片**，没有文字可给我们
+//     · attachments  = **无** ← 🔴 **被引用的图片附件根本不给**
+//     · message_scene.ext = ["ref_msg_idx=REFIDX_xxx", "msg_idx=REFIDX_yyy", ...]
+//   于是 extractText 得到空串 → 被判成"只有@没内容" → 回一句固定的「咋了」，
+//   图完全白看了。
+//
+// ✅ 但 QQ **给了 `ref_msg_idx`** —— 那就是被引用那条消息的 `msg_idx`。
+//    而**每条正常消息**的 `message_scene.ext` 里都有它自己的 `msg_idx`。
+//    所以：收到图时就把它自己的 `msg_idx` + 描述一起记下来，
+//    之后有人引用它，用 `ref_msg_idx` 就能查回来。
+//
+//    💡 比"重新下载那张图"更好：不用管 rkey 过期，也不重复花钱
+//       （描述在收到图的那一刻就已经算好了）。
+//
+// 另外再兜一层 `LAST_IMG`：**刚发过图、紧接着只 @ 它**（图和 @ 分成两条消息发）
+// 这种在手机 QQ 上很常见的操作，也能用上那张图的描述，而不是回「咋了」。
+const IMG_CACHE = new Map();     // `${scope}|${msg_idx}` -> { desc, url, ts }
+const LAST_IMG = new Map();      // scope -> { desc, url, from, ts }
+const IMG_CACHE_MAX = 500;       // 防内存涨
+
+// 🆕 2026-10-18：图片索引**落盘**。
+//   🔴 起因（用户报「投稿功能为什么失败了」）：18:10 的 `#tg` 引用了一张 17:5x 重启前发的图，
+//      日志「引用的那条没在我们的图片索引里（可能是机器人启动前的图）」⇒ 只认引用的规则下直接静默。
+//      索引只在内存 ⇒ 每次重启，之前的图全部认不出，这不是"投稿坏了"，是"记忆没了"。
+//   ⚠️ 只存 desc/url/from/ts，落在 `data/`（被 .gitignore 挡住），**不进仓库、不进日志**。
+const IMG_FILE = path.join(DATA_DIR, 'image-index.json');
+const IMG_TTL_MS = 24 * 3600 * 1000;
+
+function loadImageIndex() {
+  if (process.env.XLJ_NO_PERSIST === '1') return;
+  try {
+    const arr = JSON.parse(fs.readFileSync(IMG_FILE, 'utf8'));
+    if (!Array.isArray(arr)) return;
+    const now = Date.now();
+    for (const it of arr) {
+      if (!it || !it.key || !Number.isFinite(Number(it.ts))) continue;
+      if (now - Number(it.ts) > IMG_TTL_MS) continue;      // 过期的不加载
+      const rec = { desc: it.desc || '', url: it.url || '', from: it.from || '', ts: Number(it.ts) };
+      IMG_CACHE.set(it.key, rec);
+      const scope = it.key.split('|')[0];
+      const cur = LAST_IMG.get(scope);
+      if (!cur || Number(cur.ts) < rec.ts) LAST_IMG.set(scope, rec);
+    }
+  } catch { /* 文件不存在/坏了：当空，绝不拦启动 */ }
+}
+
+function saveImageIndex() {
+  if (process.env.XLJ_NO_PERSIST === '1') return;
+  try {
+    const now = Date.now();
+    const arr = [];
+    for (const [key, rec] of IMG_CACHE) {
+      if (now - Number(rec.ts) > IMG_TTL_MS) continue;
+      arr.push({ key, desc: rec.desc, url: rec.url, from: rec.from, ts: rec.ts });
+    }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tmp = IMG_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(arr), 'utf8');
+    fs.renameSync(tmp, IMG_FILE);
+  } catch { /* 存不下来不影响功能，下次重启丢一批而已 */ }
+}
+
+loadImageIndex();
+
+// message_scene.ext 是个 `["key=value", ...]` 的数组，转成对象
+function extMap(d) {
+  const out = {};
+  const arr = (d && d.message_scene && d.message_scene.ext) || [];
+  for (const s of arr) {
+    const i = String(s).indexOf('=');
+    if (i > 0) out[String(s).slice(0, i)] = String(s).slice(i + 1);
+  }
+  return out;
+}
+
+// 这条消息自己的编号（记图时用）
+const msgIdxOf = (d) => extMap(d).msg_idx || '';
+// 这条消息**引用**的那条消息的编号（找图时用）
+const refIdxOf = (d) => extMap(d).ref_msg_idx || '';
+
+// 发送者的稳定标识（官方 API 只给 openid，**没有 QQ 号**）—— 给"这张图是谁发的"用。
+//   🔴 2026-10-16 加：用户实测报「`#tg` 把**未引用的他人聊天**的图片也存进去了」，
+//      根因是"本群最近一张图"那层兜底没记发送者 ⇒ 记下来才能要求"必须同一个人"。
+//   ⚠️ 只在内存里比一次，**不打印、不落盘**（脱敏红线：openid 不进日志与仓库）。
+const authorIdOf = (d) => d?.author?.member_openid || d?.author?.user_openid || '';
+
+// idx/desc 之外多收一个 `url`（可选）：**给"群友引用一张图去投稿（#tg）"用**。
+//   ⚠️ 为什么不能只记描述：投稿要的是**图片字节**（存进图库），描述换不回文件。
+//   ⚠️ 为什么不另开一张表：同一份数据一份生命周期，两张表迟早对不上（项目踩过好几次）。
+// 🆕 2026-10-16 再收一个 `from`（发送者 openid）：`#tg` 那层"本群最近一张"的兜底
+//    **必须知道图是谁发的** —— 否则别人发的图会被这条指令投稿走（用户实测抓到过）。
+function rememberImage(scope, idx, desc, url, from) {
+  if (!desc && !url) return;
+  const now = Date.now();
+  const rec = { desc: desc || '', url: url || '', from: from || '', ts: now };
+  if (idx) IMG_CACHE.set(`${scope}|${idx}`, rec);
+  LAST_IMG.set(scope, rec);
+  // 超量就丢最早的（Map 保持插入顺序）
+  if (IMG_CACHE.size > IMG_CACHE_MAX) {
+    for (const k of IMG_CACHE.keys()) {
+      IMG_CACHE.delete(k);
+      if (IMG_CACHE.size <= IMG_CACHE_MAX) break;
+    }
+  }
+  saveImageIndex();      // 🆕 2026-10-18：重启后还能认引用（见上方 IMG_FILE 的说明）
+}
+
+// 按 msg_idx 取整条记录（含 url）；给 `#tg` 投稿用
+function getImage(scope, idx, withinMs) {
+  const hit = IMG_CACHE.get(`${scope}|${idx}`);
+  if (!hit) return null;
+  if (withinMs && Date.now() - hit.ts > withinMs) return null;
+  return hit;
+}
+
+// 这个群最近一张图的记录（含 url）；给 `#tg` 的"刚发图紧接着发指令"兜底
+// 🔴 2026-10-16 用户实测报：「**为什么 #tg 把未引用的他人聊天的图片存进去了**」
+//    ⇒ 传了 `who` 就**必须**是这个人自己发的那张（比对 openid；取不到发送者也算不匹配，
+//      宁可漏也别把别人的图存进图库）。`who === undefined` 时保持旧行为（只按时间判）。
+function recentImage(scope, withinMs, who) {
+  const hit = LAST_IMG.get(scope);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > withinMs) return null;
+  if (who !== undefined && (!who || hit.from !== who)) return null;
+  return hit;
+}
+
+// 按 msg_idx 查（用于"引用的是一条图片消息"）
+function getImageDesc(scope, idx, withinMs) {
+  const hit = IMG_CACHE.get(`${scope}|${idx}`);
+  if (!hit) return '';
+  if (withinMs && Date.now() - hit.ts > withinMs) return '';
+  return hit.desc;
+}
+
+// 查这个群最近描述过的图（用于"刚发过图 + 只 @ 了它"）
+function recentImageDesc(scope, withinMs) {
+  const hit = LAST_IMG.get(scope);
+  if (!hit) return '';
+  return (Date.now() - hit.ts > withinMs) ? '' : hit.desc;
+}
+
+// ---------- 🆕 2026-10-17：**机器人自己发出去的图**也记一份 ----------
+//
+// 🔴 为什么必须记：群友很爱引用机器人刚发的图问「这个是你吗」——
+//    而被引用的是**我们自己**的消息，我们对自己的消息从**不识图**（防自环 + 省钱）
+//    ⇒ 索引里没有它 ⇒ 那句引用在提示词里**读不出来** ⇒ 模型转头去拿群里**别人**那张图的
+//    描述（刚识过图、就在上下文里）来回答，还答得理直气壮（实测被用户连抓两次）。
+//    既然图是**我们自己发出去的**，我们本来就知道它长什么样（图库那条的 desc），记下来就行。
+//   ⚠️ 只在内存；两条线索：① 有消息 id 就顺手进正常索引（后面按 `ref_msg_idx` **精确**命中）
+//      ② 没有 id 也留一条"我最近发过这张"（`lastSelfImage`，兜底时用）。
+const SELF_IMG = new Map();          // scope -> { desc, ts, id }
+function noteSelfImage(scope, desc, id, libId) {
+  const d = String(desc || '');
+  const mid = String(id || '');
+  const lid = String(libId || '');
+  if (!d && !mid) return;
+  // 🆕 2026-10-18：同时记下**图库 id** —— 用户引用机器人自己发的图去 #tg 时，
+  //    我们的出站消息没有可用的 msg_idx（QQ 的 ref_msg_idx 只在收到的消息里出现），
+  //    没法按引用精确命中 ⇒ 靠这张"我刚发的图（含字节来源）"兜底。
+  const rec = { desc: d, id: mid, libId: lid, ts: Date.now() };
+  SELF_IMG.set(scope, rec);
+  if (mid) IMG_CACHE.set(`${scope}|${mid}`, { desc: d, url: '', from: 'bot', ts: rec.ts, libId: lid });
+}
+// 我最近发过的那张图（过了 withinMs 就不认）
+function lastSelfImage(scope, withinMs) {
+  const hit = SELF_IMG.get(scope);
+  if (!hit) return null;
+  return (withinMs && Date.now() - hit.ts > withinMs) ? null : hit;
+}
+
+// 定期清理，防内存涨（和上面两个限流表一样的做法）
+setInterval(() => {
+  const v = cfg.policy.vision || {};
+  const now = Date.now();
+  const keep = Math.max(v.imageCacheMs || 600000, v.recentImageMs || 30000);
+  for (const [k, x] of IMG_CACHE) if (now - x.ts > keep) IMG_CACHE.delete(k);
+  for (const [k, x] of LAST_IMG) if (now - x.ts > keep) LAST_IMG.delete(k);
+}, 60 * 1000).unref();
+
+// ---------- 描述去重缓存（按图片内容 md5）----------
+//
+// 🔴 为什么值得做（2026-09-22 实测数据）：
+//    · QQ 的 `fileid` **每次都变** —— 同一张图重发，fileid 是新的
+//      （实测 210 张图 210 个不同 fileid，重复率 0%）。**所以 fileid 不能用来去重。**
+//    · 但按 **大小+尺寸** 看，重复率 **28.6%** —— 其中一个表情包被发了 **21 次**。
+//      群里"同一个表情包反复发"是常态，而这正是用户最关心的场景。
+//
+// 所以用**图片内容的 md5** 做指纹（我们本来就要把图下下来 base64，
+// 顺手算个 md5 是零额外成本），同一张图**只花一次钱**。
+//
+// ⚠️ 只存内存，重启即失 —— 无所谓：这是省钱优化，不是功能正确性依赖。
+const DESC_CACHE = new Map();     // md5 -> { desc, ts }
+
+// ---------- 「这是你自己」的**无依据兜底**（2026-10-14 用户报"捕获率太高"）----------
+//
+// 🔴 为什么提示词之外还要一道代码闸（实测数据，见 `_srv/_probe-self2.cjs`）：
+//    近 20 小时 690 条识图里 236 条带「你自己」，其中 **227 条图里真的有** 蓝发/鲸鱼/女仆特征
+//    （精确率 96%，那些是**对的**）；剩下那几条是硬胡说 ——
+//      · 「一只橘白小猫被手托着，配红底白字"哦"，表敷衍冷漠。（这是你自己）」
+//      · 「微信支付账单截图，显示向杭州深度求索两次各付50元。（这是你自己）」
+//    `policy.vision.selfHint` 里明明写了排除项（截图 / 只有一点蓝色 / 特征对不上就不许提），
+//    **模型就是不听** ⇒ 提示词管不住的地方，用代码兜住：**整句一个特征词都没有时，摘掉标签**。
+//    ⚠️ 只摘"末尾那个标签"、绝不改写其它内容（宁可漏认，不许乱认）；特征词命中的一律不动。
+//    ⚠️ 识图（本文件 describe）与图库描述（imglib.describeBuffer）**共用这一个函数**，别各写一份。
+// 🆕 2026-10-18 用户：「识图提示词里的『你自己』改成指定身份（大肥鱼/鲸鱼娘）」⇒ 标签也带名字。
+//    兼容旧标签「（这是你自己）」，新标签「（这是蓝色大肥鱼）」，别名都认。
+const SELF_TAG_TAIL_RE = /[（(]\s*这是\s*(?:你自己|蓝色大肥鱼|大肥鱼|鲸鱼娘|小蓝鲸)\s*[）)]\s*[。.！!]?\s*$/;
+const SELF_FEATURE_RE = /蓝发|蓝头|蓝毛|鲸鱼|女仆|水手服|鱼尾|鱼鳍/;
+
+function stripBaselessSelfTag(desc) {
+  const s = String(desc == null ? '' : desc).trim();
+  if (!SELF_TAG_TAIL_RE.test(s)) return s;      // 末尾没有这个标签 → 原样返回
+  if (SELF_FEATURE_RE.test(s)) return s;        // 图里真有那套特征 → 这个判断立得住，留着
+  return s.replace(SELF_TAG_TAIL_RE, '').trim();
+}
+
+// ---------- 真正的识图 ----------
+//
+// 返回 `{ desc, cached }`：
+//   · desc   —— 一句中文描述（失败会**抛异常**，由调用方决定要不要吞）
+//   · cached —— true 表示"这张图之前认过、没花钱"
+//
+// ⚠️ 故意不返回裸字符串 —— 调用方需要知道这次**有没有花钱**，
+//    才能决定要不要计入"今日识图张数"（缓存命中不该占额度）。
+async function describe(img, log = () => {}) {
+  const v = cfg.policy.vision || {};
+  const maxBytes = (v.maxMB || 8) * 1024 * 1024;
+
+  // ① 立刻下载（rkey 有时效！）
+  const buf = await qqmedia.downloadToBuffer(img.url, {
+    maxBytes,
+    timeoutMs: v.downloadTimeoutMs || 20000,
+  });
+
+  // ② 按**字节**判真实格式（filename 会骗人，见文件头注释第 5 条）
+  const mime = sniffMime(buf) || (/^image\//.test(img.contentType) ? img.contentType : '');
+  if (!mime) throw new Error(`不是可识别的图片（文件头 ${buf.slice(0, 4).toString('hex')}）`);
+
+  // ③ 去重：这张图之前认过就**直接复用**，一次模型调用都不发
+  const hash = qqmedia._md5(buf);
+  const hit = DESC_CACHE.get(hash);
+  const ttl = v.dedupeTtlMs ?? 24 * 60 * 60 * 1000;
+  if (hit && Date.now() - hit.ts < ttl && hit.desc) {
+    log(`命中缓存（同一张图之前认过，${(buf.length / 1024).toFixed(0)}KB · 0 token）`);
+    return { desc: hit.desc, cached: true };
+  }
+
+  // 🆕 动图处理（2026-10-01）：**视觉 API 只取动图的第一帧**，所以要自己把
+  //    几帧采样出来拼成一张网格图再发（这样模型才看得到"动作"）。
+  //
+  //    实测证据（我手工造了一张"第 1 帧纯红、第 2 帧纯蓝"的 GIF）：
+  //      发「单帧纯红」   → 「① 红色 ② 静态图」
+  //      发「两帧红→蓝」  → 「① 红色 ② 静态图」   ← 和单帧**一模一样**
+  //
+  //    实际效果（线上真实素材，250×250 / 15 帧）：
+  //      修复前 →「正**趴在地上**用呆萌的表情喊着…」        （静态）
+  //      修复后 →「**正在通过左右摆动身体和尾巴**，反复呼唤…」（有动作）
+  //
+  //    💰 而且几乎不花钱：网格图做成了 **512×512 正好卡在 `detail: 'low'`
+  //       的预算上**，实测 token 和"只发一帧"一样（197）。
+  //       （做到 514 就会多花一个 tile：221。）
+  let sendBuf = buf;
+  let sendMime = mime;
+  // 🆕 2026-10-13：把「认出这是它自己的二创」这段**接在所有识图提示词后面**
+  //    （用户提的：群友发的多是它自己的二创，它却只看出"蓝发女仆"）。
+  //    ⚠️ 只接一处（`v.selfHint`），别在 prompt / gifPrompt 里各写一份 —— 那样迟早漂移。
+  const selfHint = String(v.selfHint || '');
+  let prompt = (v.prompt || '用一句中文描述这张图。') + selfHint;
+  let gifNote = '';
+  if (mime === 'image/gif') {
+    const gi = gif.info(buf);
+    if (gi && gi.animated && gi.frames >= 2) {
+      const m = gif.montage(buf, { maxFrames: v.gifFrames || 4 });
+      if (m) {
+        sendBuf = m.png;
+        sendMime = 'image/png';
+        // ⚠️ 必须**告诉模型这是按时间排序的几帧** —— 否则它会当成
+        //    "四张拼在一起的图"来描述，而不是"一个动作的四个瞬间"。
+        prompt = String(v.gifPrompt
+          || '这张图是一个动图按时间顺序抽取的 {n} 帧（从左到右、从上到下排列）。'
+          + '用一句中文描述这个动图在做什么。').replace('{n}', String(m.frames.length)) + selfHint;
+        gifNote = ` · 动图 ${gi.frames} 帧 → 采样 ${m.frames.length} 帧拼成一张`;
+        log(`动图：共 ${gi.frames} 帧 → 取第 ${m.frames.join('/')} 帧拼成 ${m.w}×${m.h}`
+          + '（API 原本只认第一帧）');
+      } else {
+        gifNote = ` · 动图 ${gi.frames} 帧（采样失败，退回原图）`;
+        log(`动图采样失败，退回原图（可能尺寸/格式太怪）`);
+      }
+    } else if (gi) {
+      gifNote = ` · GIF ${gi.frames} 帧（静态）`;
+    }
+  }
+
+  log(`下载 OK ${(buf.length / 1024).toFixed(0)}KB · ${mime}`
+    + (img.width && img.height ? ` · ${img.width}×${img.height}` : '') + gifNote);
+
+  // ④ 交给模型（复用 brain 的重试 / 预算 / 记账 / 超时那一整套）
+  const dataUrl = `data:${sendMime};base64,${sendBuf.toString('base64')}`;
+  const t0 = Date.now();
+  const desc = await brain.describeImage(dataUrl, v.maxTokens || 200, prompt);
+  log(`模型返回（${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+
+  // 🆕 2026-10-14 晚：**无依据的「（这是你自己）」在进缓存之前就摘掉**
+  //    （缓存里存的必须是清洗过的 → 命中缓存的那条路径也自然干净，不用在两边各兜一次）
+  const out = stripBaselessSelfTag(desc);
+  if (out) {
+    DESC_CACHE.set(hash, { desc: out, ts: Date.now() });
+    // 防止无限涨（表情包再多也不会有几万张不同的）
+    const max = v.dedupeMax ?? 1000;
+    if (DESC_CACHE.size > max) {
+      for (const k of DESC_CACHE.keys()) {
+        DESC_CACHE.delete(k);
+        if (DESC_CACHE.size <= max) break;
+      }
+    }
+  }
+  return { desc: out, cached: false };
+}
+
+module.exports = {
+  findImage,
+  hasImage,
+  describe,
+  // 🆕 2026-10-14 晚：无依据的「这是你自己」兜底（识图与图库描述共用这一份）
+  stripBaselessSelfTag,
+  visionAllowed,
+  visionLimit,      // 🆕 每日张数上限（现取，兜底 800）
+  markVision,
+  sniffMime,
+  // 🆕 「这张图没看成」的固定说明 + 留痕（2026-10-11）
+  missNote,
+  recordSeen,
+  recordMiss,
+  stats,
+  STATS_FILE,
+  // 🆕 图片索引缓存（「引用图片 + @机器人」靠它）
+  msgIdxOf,
+  refIdxOf,
+  authorIdOf,      // 🆕 2026-10-16：这张图是谁发的（`#tg` 的兜底要按人校验）
+  rememberImage,
+  getImageDesc,
+  recentImageDesc,
+  // 🆕 2026-10-15 投稿（#tg）用：要的是**图片地址**（描述换不回文件）
+  getImage,
+  recentImage,
+  // 🆕 2026-10-17：机器人**自己发出去**的图（群友引用它问「这个是你吗」时靠这两条认领）
+  noteSelfImage,
+  lastSelfImage,
+  // 给自测用
+  _beijingToday: beijingToday,
+  _extMap: extMap,
+  _resetStats: () => { statsCache = { days: {} }; statsDirty = false; },
+};
