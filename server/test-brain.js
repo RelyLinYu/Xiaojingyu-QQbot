@@ -5362,6 +5362,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         {
           const st = require('fs').readFileSync(path2.join(__dirname, 'settings.js'), 'utf8');
           const br = require('fs').readFileSync(path2.join(__dirname, 'brain.js'), 'utf8');
+          check('★★ 插嘴概率：settings 有项 / brain 读它 / 面板有滑块', (() => {
+            const pg2 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
+            return st.includes('interjectChance:') && br.includes('values().interjectChance')
+              && pg2.includes("'interjectChance'")
+              && pg2.includes("k === 'imglibChance' || k === 'interjectChance'");
+          })());
           check('★★ 插嘴开关：settings 有 SPEC + brain 在 L0 拦"没 @"',
             st.includes('interjectEnabled:') && br.includes("num('interjectEnabled', 1)")
             && br.includes('插嘴开关关着'));
