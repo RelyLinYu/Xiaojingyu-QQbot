@@ -54,6 +54,77 @@ password: 我的控制台密码
 
 ---
 
+## 0.2 用户只说"帮我部署机器人"、什么都没给 → 先发这张表
+
+🔴 **不要开始克隆、不要装任何东西**。把下面这段**原样发给用户**（他复制填空后发回来）：
+
+```text
+部署前需要你提供下面这些（我只写进服务器/本机的 .env，不会外传）：
+
+【1】装在哪？
+    A. 我的服务器（Linux）
+    B. 我这台电脑（Windows / macOS）
+
+【2】QQ 机器人凭据
+    （q.qq.com → 你的机器人 → 开发设置）
+    appid:
+    secret:
+
+【3】DeepSeek API Key
+    （platform.deepseek.com → API keys）
+    apikey: sk-
+
+【4】网页控制台密码（自己定，至少 6 位；别和服务器密码一样）
+    password:
+
+【5】如果选 A，再补服务器信息：
+    IP:
+    SSH 端口（默认 22）:
+    用户（root 或 ubuntu）:
+    登录方式：密码 ____ ／ 私钥已配置
+```
+
+规则：
+- 用户**只给了一部分** ⇒ 只补问缺的那几项，**一次问完**，别一项一项来回问；
+- 用户给了全部 ⇒ 直接走 **0.1 快进路径**，不再重复问；
+- 用户说"我没有服务器" ⇒ 走 B（本地版），只问【2】【3】【4】。
+
+### 用户填好之后，长这样（两种标准形态）
+
+**形如 B（本机）**：
+
+```text
+https://github.com/RelyLinYu/Xiaojingyu-QQbot
+我想部署这个仓库的机器人，装到我这台电脑上。
+appid: 1234567890
+secret: xxxxxxxx
+apikey: sk-xxxxxxxx
+password: 我的控制台密码
+```
+
+**形如 A（服务器）**：
+
+```text
+https://github.com/RelyLinYu/Xiaojingyu-QQbot
+我想部署这个仓库的机器人，装到我的服务器上。
+appid: 1234567890
+secret: xxxxxxxx
+apikey: sk-xxxxxxxx
+password: 我的控制台密码
+
+服务器：
+IP: 1.2.3.4
+SSH 端口: 22
+用户: root
+登录密码: xxxxxxxx        ← 或者写"私钥已配置，路径 ~/.ssh/id_ed25519"
+系统: Ubuntu 22.04
+```
+
+> ⚠️ **只有密码、没有密钥时**：agent 的 shell 是非交互的，`ssh` 弹密码会直接挂住。
+> 先检查本机有没有 `sshpass`；没有就让用户配一次公钥，或让用户自己在终端输密码。别硬跑。
+
+---
+
 ## 1. 必须先问用户拿到的信息（缺一项就停下问）
 
 | # | 变量 | 是什么 | 从哪拿 | 缺失后果 |
