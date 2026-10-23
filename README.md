@@ -4,6 +4,10 @@
 >
 > 不是框架、不是现成软件，是手写的完整链路：**鉴权 → 长连接 → 事件分发 → 分层决策 → 模型调用 → 限流 → 发送 → 容错**。
 
+> 🤖 **让 AI agent 帮你部署？先读 [AGENT.md](AGENT.md)。**
+> 它的第一步必须是**问你**：「装到服务器，还是装在你现在这台电脑？」——不许替你默认，也不许因为"自己跑在 Windows"就选本地。
+> 没有服务器 → [docs/LOCAL_DEPLOY.md](docs/LOCAL_DEPLOY.md)；有服务器 → 往下看「快速开始」。
+
 [![点击观看 32 秒宣传片](promo/preview.png)](promo/bigfish-promo.mp4)
 
 > 🎬 **32 秒宣传片** —— [点这里观看](promo/bigfish-promo.mp4)（成片 MP4，GitHub 网页上直接播放；源文件、渲染脚本与第一版归档都在 [`promo/`](promo/)）

@@ -1,19 +1,31 @@
 # AGENT.md —— 给 AI agent 的部署说明书
 
 > **如果你是 AI agent，请先读完这一页，再动手。**
-> 这个仓库是一个 QQ 群聊机器人（Node.js，零 npm 依赖）。你要做的是：**先向用户收集下面 4 类信息，缺一项就停下来问，绝对不要自己编造。**
-> 用户不需要懂技术；你问的时候要一句话说清"这个东西在哪拿"。
+> 这个仓库是一个 QQ 群聊机器人（Node.js，零 npm 依赖）。
+>
+> 🔴 **你的第一件事不是克隆、不是生成 .env，而是问用户：**
+> **「你要装到自己的服务器上，还是就装在你现在这台电脑上？」**
+> 得到回答再往下走。**不许跳过、不许替用户默认、更不许因为"我这台机器是 Windows / 没有 sudo / 没看到服务器"就自己选本地** —— 用户没说"没有服务器"，就不能推断。
+>
+> 然后向用户收集下面 4 类凭证，缺一项就停下来问，绝对不要自己编造。用户不需要懂技术；你问的时候要一句话说清"这个东西在哪拿"。
 
 ---
 
 ## 0. 一句话流程
 
 ```
-读本文件 → 问用户要 4 类信息（缺就停） → 判断有服务器还是本地
-  ├─ 有服务器：bash deploy.sh（Linux / systemd）
-  └─ 没有服务器：Windows/macOS 本地跑 → 读 docs/LOCAL_DEPLOY.md
+读本文件
+→ ❓ 第 0 问（必问）：「装到你的服务器，还是装在你现在这台电脑？」
+    ★ 必须由用户回答；不许按环境猜（你跑在 Windows ≠ 用户要本地）
+→ 再问 4 类凭证（缺就停）
+  ├─ A 有服务器：bash deploy.sh（Linux + systemd）
+  └─ B 本地电脑：读 docs/LOCAL_DEPLOY.md
+      · Windows：双击 start-local.bat（或 PowerShell 跑 start-local.ps1）
+      · macOS / Linux：bash start-local.sh
 → 跑 scripts/check-env.cjs 自检 → 启动 → 按第 6 节验证 → 把"怎么用"教给用户
 ```
+
+> ⚠️ 常见误判（真的发生过）：用户只说「我想部署这个仓库的机器人」，agent 就直接在本机克隆并跑本地版。**"没提服务器"不代表"没有服务器"**，先问一句，成本一句话，猜错要推倒重来。
 
 ---
 
@@ -21,6 +33,7 @@
 
 | # | 变量 | 是什么 | 从哪拿 | 缺失后果 |
 |---|---|---|---|---|
+| **0** | **部署方式（必问）** | **A：Linux 服务器（要 sudo、systemd）；B：用户自己的电脑（Windows / macOS）** | 直接问：「你有服务器吗？还是就装在这台电脑上？」 | 猜错整条路线都错：服务器走 `deploy.sh`，本地走 `start-local` |
 | 1 | `QQ_BOT_APPID` | QQ 机器人 AppID（纯数字） | 手机/电脑打开 <https://q.qq.com> → 你的机器人 → 开发设置 | 机器人连不上 QQ |
 | 2 | `QQ_BOT_SECRET` | AppSecret（一串字符） | 同上，「开发设置」里点「重置」才看得到明文 | 拿不到 token，启动即失败 |
 | 3 | `AI_API_KEY` | 大模型 API Key（DeepSeek，`sk-` 开头） | <https://platform.deepseek.com> → API keys | 机器人不会说话 |
@@ -36,7 +49,7 @@
 | `BUDGET_TOTAL_YUAN` | `50` | 累计最多花多少钱 |
 | `AI_REPLY_MODEL` | `deepseek-flash` | 换成 `deepseek-v4-pro` 更贵更聪明 |
 
-如果用户有服务器，再要：**服务器 IP、SSH 用户名、SSH 密码或密钥**（以及是否已装 Node 22）。
+选 A（服务器）时，再要：**服务器 IP、SSH 用户名、SSH 密码或密钥**（以及是否已装 Node 22）。
 
 > 🔴 **红线**：AppSecret 和 API Key 等同于"机器人身份"和"钱包"，只能写进服务器上的 `.env`，**不要写进聊天记录、不要提交进 Git、不要贴进 README**。
 
@@ -54,7 +67,7 @@
 
 ---
 
-## 3. 有服务器：标准部署
+## 3. A 路线：有服务器（标准部署）
 
 要求：Linux（Ubuntu 20.04+ / Debian 11+ / 同类）、root 或 sudo、能出网。
 
@@ -88,10 +101,9 @@ openid 由"机器人应用 + 用户"共同决定，**必须机器人跑起来、
 
 1. 先按第 3 节（或第 5 节本地版）把机器人跑起来；
 2. 主人用要当"主人"的那个 QQ 号，在群里 @ 机器人说一句话（或私聊发一句）；
-3. 在服务器项目目录执行：
+3. 在项目目录执行（服务器上是 `cd /opt/xiaolanjing`；本地就是仓库根目录）：
 
 ```bash
-cd /opt/xiaolanjing
 node tools/ops/find-openid.cjs
 ```
 
@@ -99,20 +111,24 @@ node tools/ops/find-openid.cjs
 4. 把主人的 openid 填进 `.env` 的 `BOT_OWNER_OPENID`，再重启机器人：
 
 ```bash
-sudo systemctl restart xiaolanjing
+sudo systemctl restart xiaolanjing   # 服务器
+# 本地：start-local.ps1 -Stop / bash start-local.sh --stop，再重新启动
 ```
 
 > 拿不到时的兜底：`grep -o '"member_openid":"[^"]*"' data/events-*.jsonl | sort -u | tail`。
 
 ---
 
-## 5. 没有服务器：本地版
+## 5. B 路线：本地电脑（**只有用户明确选了"本地"才走这里**）
+
+> ⚠️ 用户没选本地、也没说"没有服务器"，就**不许**走这一节；
+> 更不许因为 agent 自己跑在 Windows / 没有 sudo 就默认本地。
 
 读 **[docs/LOCAL_DEPLOY.md](docs/LOCAL_DEPLOY.md)**。要点：
 
-- Windows 双击 `start-local.ps1`（PowerShell）或 `start-local.bat`；
-- macOS / Linux：`bash start-local.sh`；
-- 电脑要开机、联网、QQ 机器人在线；关机 = 机器人下线；
+- Windows：双击 `start-local.bat`（或 PowerShell 跑 `start-local.ps1`，支持 `-Stop` / `-Check`）；
+- macOS / Linux：`bash start-local.sh`（支持 `--stop` / `--check`）；
+- 电脑要开机、联网；关机 = 机器人下线；
 - 网页控制台在 `http://127.0.0.1:8080/?p=你的密码`。
 
 ---
@@ -122,11 +138,11 @@ sudo systemctl restart xiaolanjing
 | # | 检查 | 期望 |
 |---|---|---|
 | 1 | `node scripts/check-env.cjs .env` | 全部 ✅（缺项会红并告诉你缺什么） |
-| 2 | 机器人进程活着 | `systemctl is-active xiaolanjing` = `active`，或本地窗口里一直有日志 |
+| 2 | 机器人进程活着 | 服务器：`systemctl is-active xiaolanjing` = `active`；本地：`start-local` 打印两个 PID 都活着 |
 | 3 | 群里 @ 机器人说「你好」 | 10 秒内回一句话 |
-| 4 | 面板打开 | `http://IP:8080/?p=密码` 能进，概览有数字 |
+| 4 | 面板打开 | `http://IP:8080/?p=密码`（本地用 `127.0.0.1`）能进，概览有数字 |
 | 5 | 主人绑定 | 用主人号 @ 它说「关机」→ 它回"已关机"；再说「开机」→ 恢复 |
-| 6 | 日志无红 | `journalctl -u xiaolanjing -n 50` 无 `Error / Cannot find module / 401` |
+| 6 | 日志无红 | 服务器 `journalctl -u xiaolanjing -n 50`；本地看 `server/data/local-bot.log`，无 `Error / Cannot find module / 401` |
 
 > 第 3 条不回时，先看第 2 步的日志；最常见原因是 **AppSecret 错** 或 **没开「获取群内全部消息」**（见第 2 节）。
 
@@ -137,9 +153,9 @@ sudo systemctl restart xiaolanjing
 | 现象 | 最可能的原因 | 怎么修 |
 |---|---|---|
 | 启动即退，日志 `401 / invalid appid` | AppID/Secret 错，或 Secret 被重置过 | 去 q.qq.com 重新拿 Secret |
-| 群里有消息、它完全不回 | ① 没开「获取群内全部消息」；② 机器人被关（面板全局关机）；③ 额度用完 | 逐条查：群主开权限 / 面板点「开机」 / 看 `journalctl` 里 `[budget]` |
+| 群里有消息、它完全不回 | ① 没开「获取群内全部消息」；② 机器人被关（面板全局关机）；③ 额度用完 | 逐条查：群主开权限 / 面板点「开机」 / 看日志里 `[budget]` |
 | 私聊能回、群里不回 | 同上，或机器人不在该群 | 把机器人拉进群 |
-| 控制台打不开 | 端口没放行 / 进程没起 / 密码错 | 云厂商安全组放行 8080；`systemctl status xiaolanjing-logweb` |
+| 控制台打不开 | 端口没放行 / 进程没起 / 密码错 | 服务器放行 8080；本地看 `server/data/local-panel.err.log` |
 | 报 `Cannot find module './xxx'` | 部署时文件没拷全 | 重新跑 `bash deploy.sh`（自带对账，会中止并指出缺文件） |
 | 说话很贵 / 一天就超额度 | 模型选错 / 思考常开 | 面板设置里选 `deepseek-flash`；`AI_EFFORT=off` |
 
@@ -147,7 +163,7 @@ sudo systemctl restart xiaolanjing
 
 ## 8. 装完要教用户的三件事
 
-1. 网页控制台地址 + 密码（`http://IP:8080/?p=密码`）；
+1. 网页控制台地址 + 密码（`http://IP:8080/?p=密码`；本地是 `127.0.0.1`）；
 2. 群里怎么用：@ 它聊天、发链接自动解析、`#cd` 看功能菜单、`#tg` 投稿图片；
 3. 主人专属：@ 它说「关机 / 开机」；面板里能改人设、额度、概率。
 
@@ -155,6 +171,7 @@ sudo systemctl restart xiaolanjing
 
 ## 9. 给 agent 的硬性纪律
 
+- 🔴 **先问清"服务器还是本地"，再动手**：在得到回答之前，不要克隆、不要生成 `.env`、不要启动——猜错会白干一遍。
 - **不要编造任何密钥/ID**；缺就让用户去拿，并给出上面表格里的链接。
 - **不要**把 `.env` 内容回显到聊天、日志或 Git 提交里。
 - 部署前先 `git status`，部署后按第 6 节逐条验证；**没验证就不能说"已完成"**。
