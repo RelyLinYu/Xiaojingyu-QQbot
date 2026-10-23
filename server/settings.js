@@ -119,7 +119,7 @@ const SPEC = {
   memeAuto: {
     type: 'runtime', key: 'memeAuto', label: '梗库自动学习（它自己从群聊里收集梗）', def: 1,
     options: [
-      { value: 1, label: '开（每攒 20 条消息、间隔 ≥5 分钟学一次，重启不丢进度）' },
+      { value: 1, label: '开（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度）' },
       { value: 0, label: '关（只用已有的梗）' },
     ],
   },

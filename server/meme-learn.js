@@ -25,10 +25,10 @@ const memes = require('./memes');
 const APP_DIR = process.env.APP_DIR || __dirname;
 const STATE_FILE = path.join(APP_DIR, 'data', 'meme-learn.json');
 const KEEP = 60;
-const SCAN_EVERY_MSGS = 20;             // 攒够多少条才考虑扫描
+const SCAN_EVERY_MSGS = 15;             // 攒够多少条才考虑扫描
 const SCAN_GAP_MS = 5 * 60 * 1000;      // 两次扫描最小间隔
 const MAX_CANDIDATES = 5;               // 一次最多发给模型几个
-const MIN_COUNT = 3;                    // 至少出现几次
+const MIN_COUNT = 2;                    // 至少出现几次（2 就够了，活跃群很容易命中）
 const MIN_SPEAKERS = 2;                 // 至少几个人说过
 
 // 明显不是梗的词（只挡最常见的，宁可漏）
@@ -51,7 +51,12 @@ function loadState() {
   try {
     const j = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     for (const [scope, v] of Object.entries(j.scopes || {})) {
-      if (Array.isArray(v.buf)) win.set(scope, v.buf.slice(-KEEP));
+      if (Array.isArray(v.buf)) {
+        const buf = v.buf.slice(-KEEP);
+        win.set(scope, buf);
+        // 🔴 重启后**必须回放**：stats 是内存里的，不回放就等于窗口白攒了
+        for (const it of buf) bump(scope, it.text, it.who, it.t);
+      }
       lastScan.set(scope, Number(v.lastScan) || 0);
       scannedUpTo.set(scope, Number(v.since) || 0);
     }
@@ -92,6 +97,19 @@ function badPhrase(p) {
   return false;
 }
 
+function bump(scope, text, who, ts) {
+  const m = stats.get(scope) || new Map();
+  for (const p of phrasesOf(text)) {
+    if (badPhrase(p)) continue;
+    const it = m.get(p) || { count: 0, speakers: new Set(), last: 0 };
+    it.count += 1;
+    if (who) it.speakers.add(String(who));
+    it.last = Number(ts) || Date.now();
+    m.set(p, it);
+  }
+  stats.set(scope, m);
+}
+
 function observe(scope, text, who) {
   const t = String(text || '').trim();
   if (!t || t.length > 200) return;
@@ -99,18 +117,8 @@ function observe(scope, text, who) {
   arr.push({ t: Date.now(), text: t, who: String(who || '') });
   while (arr.length > KEEP) arr.shift();
   win.set(scope, arr);
-
-  const m = stats.get(scope) || new Map();
-  for (const p of phrasesOf(t)) {
-    if (badPhrase(p)) continue;
-    const it = m.get(p) || { count: 0, speakers: new Set(), last: 0 };
-    it.count += 1;
-    if (who) it.speakers.add(String(who));
-    it.last = Date.now();
-    m.set(p, it);
-  }
-  stats.set(scope, m);
-  // ⚠️ 每条都落盘：文件只有几 KB，换来"重启绝不丢窗口"（20 条一次的话，重启前的那几条会丢）
+  bump(scope, t, who, Date.now());
+  // ⚠️ 每条都落盘：文件只有几 KB，换来"重启绝不丢窗口"
   saveState();
 }
 
@@ -130,15 +138,25 @@ function pickCandidates(scope, known) {
   for (const it of known || []) {
     for (const t of it.triggers || []) knownText.add(String(t).toLowerCase());
   }
-  const out = [];
+  const raw = [];
   for (const [p, v] of m) {
-    if (v.count < MIN_COUNT || v.speakers.size < MIN_SPEAKERS) continue;
+    // 🔴 2026-10-23 加严：2 字词太容易是普通词（"现在/感觉"），要 4 次 + 2 人；
+    //    3~6 字保持 2 次 + 2 人。宁可少而准，别把一堆普通词喂给模型。
+    const minCount = p.length <= 2 ? 4 : MIN_COUNT;
+    if (v.count < minCount || v.speakers.size < MIN_SPEAKERS) continue;
     if (knownText.has(p.toLowerCase())) continue;
     if ([...knownText].some((k) => k.includes(p) || p.includes(k))) continue;
-    out.push({ phrase: p, count: v.count, speakers: v.speakers.size, last: v.last });
+    raw.push({ phrase: p, count: v.count, speakers: v.speakers.size, last: v.last });
   }
-  out.sort((a, b) => b.count - a.count || b.last - a.last);
-  return out.slice(0, MAX_CANDIDATES);
+  // 长的优先（更像梗），同长度按次数；再剔掉"是已选短语的子串"的碎片
+  raw.sort((a, b) => (b.phrase.length - a.phrase.length) || (b.count - a.count));
+  const out = [];
+  for (const c of raw) {
+    if (out.some((o) => o.phrase.includes(c.phrase))) continue;
+    out.push(c);
+    if (out.length >= MAX_CANDIDATES) break;
+  }
+  return out;
 }
 
 // 找出含这个短语的最近 2 条消息当语境
@@ -147,23 +165,30 @@ function contextsFor(scope, phrase, n = 2) {
   return arr.filter((x) => x.text.includes(phrase)).slice(-n).map((x) => x.text.slice(0, 80));
 }
 
-const SYS = '你是群聊黑话识别器。只判断：这些短语是不是群里特有的网络梗/黑话（缩写、谐音、圈内说法）。'
-  + '不是（普通词、人名、地名、商品名、无意义碎片）就返回空解释。'
-  + '输出 JSON 数组，元素 {"p":"短语","m":"一句话含义，不超过18字"}；不是梗的 m 写空字符串。不要输出多余文字。';
+const SYS = '你是群聊黑话识别器。给你最近的群聊记录，找出其中**像群内梗/黑话/缩写/谐音**的短语（2~8 字，必须是聊天里真实出现过的）。'
+  + '优先提取**完整短语**（如「康神开播了」），不要把一句话拆成两个词；含义太普通/看了就懂的（如「开播了」「今天吃啥」）不要列。'
+  + '普通词、人名、地名、商品名、无意义碎片、已有梗都不要列。最多 3 条，宁缺毋滥。'
+  + '输出 JSON 数组，元素 {"p":"短语","m":"一句话含义，不超过18字"}；没有就输出 []。不要输出多余文字。';
 
 async function scan(scope, callAI) {
   const now = Date.now();
   lastScan.set(scope, now);
   if (typeof callAI !== 'function') return [];
-  const cands = pickCandidates(scope, memes.list());
-  if (!cands.length) { scannedUpTo.set(scope, now); saveState(); return []; }
 
-  const lines = cands.map((c, i) => {
-    const ctx = contextsFor(scope, c.phrase).map((x) => '「' + x + '」').join(' ');
-    return (i + 1) + '. 短语：' + c.phrase + '（出现 ' + c.count + ' 次，' + c.speakers + ' 人说过）语境：' + (ctx || '（无）');
-  }).join('\n');
+  // 🔴 2026-10-23 改法（用户：一个没加）：
+  //    频次挖出来的 2~6 字片段大多是普通词（"大肥鱼""有感觉吗"），模型全判"不是梗"。
+  //    ⇒ 改成把**最近 25 条聊天**直接交给模型，让它像人一样挑梗；代码只负责
+  //      "这句话确实出现过 ≥2 次" 的去伪，再入库。
+  const buf = (win.get(scope) || []).slice(-25);
+  if (buf.length < 5) { scannedUpTo.set(scope, now); saveState(); return []; }
 
-  console.log(`  ├ [meme-learn] 开始释义 ${cands.length} 个候选`);
+  const known = (memes.list() || []).map((x) => (x.triggers || [])[0]).filter(Boolean).slice(0, 30);
+  const chat = buf.map((m) => (m.who ? m.who.slice(0, 4) + ': ' : '') + String(m.text).slice(0, 100)).join('\n');
+  const user = '【已有梗】' + (known.join('、') || '（无）')
+    + '\n【最近聊天】\n' + chat
+    + '\n\n请输出 JSON 数组，最多 3 条。';
+
+  console.log(`  ├ [meme-learn] 开始找梗（窗口 ${buf.length} 条）`);
 
   const parse = (out) => {
     const txt = String((out && out.text) || '');
@@ -172,10 +197,18 @@ async function scan(scope, callAI) {
     try { return JSON.parse(m[0]); } catch { return []; }
   };
 
-  let arr = [];
+  let arr = null;
   try {
-    arr = parse(await callAI(SYS, lines + '\n\n请只输出 JSON 数组。', 'deepseek-flash', 500, false));
-    if (!arr.length) arr = parse(await callAI(SYS, lines + '\n\n请只输出 JSON 数组。', 'deepseek-flash', 500, true));
+    // ⚠️ 2026-10-23：不要再用 forceJson=true 兜底 —— brain 那边强制 JSON 期待的是**对象**，
+    //    而我们返回的是数组 "[]"，它会抛「没返回 JSON」，把"模型说没有梗"误报成失败。
+    //    ⇒ 只调一次；解析失败（不是空数组）才算失败，下轮再试。
+    const out = await callAI(SYS, user, 'deepseek-flash', 500, false);
+    arr = parse(out);
+    if (arr === null) {
+      console.warn('  ├ [meme-learn] 模型没给 JSON（下次再试）：' + String((out && out.text) || '').slice(0, 60));
+      return [];
+    }
+    scannedUpTo.set(scope, now);
   } catch (e) {
     console.warn(`  ├ [meme-learn] 模型返回异常（下次再试）：${e.message}`);
     return [];
@@ -184,17 +217,20 @@ async function scan(scope, callAI) {
   const added = [];
   for (const r of arr) {
     if (!r || !r.p || !r.m) continue;
-    const cand = cands.find((c) => c.phrase === String(r.p));
-    if (!cand) continue;
+    const phrase = String(r.p).trim().slice(0, 12);
+    if (phrase.length < 2) continue;
+    // 去伪：这句话必须在窗口里**真实出现 ≥2 次**（一条消息里重复也算一次）
+    const hits = buf.filter((m) => String(m.text).includes(phrase));
+    if (hits.length < 2) continue;
+    const speakers = new Set(hits.map((m) => m.who).filter(Boolean)).size;
     const res = memes.addAuto({
-      phrase: cand.phrase,
+      phrase,
       meaning: String(r.m).slice(0, 40),
-      count: cand.count,
-      speakers: cand.speakers,
+      count: hits.length,
+      speakers: Math.max(1, speakers),
     });
     if (res.ok) added.push(res.item);
   }
-  if (added.length) scannedUpTo.set(scope, now);
   saveState();
   return added;
 }

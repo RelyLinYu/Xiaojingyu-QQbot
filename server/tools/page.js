@@ -1314,7 +1314,7 @@ function renderSettings(s){
     interjectChance: '没被 @、也没命中关键词时，主动接话的概率；1 = 每次都接（会变吵）',
     submitEnabled: '关掉后 #tg 当普通聊天，不再是投稿指令',
     interjectEnabled: '关掉后没 @ 就完全不主动说话（群指令和私聊不受影响）',
-    memeAuto: '让它自己从群聊里收集梗（每 20 条/5 分钟学一次，重启不丢进度）；关掉后只用已有的',
+    memeAuto: '让它自己从群聊里收集梗（每 15 条/5 分钟学一次，重启不丢进度）；关掉后只用已有的',
     linkParseEnabled: '关掉后群里贴链接不再自动回卡片',
     personaText: '所有人设都在这一块；清空保存 = 回到代码里的默认人设',
   };
