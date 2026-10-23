@@ -699,9 +699,10 @@ const PAGE = (opts) => `<!doctype html>
   .chk input:checked { background:var(--accent); border-color:var(--accent); }
   .chk input:checked::after { content:''; width:4px; height:9px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg) translate(-1px,-1px); }
   /* 🆕 2026-10-22 设置页重做：搜索框 + 分组卡片 + 开关 + 滑块 */
-  .setsearch { position:relative; margin:0 0 4px; }
-  .setsearch input { width:100%; padding:12px 16px; }
-  .setsearch .hint { position:absolute; right:14px; top:50%; transform:translateY(-50%); margin:0; }
+  /* 🆕 2026-10-24 设置页顶部：4 个分段（模型 / 额度 / 对话 / 人设），点一次只看那组，再点恢复全部 */
+  .setseg { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 14px; }
+  .setseg button { padding:8px 14px; border-radius:999px; font-size:13px; background:var(--bg-overlay); border:1px solid var(--line); color:var(--fg-2); cursor:pointer; }
+  .setseg button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
   .setsec { margin-top:26px; }
   /* 🆕 2026-10-22 用户：「纯白色太单调了…没说纯白配色」⇒ 分组成彩色小色块（**纯色，不用渐变**） */
   .setsec h3 { margin:0 0 10px; font-size:14px; font-weight:600; color:var(--text); display:flex; align-items:center; gap:8px; }
@@ -1318,6 +1319,7 @@ function renderSettings(s){
     linkParseEnabled: '关掉后群里贴链接不再自动回卡片',
     submitCooldownMin: '同一个群两次投稿之间至少隔多久（0 = 不限）',
     imgCooldownSec: '同一个群两次要图之间至少隔多久（0 = 不限；主人不受限）',
+    examplesEnabled: '关掉后不再给模型看语气示范（省一点 token，语气会跟大框人设走）',
     personaText: '所有人设都在这一块；清空保存 = 回到代码里的默认人设',
   };
   const ICONS = {
@@ -1327,10 +1329,10 @@ function renderSettings(s){
     'sec-persona': '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c.8-3.7 3.6-5.6 7-5.6s6.2 1.9 7 5.6"/></svg>',
   };
   const GROUPS = [
-    { t: '模型与生成', cls: 'sec-model', keys: ['aiModel', 'aiEffort', 'aiApiKey'] },
-    { t: '额度与花费', cls: 'sec-money', keys: ['budgetDaily', 'budgetTotal', 'dailyCalls', 'visionDaily'] },
-    { t: '对话与回复', cls: 'sec-dialog', keys: ['imglibChance', 'interjectChance', 'submitEnabled', 'interjectEnabled', 'memeAuto', 'linkParseEnabled', 'submitCooldownMin', 'imgCooldownSec'] },
-    { t: '人设', cls: 'sec-persona', keys: ['personaText'] },
+    { t: '模型与生成', short: '模型', cls: 'sec-model', keys: ['aiModel', 'aiEffort', 'aiApiKey'] },
+    { t: '额度与花费', short: '额度', cls: 'sec-money', keys: ['budgetDaily', 'budgetTotal', 'dailyCalls', 'visionDaily'] },
+    { t: '对话与回复', short: '对话', cls: 'sec-dialog', keys: ['imglibChance', 'interjectChance', 'submitEnabled', 'interjectEnabled', 'memeAuto', 'linkParseEnabled', 'submitCooldownMin', 'imgCooldownSec'] },
+    { t: '人设', short: '人设', cls: 'sec-persona', keys: ['personaText', 'examplesEnabled'] },
   ];
   const isBool = (it) => Array.isArray(it.options) && it.options.length === 2
     && it.options.every(o => o.value === 0 || o.value === 1 || o.value === '0' || o.value === '1');
@@ -1376,11 +1378,14 @@ function renderSettings(s){
       + '</div>';
   }
 
-  let html = '<div class="setsearch"><input id="setSearch" type="search" placeholder="搜索参数（如 概率 / 模型 / 额度）" aria-label="搜索参数"><span class="hint" id="setCount"></span></div>';
+  // 🆕 2026-10-24 用户：「这个搜索框改成 4 个小选项，分别对应下面 4 张子卡片」
+  let html = '<div class="setseg" role="tablist" aria-label="参数分组">'
+    + GROUPS.map(g => '<button type="button" role="tab" aria-pressed="false" data-sec="' + g.cls + '">' + esc(g.short || g.t) + '</button>').join('')
+    + '</div>';
   for (const g of GROUPS) {
     const body = g.keys.map(item).filter(Boolean).join('');
     if (!body) continue;
-    html += '<section class="setsec ' + (g.cls || '') + '"><h3><span class="sic">' + (ICONS[g.cls] || '') + '</span>' + esc(g.t) + '</h3><div class="card2">' + body + '</div></section>';
+    html += '<section class="setsec ' + (g.cls || '') + '" data-sec="' + g.cls + '"><h3><span class="sic">' + (ICONS[g.cls] || '') + '</span>' + esc(g.t) + '</h3><div class="card2">' + body + '</div></section>';
   }
   // 密钥与模型说明（保持原口径）
   if (s.aiApiKey) {
@@ -1394,27 +1399,25 @@ function renderSettings(s){
   el.innerHTML = html;
   personaInit();
 
-  // 搜索：只做前端过滤（不请求接口）
-  var srch = document.getElementById('setSearch');
-  if (srch && typeof srch.addEventListener === 'function') {
-    srch.addEventListener('input', function () {
-      var q = (srch.value || '').trim().toLowerCase();
-      var n = 0, total = 0;
-      document.querySelectorAll('#settings .setitem').forEach(function (it) {
-        total += 1;
-        var txt = it.getAttribute('data-search') || '';
-        var show = !q || txt.indexOf(q) >= 0;
-        it.style.display = show ? '' : 'none';
-        if (show) n += 1;
-      });
-      document.querySelectorAll('#settings .setsec').forEach(function (sec) {
-        var any = sec.querySelector('.setitem:not([style*="display: none"])');
-        sec.style.display = any ? '' : 'none';
-      });
-      var c = document.getElementById('setCount');
-      if (c) c.textContent = q ? '找到 ' + n + ' 项' : '';
+  // 4 个分段：点一次只看这组，再点一次恢复全部（前端过滤，不请求接口）
+  var segs = Array.prototype.slice.call(document.querySelectorAll('#settings .setseg button'));
+  function applySec(sec) {
+    segs.forEach(function (b) {
+      var on = b.getAttribute('data-sec') === sec;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('#settings .setsec').forEach(function (x) {
+      x.style.display = (!sec || x.getAttribute('data-sec') === sec) ? '' : 'none';
     });
   }
+  segs.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var sec = b.getAttribute('data-sec');
+      applySec(b.classList.contains('on') ? null : sec);
+    });
+  });
+
   // 滑块实时显示百分比（配图概率 + 插嘴概率共用）
   ['imglibChance', 'interjectChance'].forEach(function (k) {
     var rng = document.getElementById('set_' + k);

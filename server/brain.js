@@ -1175,6 +1175,9 @@ function looksFactual(t) {
 }
 
 async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText, tag) {
+  // 🆕 2026-10-24 面板「语气示范」开关：关掉就在**发出请求前**把 examples 置空。
+  //    ⚠️ 只在这一处拦（所有调用都走它），别在 L2 再写一遍判断。
+  try { if (Number(require('./settings').num('examplesEnabled', 1)) === 0) examples = null; } catch { /* 读不到按开 */ }
   callCount++;
 
   // ⭐ 示例对话：作为**真实的多轮消息**拼在 system 和当前用户消息之间。

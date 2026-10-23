@@ -111,6 +111,15 @@ const SPEC = {
       { value: 0, label: '关（贴链接当普通聊天，不再自动回卡片）' },
     ],
   },
+  // 🆕 2026-10-24 用户：「给语气示范加一个开关，关掉就无影响」
+  //    ⇒ 单点拦截：brain.callAIOnce 发请求前判 0 就把 examples 置 null（不参与拼装、不占 token）
+  examplesEnabled: {
+    type: 'runtime', key: 'examplesEnabled', label: '语气示范（教它怎么说话）', def: 1,
+    options: [
+      { value: 1, label: '开（按示范的语气说话）' },
+      { value: 0, label: '关（只用大框人设，不学示范）' },
+    ],
+  },
   // 🆕 2026-10-23 用户：「加一个投稿冷却时间自定义」/「加一个群友要图的自定义冷却」
   submitCooldownMin: {
     type: 'runtime', key: 'submitCooldownMin', label: '投稿冷却（分钟，0=不限）', def: 5, min: 0, max: 1440, int: true,

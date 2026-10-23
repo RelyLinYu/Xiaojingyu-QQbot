@@ -4441,10 +4441,11 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         //    **每行各带一个「保存」按钮 ⇒ 正好 5 个**（人设行也有）。
         //    ⇒ 个数维持原值；这条断言真正要守的是最后那个正则
         //      （有没有把 `>` 吞掉、害得按钮变纯文本 —— 这个坑踩过两次）。
-        // 🆕 2026-10-22 设置页重做：多了顶部**搜索框**（1 个 input）⇒ 4+1 = 5 个 input；
-        //    textarea 仍 1、按钮仍 5（每行一个保存）。这条断言真正要守的仍是最后那个正则
-        //    （有没有把 `>` 吞掉、害得按钮变纯文本 —— 这个坑踩过两次）。
-        return nIn === 5 && nTa === 1 && nBtn === 5 && !/value=""\s*<button/.test(h);
+        // 🆕 2026-10-24 用户：「搜索框改成 4 个小选项」⇒ 顶部 4 个分段按钮（不是 input）
+        //    ⇒ input 4（数值项）+ textarea 1 + 按钮 5（每行保存）+ 4（分段）= 9；
+        //      分段只数 `<button ... data-sec=`，别把 `<section data-sec>` 也算进去。
+        const nSeg = (h.match(/<button[^>]*data-sec="/g) || []).length;
+        return nIn === 4 && nTa === 1 && nBtn === 9 && nSeg === 4 && !/value=""\s*<button/.test(h);
       } catch (e) { return false; }    })(), '渲染后的标签不完整（有被吞掉的收尾字符）');
 
     // 功能性验证：perScope 真的按会话各留 N 条
@@ -5376,6 +5377,15 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
             const is3 = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
             return st.includes('linkParseEnabled:') && is3.includes("num('linkParseEnabled'")
               && is3.includes('lpOn') && pg3.includes("'linkParseEnabled'");
+          })());
+          check('★★ 语气示范开关：settings 有项 / brain 在发请求前拦 / 面板有开关', (() => {
+            const pg5 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
+            return st.includes('examplesEnabled:') && br.includes("num('examplesEnabled'")
+              && br.includes('examples = null') && pg5.includes("'examplesEnabled'");
+          })());
+          check('★★ 设置页顶部是 4 个分段（不是搜索框）', (() => {
+            const pg6 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
+            return pg6.includes('class="setseg"') && !pg6.includes('id="setSearch"');
           })());
           check('★★ 插嘴概率：settings 有项 / brain 读它 / 面板有滑块', (() => {
             const pg2 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
