@@ -103,6 +103,10 @@ const SPEC = {
       { value: 0, label: '关（只有被 @ 才回）' },
     ],
   },
+  // 🆕 2026-10-23 用户要的「插嘴概率」：和配图概率同款滑块（0~1，1 = 每次都接）
+  interjectChance: {
+    type: 'runtime', key: 'interjectChance', label: '主动接话的概率（0~1，1=每次都接）', def: 0.08, min: 0, max: 1,
+  },
   // 🆕 2026-10-23 用户：「把梗库面板删掉，让bot自己加」⇒ 自动采集开关（0 调用频次挖掘 + 低频批量释义）
   memeAuto: {
     type: 'runtime', key: 'memeAuto', label: '梗库自动学习（它自己从群聊里收集梗）', def: 1,
