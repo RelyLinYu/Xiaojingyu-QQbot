@@ -899,8 +899,7 @@ const PAGE = (opts) => `<!doctype html>
            🆕 2026-10-08（用户看到红色柱子问「这个红色的是怎么回事」）⇒ **补上颜色说明**：
               柱子会变黄/变红不是装饰，是"这天快到/已超日次数上限"的警示，必须写在图上，
               否则用户只能猜（我当时只做了颜色、没做图例，属于"做了功能没做说明"）。 -->
-      <p class="hint">柱子 = 当天<b>模型调用次数</b>（最高那根满格，其余按比例）；柱子上面小字 = 当天<b>花费（元）</b>。
-        日额度 <b id="useDailyTxt">…</b> 是"钱"那道闸。
+      <p class="hint">柱子 = 当天<b>模型调用次数</b>（最高那根满格，其余按比例）；柱子上面小字也是<b>当天调用次数</b>。
         柱子颜色：<b>蓝</b> = 正常；<b>黄</b> = 已到 <b id="useLimitTxt2">…</b> 的 80%；<b>红</b> = 这天<b>撞满/超过</b>了 <b id="useLimitTxt3">…</b> 的日次数上限。</p>
     </div>
   </section>
@@ -1962,8 +1961,6 @@ function applyLimits(b) {
   if (a2) a2.textContent = USE_LIMIT + ' 次';
   var a3 = document.getElementById('useLimitTxt3');
   if (a3) a3.textContent = USE_LIMIT + ' 次';
-  var c = document.getElementById('useDailyTxt');
-  if (c) c.textContent = '¥' + USE_DAILY;
 }
 
 function renderUsage(days) {
@@ -2002,10 +1999,11 @@ async function loadUsage(n) {
     var r = await fetch('/api/usage?days=' + lastUsageDays + '&p=' + encodeURIComponent(P));
     var j = await r.json();
     renderUsage(j.days || []);
-    var sum = 0, sumSpent = 0;
-    (j.days || []).forEach(function (d) { sum += d.calls; sumSpent += d.spent; });
+    var sum = 0;
+    (j.days || []).forEach(function (d) { sum += d.calls; });
     var note = document.getElementById('useNote');
-    if (note) note.textContent = '这 ' + (j.days || []).length + ' 天：' + sum + ' 次调用 · ¥' + sumSpent.toFixed(2);
+    // 🆕 2026-10-23 用户：「这个花的钱删掉」⇒ 只留调用次数（金额看下面的额度卡/官方账单）
+    if (note) note.textContent = '这 ' + (j.days || []).length + ' 天：' + sum + ' 次调用';
   } catch (e) {
     var el = document.getElementById('useChart');
     if (el) el.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
