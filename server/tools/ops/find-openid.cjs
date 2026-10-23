@@ -93,9 +93,34 @@ for (const [id, rec] of rows) {
 console.log('------------------------------------------');
 console.log(' 你是哪一个？找到**你自己那行**，复制那串 32 位 ID，然后：');
 console.log('');
-console.log(`   printf 'BOT_OWNER_OPENID=你的ID\\nBOT_OWNER_NAME=你的昵称\\n' | sudo tee -a ${path.join(APP_DIR, '.env')}`);
-console.log('   sudo systemctl restart xiaolanjing');
+// 🆕 2026-10-23 修：原来这里写死服务器命令（sudo / systemctl / /opt 路径），
+//    本地版（Windows/macOS）照着抄必然失败。现在按环境和文件是否存在给不同指引。
+const fs2 = require('fs');
+const envCandidates = [
+  path.join(APP_DIR, '.env'),            // 服务器：/opt/xiaolanjing/.env
+  path.join(APP_DIR, '..', '.env'),      // 本地：仓库根 .env（APP_DIR 是 server/）
+];
+const ENV_FILE = envCandidates.find((f) => { try { return fs2.existsSync(f); } catch { return false; } }) || envCandidates[0];
+const isWin = process.platform === 'win32';
+const hasSystemd = !isWin && (() => { try { return fs2.existsSync('/etc/systemd/system/xiaolanjing.service'); } catch { return false; } })();
+console.log(' 把这两行加进这个文件（没有就新建这两行）：');
+console.log('   ' + ENV_FILE);
+console.log('   BOT_OWNER_OPENID=上面那串ID');
+console.log('   BOT_OWNER_NAME=你的昵称');
 console.log('');
-console.log(' ⚠️ 别用 nano 粘贴（从 Windows 粘会塞进 \\r，见项目文档「CRLF 污染 .env」）');
+if (hasSystemd) {
+  console.log(' 然后重启机器人（服务器）：');
+  console.log('   sudo systemctl restart xiaolanjing');
+} else if (isWin) {
+  console.log(' 然后重启机器人（Windows 本地版）：');
+  console.log('   powershell -ExecutionPolicy Bypass -File start-local.ps1 -Stop');
+  console.log('   powershell -ExecutionPolicy Bypass -File start-local.ps1');
+} else {
+  console.log(' 然后重启机器人（本地版）：');
+  console.log('   bash start-local.sh --stop && bash start-local.sh');
+}
+console.log('');
+console.log(' ⚠️ 别用 nano 粘贴（从 Windows 粘会塞进 CRLF，见项目文档「CRLF 污染 .env」）');
 console.log(' ⚠️ 别填 QQ 号 —— QQ 只给 openid，填 QQ 号 = 主人规则静默失效');
+console.log(' ⚠️ 改完 .env 必须重启机器人才生效（面板改的不算）');
 console.log('------------------------------------------');
