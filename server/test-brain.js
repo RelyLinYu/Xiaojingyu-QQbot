@@ -5419,6 +5419,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
             try { fs2.rmSync(tmp, { recursive: true, force: true }); } catch { /* 清不掉就留着 */ }
           }
         })());
+        // 🆕 2026-10-23 私聊卡按稳定 id 拆分（用户实测：两个账号的私聊并成了一张卡）
+        check('★ 私聊会话按 openid 分卡（不再拿「私聊用户」这个昵称当键）', (() => {
+          const lw2 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'logweb.js'), 'utf8');
+          return lw2.includes('private:([0-9A-Za-z_-]{8,64})')
+            && lw2.includes('lookupByTime(c.time)') && lw2.includes('BOT_OWNER_OPENID');
+        })());
         check('★ 梗库提示走 user 文本；镜像替换走代码直回；自动采集接线就位', (() => {
           const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
           return /require\('\.\/memes'\)\.hint\(/.test(is) && /\[linkNote, memeNote\]\.filter/.test(is)
