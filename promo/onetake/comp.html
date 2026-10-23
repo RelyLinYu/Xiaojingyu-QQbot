@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<!-- ============================================================
+     蓝色大肥鱼 · 宣传片  (onetake 组合)
+     concept「一口深呼吸潜下去」：一条聊天窗口，一个镜头，不切。
+     世界只有一层（#world），镜头在它上面走；一切是 t 的纯函数。
+     ============================================================ -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>蓝色大肥鱼 · deepwater</title>
+<style>
+  :root{ --ground:#0B0B0D; --deep:#050506; --card:#1C1C1E; --line:#2E2E31;
+         --mute:#8A8A90; --ink:#F5F5F7; --accent:#0A84FF; --accent2:#FF453A; }
+  html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:var(--ground)}
+  body{font-family:var(--text);color:var(--ink);-webkit-font-smoothing:antialiased}
+  #stage{position:absolute;inset:0;overflow:hidden;background:var(--ground)}
+  #sky{position:absolute;left:0;top:0;width:1920px;height:1080px}
+  #world{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0;will-change:transform}
+
+  /* ── 聊天窗口：世界坐标里的一个盒子，从一个小圆点撑开 ── */
+  #chat{position:absolute;overflow:hidden;background:var(--card);border:1px solid var(--line);
+        border-radius:22px;box-shadow:0 44px 130px -40px rgba(0,0,0,.95);will-change:left,top,width,height,border-radius}
+  #inner{position:absolute;left:0;top:0;width:1560px;height:940px}
+  .head{position:absolute;left:0;top:0;width:1560px;height:80px;border-bottom:1px solid var(--line);
+        background:#141416;display:flex;align-items:center;gap:16px;padding:0 30px;box-sizing:border-box}
+  .head .av{width:54px;height:54px;border-radius:50%;background:#232326;border:1px solid var(--line);
+        display:flex;align-items:center;justify-content:center;font-size:29px;flex:none}
+  .head .nm{font-size:31px;font-weight:700;letter-spacing:-.01em}
+  .head .st{margin-left:auto;font-size:23px;color:var(--mute);display:flex;align-items:center;gap:10px}
+  .head .st i{width:9px;height:9px;border-radius:50%;background:var(--accent);display:block}
+  #list{position:absolute;left:30px;top:102px;width:1500px;height:780px;overflow:hidden}
+  #listinner{position:absolute;left:0;top:0;width:1500px;will-change:transform}
+  .msg{position:absolute;will-change:transform,opacity;transform-origin:50% 50%}
+  .bbl{position:relative;box-sizing:border-box;padding:19px 25px;border-radius:21px;
+       font-size:35px;line-height:1.40;letter-spacing:-.005em}
+  .msg .bbl{white-space:nowrap}          /* 台词都是手写的一行；不让像素取整把它挤成两行 */
+  .msg.user .bbl{background:#2C2C2E;border:1px solid var(--line);border-top-right-radius:8px;margin-left:auto}
+  .msg.bot  .bbl{background:rgba(10,132,255,.14);border:1px solid rgba(10,132,255,.34);border-top-left-radius:8px}
+  .msg.bot.flash .bbl{background:#232326;border-color:var(--line);font-size:30px;color:var(--mute)}
+  .msg.hit .bbl{border-color:rgba(255,69,58,.55);background:rgba(255,69,58,.10)}
+  .swapbox{position:relative;overflow:hidden}
+  .swapbox .sa,.swapbox .sb{display:block;white-space:nowrap}
+  .swapbox .sb{position:absolute;left:0;top:0}
+  .linkcard{display:flex;align-items:center;gap:16px;padding:19px 23px;background:#232326;
+       border:1px solid var(--line);border-radius:21px;border-top-right-radius:8px;box-sizing:border-box;width:660px}
+  .linkcard .ic{width:54px;height:54px;border-radius:15px;background:#2E2E31;display:flex;align-items:center;justify-content:center;font-size:27px;flex:none}
+  .linkcard .u{font-family:var(--mono);font-size:26px;color:#C9C9CE;letter-spacing:-.01em}
+  .linkcard .p{font-size:21px;color:var(--mute);margin-top:5px}
+  .cardmsg{width:660px;background:#232326;border:1px solid var(--line);border-radius:21px;
+       border-top-left-radius:8px;overflow:hidden;box-sizing:border-box}
+  .cardmsg .cov{position:relative;width:658px;height:286px;background:#101012;border-bottom:1px solid var(--line)}
+  .cardmsg .cov .tag{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+       font-size:21px;color:#6E6E73;border:1px dashed #3A3A3E;border-radius:999px;padding:9px 18px}
+  .cardmsg .bd{padding:21px 23px 23px}
+  .cardmsg h5{margin:0 0 13px;font-size:31px;font-weight:700;letter-spacing:-.01em}
+  .cardmsg .meta{font-size:23px;color:#A1A1A6}
+  .cardmsg .meta b{color:#C9C9CE;font-weight:500}
+  .cardmsg .btn{margin-top:17px;display:inline-block;padding:12px 21px;border-radius:13px;
+       background:rgba(10,132,255,.16);border:1px solid rgba(10,132,255,.40);color:var(--accent);
+       font-size:24px;font-weight:700}
+  /* 能力行 */
+  .row{position:absolute;box-sizing:border-box;width:1500px;padding:17px 23px;border-radius:17px;
+       background:#202023;border:1px solid var(--line);display:flex;align-items:baseline;gap:17px}
+  .row .k{font-family:var(--mono);font-size:21px;color:var(--accent);flex:none}
+  .row .t{font-size:29px;letter-spacing:-.01em}
+  .row .t b{color:var(--accent);font-weight:700}
+  .row.big{padding:25px 27px}
+  .row.big .t{font-size:42px;font-weight:700}
+  .row.big .sub{display:block;font-size:23px;color:var(--mute);font-weight:400;margin-top:9px;line-height:1.5}
+  /* 输入栏 */
+  #input{position:absolute;left:30px;top:900px;width:1500px;height:80px}
+  .pill{position:absolute;left:0;top:16px;width:1430px;height:50px;box-sizing:border-box;
+        border:1px solid var(--line);background:#141416;border-radius:999px;
+        font-size:26px;line-height:48px;padding:0 24px;color:var(--ink);white-space:nowrap;overflow:hidden}
+  .pill .ph{color:#5A5A60}
+  .pill i{display:inline-block;width:2px;height:27px;background:var(--accent);vertical-align:-5px;margin-left:2px}
+  .send{position:absolute;left:1448px;top:15px;width:50px;height:50px;border-radius:50%;background:var(--accent)}
+  .send:after{content:"";position:absolute;left:17px;top:15px;width:14px;height:14px;border-left:3px solid #fff;
+        border-top:3px solid #fff;transform:rotate(45deg)}
+  /* 人设预设：浮在窗口右侧的一层抽屉 */
+  #rail{position:absolute;left:1330px;top:250px;width:360px;padding:22px;box-sizing:border-box;
+        background:#202023;border:1px solid #3A3A3E;border-radius:20px;box-shadow:0 30px 80px -20px rgba(0,0,0,.9)}
+  .railh{font-size:22px;color:var(--mute);margin-bottom:16px;font-family:var(--mono);letter-spacing:.02em}
+  .chip{box-sizing:border-box;width:316px;padding:19px 21px;border-radius:16px;background:#1C1C1E;
+        border:1px solid var(--line);margin-bottom:14px;will-change:transform}
+  .chip .n{font-size:27px;font-weight:700}
+  .chip .d{font-size:21px;color:var(--mute);margin-top:7px;line-height:1.4}
+  .chip.on{border-color:rgba(10,132,255,.55);background:rgba(10,132,255,.14)}
+  .chip.on .n{color:var(--accent)}
+  /* 全屏"视频"开放之后压在上面的说明 */
+  #inside{position:absolute;left:0;top:0;width:1920px;text-align:center}
+  #inside .ilab{font-size:30px;color:#C9C9CE}
+  #inside .ichips{margin-top:26px;display:flex;justify-content:center;gap:18px}
+  #inside .ichips span{display:inline-block;padding:14px 26px;border-radius:14px;border:1px solid #3A3A3E;
+        background:rgba(255,255,255,.04);font-size:28px;color:var(--ink)}
+  #inside .ichips span.on{border-color:rgba(10,132,255,.5);background:rgba(10,132,255,.16);color:#fff}
+  #inside .izero{margin-top:30px;display:inline-block;padding:14px 26px;border-radius:999px;
+        background:rgba(48,209,88,.14);border:1px solid rgba(48,209,88,.42);color:#30D158;font-size:27px;font-weight:700}
+  /* 开场字 + 结尾 */
+  #opener{position:absolute;left:0;top:466px;width:1920px;text-align:center;font-size:104px;font-weight:700;letter-spacing:-.035em}
+  #opener span{display:inline-block;white-space:pre}
+  #cover{position:absolute;overflow:hidden;border-radius:21px;background:#0E0E10;will-change:left,top,width,height,border-radius}
+  #cover canvas{position:absolute;inset:0;width:100%;height:100%}
+  #seal{position:absolute;border-radius:50%;border:2px dashed var(--accent);opacity:.5}
+  #whale{position:absolute;font-size:96px;line-height:1;will-change:transform,opacity}
+  #endlab{position:absolute;left:0;width:1920px;text-align:center;font-family:var(--mono);font-size:26px;color:var(--mute)}
+  #url{position:absolute;left:0;width:1920px;text-align:center;font-family:var(--mono);font-size:58px;
+       font-weight:600;color:var(--ink);letter-spacing:-.02em}
+  #url b{color:var(--accent);font-weight:600}
+  #stats{position:absolute;left:0;top:790px;width:1920px;display:flex;justify-content:center;gap:70px}
+  .stat{text-align:center}
+  .stat .n{font-size:46px;font-weight:700;letter-spacing:-.02em}
+  .stat .l{font-size:23px;color:var(--mute);margin-top:7px}
+  #tagline{position:absolute;left:0;top:920px;width:1920px;text-align:center;font-size:31px;color:#A1A1A6}
+  #tagline b{color:var(--ink);font-weight:700}
+  /* 屏幕空间覆盖层 */
+  #cursor{position:absolute;left:0;top:0;width:30px;height:40px;will-change:transform;
+          filter:drop-shadow(0 3px 7px rgba(0,0,0,.65))}
+  #flash{position:absolute;inset:0;pointer-events:none;opacity:0;
+         background:radial-gradient(120% 90% at 50% 50%,rgba(255,69,58,0),rgba(255,69,58,.32))}
+  #grain{position:absolute;inset:0;pointer-events:none;opacity:.4;
+         background:radial-gradient(120% 80% at 50% 32%,rgba(255,255,255,.05),rgba(255,255,255,0) 62%)}
+  #hud{position:absolute;right:14px;bottom:10px;font:13px var(--mono);color:#f66;display:none}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="sky" width="1920" height="1080"></canvas>
+  <div id="world">
+    <div id="opener"></div>
+    <div id="seal"></div>
+    <div id="chat">
+      <div id="inner">
+        <div class="head"><div class="av">🐋</div><div class="nm">蓝色大肥鱼</div>
+          <div class="st"><i></i><span>在群里</span></div></div>
+        <div id="list"><div id="listinner"></div></div>
+        <div id="input"><div class="pill" id="pill"></div><div class="send" id="send"></div></div>
+      </div>
+    </div>
+    <div id="cover"><canvas width="1920" height="1080"></canvas></div>
+    <div id="inside">
+      <div class="ilab">不用 @ 它 —— 群里贴链接就自动认</div>
+      <div class="ichips"><span class="on">GitHub</span><span class="on">B站</span><span class="on">抖音</span><span class="on">快手</span></div>
+      <div class="izero">信息卡片：0 次模型调用</div>
+    </div>
+    <div id="rail">
+      <div class="railh">人设预设</div>
+      <div class="chip on" id="chip0"><div class="n">甜系傲娇 · 鲸鱼娘</div><div class="d">傲娇、懒、爱吃米饭</div></div>
+      <div class="chip" id="chip1"><div class="n">冷静 · 直给</div><div class="d">话少、先给结论</div></div>
+    </div>
+    <div id="whale">🐋</div>
+    <div id="endlab">全部代码开源在 GitHub</div>
+    <div id="url"></div>
+    <div id="stats"></div>
+    <div id="tagline"></div>
+  </div>
+  <svg id="cursor" viewBox="0 0 34 44"><path d="M4 3 L30 22 L18 24 L26 40 L20 43 L12 27 L4 36 Z" fill="#F5F5F7" stroke="#0B0B0D" stroke-width="2.5" stroke-linejoin="round"/></svg>
+  <div id="flash"></div>
+  <div id="grain"></div>
+  <div id="hud"></div>
+</div>
+<script src="look.js"></script>
+<script src="motion.js"></script>
+<script>
+(function () {
+'use strict';
+const {clamp, lerp, seg, sstep, ssstep, ease, spline, spring} = OM;
+
+/* ══════════ 0 · 时间轴（秒） ══════════ */
+const FPS = 30, DUR = 32;
+window.__meta = { dur: DUR, fps: FPS, w: 1920, h: 1080 };
+
+const T_OP = [0.20, 0.46, 0.72];
+const DOT_IN = 1.00, CHAT_IN = 1.10, CHAT_SPAN = 0.55, OP_OUT = [1.28, 1.62];
+const COVER_A = [13.20, 14.20], COVER_B = [16.60, 17.70];
+const INSIDE = [14.30, 16.55];
+const RAIL_IN = 18.00, SWAP = 19.95;
+const ROWS = [21.60, 22.05, 22.50, 22.95, 23.40];
+const ROW_BIG = 24.10, ROW_BIG_OUT = 25.60;
+const FOLD0 = 25.80, FOLD1 = 26.70, SEAL0 = 26.10, SEAL1 = 27.30;
+const WHALE0 = 26.45, WHALE1 = 27.60;
+const END_LAB = 28.20, URL0 = 28.55, URL_CPS = 30;
+const STATS = [29.90, 30.12, 30.34, 30.56];
+const TAGLINE = 30.90;
+
+/* ══════════ 1 · 世界坐标 ══════════ */
+const CHAT = { x: 180, y: 70, w: 1560, h: 940 };
+const AVATAR = { x: 237, y: 110 };
+const SEND = { x: 1660, y: 945, w: 50, h: 50 };
+const SENDP = { x: SEND.x + 25, y: SEND.y + 25 };
+const LIST = { x: 210, y: 172, w: 1500, h: 780 };
+const CHIP2 = { x: 1510, y: 480 };
+const DOT = { x: 960 - 8, y: 452, w: 16, h: 16 };
+
+const MSGS = [
+  { id: 'm1',  who: 'user', at: 3.28,  txt: '大肥鱼是什么牌子的鱼？' },
+  { id: 'm2',  who: 'bot',  at: 4.02,  txt: '(甩了甩尾巴) 深海的，很贵那种' },
+  { id: 'm3',  who: 'user', at: 6.10,  txt: '你是不是又胖了' },
+  { id: 'm4',  who: 'bot',  at: 6.68,  txt: '(尾鳍啪地甩过来) ……你再说一遍？', hit: 6.68 },
+  { id: 'm5',  who: 'user', at: 7.80,  txt: '你好厉害啊' },
+  { id: 'm6',  who: 'bot',  at: 8.30,  txt: '(尾巴得意地摆了摆) 嗯，我知道' },
+  { id: 'm7',  who: 'user', at: 10.12, kind: 'link' },
+  { id: 'm8',  who: 'bot',  at: 11.00, txt: '🔗 已收到，正在解析…', flash: true, out: 11.72 },
+  { id: 'm9',  who: 'bot',  at: 11.55, kind: 'card' },
+  { id: 'm10', who: 'user', at: 18.74, txt: '帮我看看这个报错' },
+  { id: 'm11', who: 'bot',  at: 19.18, kind: 'swap',
+    a: '又是我……行吧，贴出来', b: '收到。把堆栈和复现步骤发过来。' }
+];
+/* 打字窗口：[开始敲, 按下发送, 文本] */
+const TYPING = { m1: [2.34, 3.20, '大肥鱼是什么牌子的鱼？'],
+                 m3: [5.62, 6.02, '你是不是又胖了'],
+                 m5: [7.30, 7.72, '你好厉害啊'],
+                 m7: [9.34, 10.04, 'https://v.douyin.com/xxxxxxx/'],
+                 m10: [18.28, 18.66, '帮我看看这个报错'] };
+const CLICKS = [3.20, 6.02, 7.72, 10.04, 18.66, 19.98];
+
+const ROWS_TXT = [
+  { k: '01', t: '从鉴权到发送<b>全自己写</b>，0 个第三方依赖' },
+  { k: '02', t: '别人互相 @ 的时候，它<b>真的闭嘴</b>' },
+  { k: '03', t: '每天 <b>¥3</b> 就封顶，超了自己在群里说一声' },
+  { k: '04', t: '图片先变成一句话 —— <b>连谐音梗都读得懂</b>' },
+  { k: '05', t: '四页控制台，<b>手机就能改人设</b>' }
+];
+const ROW_BIG_TXT = '人设 = 提示词 + 示范';
+const ROW_BIG_SUB = '光在提示词里说「傲娇」，它不知道要到什么程度；给一组傲娇的具体对话就会了。';
+const STATS_TXT = [['0', '个 npm 依赖'], ['798', '项自测'], ['56', '个源文件'], ['1', '条命令部署']];
+
+/* 手：一条连续路径（世界坐标）；每个动作都由它造成 */
+const HAND = [
+  { t: 1.40, x: 2100, y: 1290 },
+  { t: 2.06, x: 700,  y: 970 }, { t: 3.06, x: 700, y: 970 },
+  { t: 3.17, x: SENDP.x, y: SENDP.y }, { t: 3.44, x: SENDP.x, y: SENDP.y },
+  { t: 3.92, x: 1860, y: 1180 },
+  { t: 5.60, x: 700,  y: 970 }, { t: 5.98, x: SENDP.x, y: SENDP.y },
+  { t: 6.42, x: 1860, y: 1180 },
+  { t: 7.28, x: 700,  y: 970 }, { t: 7.68, x: SENDP.x, y: SENDP.y },
+  { t: 8.22, x: 1860, y: 1180 },
+  { t: 9.30, x: 740,  y: 970 }, { t: 9.99, x: SENDP.x, y: SENDP.y },
+  { t: 10.60, x: 1860, y: 1180 },
+  { t: 18.24, x: 700, y: 970 }, { t: 18.62, x: SENDP.x, y: SENDP.y },
+  { t: 19.12, x: 1860, y: 1180 },
+  { t: 19.72, x: CHIP2.x, y: CHIP2.y }, { t: 20.24, x: CHIP2.x, y: CHIP2.y },
+  { t: 20.74, x: 2020, y: 1240 }
+];
+/* 镜头：keyed 但被"操作"过——跟随提前一点，甩之前先落到点 */
+const CAMKEYS = [
+  { t: 0.00, x: 960,  y: 540, zoom: 1.00 },
+  { t: 0.95, x: 960,  y: 540, zoom: 1.06, curve: ease.sineInOut },
+  { t: 1.35, x: 960,  y: 540, zoom: 1.00, curve: ease.sineInOut },
+  { t: 2.20, x: 960,  y: 540, zoom: 1.00 },
+  { t: 3.40, x: 960,  y: 540, zoom: 1.10, curve: ease.sineInOut },
+  { t: 4.20, x: 960,  y: 540, zoom: 1.10 },
+  { t: 5.30, x: 960,  y: 540, zoom: 1.10 },
+  { t: 6.00, x: 960,  y: 566, zoom: 1.18, curve: ease.sineInOut },
+  { t: 6.68, x: 960,  y: 572, zoom: 1.28, curve: ease.expoOut },
+  { t: 7.22, x: 960,  y: 566, zoom: 1.22, curve: ease.sineInOut },
+  { t: 8.10, x: 960,  y: 540, zoom: 1.10, curve: ease.sineInOut },
+  { t: 9.00, x: 960,  y: 540, zoom: 1.10 },
+  { t: 10.20, x: 960, y: 660, zoom: 1.16, curve: ease.sineInOut },
+  { t: 11.60, x: 900, y: 620, zoom: 1.18, curve: ease.sineInOut },
+  { t: 13.10, x: 900, y: 600, zoom: 1.22, curve: ease.sineInOut },
+  { t: 14.30, x: 960, y: 540, zoom: 1.26, curve: ease.sineInOut },
+  { t: 16.70, x: 960, y: 540, zoom: 1.26 },
+  { t: 17.90, x: 960, y: 540, zoom: 1.02, curve: ease.sineInOut },
+  { t: 18.70, x: 1010, y: 520, zoom: 1.02, curve: ease.sineInOut },
+  { t: 19.50, x: 1060, y: 500, zoom: 1.30, curve: ease.sineInOut },
+  { t: 20.50, x: 1060, y: 500, zoom: 1.30 },
+  { t: 21.70, x: 960,  y: 560, zoom: 1.10, curve: ease.sineInOut },
+  { t: 23.60, x: 960,  y: 610, zoom: 1.06, curve: ease.sineInOut },
+  { t: 25.95, x: 960,  y: 610, zoom: 1.06 },
+  { t: 26.80, x: 960,  y: 540, zoom: 1.00, curve: ease.sineInOut },
+  { t: 32.00, x: 960,  y: 540, zoom: 1.00 }
+];
+function camAt(t) {
+  const c = OM.camera(t, CAMKEYS);
+  const sh = OM.shake(t, 6.68, { amp: 19, decay: 11, freq: 17, seed: 3 });
+  return { x: c.x + sh.x, y: c.y + sh.y, zoom: c.zoom, rot: c.rot + sh.rot * 0.12 };
+}
+/* render.py 以 1/60 s 的窗口问"这段时间里画面最远走了多少像素"，用它决定快门内拍几张。
+   镜头之外还有几处快动作（气泡弹出、封面撑满全屏、窗口折叠），所以给一个偏高的下限——
+   估高了只是多拍几张（慢一点、更干净），估低了会闪成重影。 */
+window.__motion = function (t0, t1) {
+  return OM.screenTravel(camAt(t0), camAt(t1), camAt((t0 + t1) / 2)) + 80;
+};
+
+/* ══════════ 2 · DOM ══════════ */
+const $ = id => document.getElementById(id);
+const place = (el, x, y, s, op, blur, extra) => {
+  el.style.opacity = op;
+  el.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) scale(' + s.toFixed(4) + ') ' + (extra || '');
+  el.style.filter = blur > 0.25 ? 'blur(' + blur.toFixed(1) + 'px)' : 'none';
+};
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&#62;');
+const E = { chat: $('chat'), inner: $('inner'), li: $('listinner'), pill: $('pill'), send: $('send'), cover: $('cover'),
+  rail: $('rail'), opener: $('opener'), whale: $('whale'), seal: $('seal'), endlab: $('endlab'),
+  url: $('url'), stats: $('stats'), tagline: $('tagline'), cursor: $('cursor'), flash: $('flash'),
+  sky: $('sky'), world: $('world'), inside: $('inside') };
+const sctx = E.sky.getContext('2d'), cctx = E.cover.querySelector('canvas').getContext('2d');
+
+const OPENER = ['群里有', '一条', '鱼。'];
+OPENER.forEach(w => { const s = document.createElement('span'); s.textContent = w; E.opener.appendChild(s); });
+const opSpans = [...E.opener.children];
+
+const rowObjs = ROWS_TXT.map((r, i) => {
+  const d = document.createElement('div'); d.className = 'row';
+  d.innerHTML = '<div class="k">' + r.k + '</div><div class="t">' + r.t + '</div>';
+  E.li.appendChild(d); return { el: d, at: ROWS[i] };
+});
+const bigRow = document.createElement('div');
+bigRow.className = 'row big';
+bigRow.innerHTML = '<div class="t">' + ROW_BIG_TXT + '<span class="sub">' + ROW_BIG_SUB + '</span></div>';
+E.li.appendChild(bigRow);
+const bigRowO = { el: bigRow, at: ROW_BIG };
+const statEls = STATS_TXT.map(s => {
+  const d = document.createElement('div'); d.className = 'stat';
+  d.innerHTML = '<div class="n">' + s[0] + '</div><div class="l">' + s[1] + '</div>';
+  E.stats.appendChild(d); return d;
+});
+
+MSGS.forEach(m => {
+  const d = document.createElement('div');
+  d.className = 'msg ' + m.who + (m.flash ? ' flash' : '') + (m.hit ? ' hit' : '');
+  d.id = m.id;
+  if (m.kind === 'link') {
+    d.innerHTML = '<div class="linkcard"><div class="ic">🔗</div><div>' +
+      '<div class="u">v.douyin.com/xxxxxxx/</div><div class="p">抖音 · 分享链接</div></div></div>';
+  } else if (m.kind === 'card') {
+    d.innerHTML = '<div class="cardmsg"><div class="cov"><div class="tag">封面（示例占位）</div></div><div class="bd">' +
+      '<h5>深夜食堂：一个人也要好好吃饭</h5>' +
+      '<div class="meta"><b>作者</b> 示例作者　·　<b>时长</b> 00:14</div>' +
+      '<div class="btn">🎬 无水印视频直链</div></div></div>';
+  } else if (m.kind === 'swap') {
+    d.innerHTML = '<div class="bbl"><div class="swapbox"><span class="sa">' + m.a + '</span>' +
+      '<span class="sb">' + m.b + '</span></div></div>';
+  } else {
+    d.innerHTML = '<div class="bbl">' + m.txt + '</div>';
+  }
+  E.li.appendChild(d); m.el = d;
+});
+
+/* ══════════ 3 · 量一次（世界坐标，此刻 #world 未变换） ══════════ */
+let COVER_WORLD = { x: 0, y: 0, w: 658, h: 286 };
+function measure() {
+  E.world.style.transform = 'none';
+  E.chat.style.left = CHAT.x + 'px'; E.chat.style.top = CHAT.y + 'px';
+  E.chat.style.width = CHAT.w + 'px'; E.chat.style.height = CHAT.h + 'px';
+  E.chat.style.borderRadius = '22px'; E.chat.style.opacity = '0';
+  let y = 22;
+  MSGS.forEach(m => {
+    const r = m.el.getBoundingClientRect();
+    m.w = Math.ceil(r.width) + 4;                 // +4：像素取整的余量，否则边界上会折行
+    m.h = Math.ceil(r.height);
+    m.x = (m.who === 'user') ? LIST.w - m.w : 0;
+    m.y = y; y += m.h + 18;
+    m.el.style.left = m.x + 'px'; m.el.style.top = m.y + 'px'; m.el.style.width = m.w + 'px';
+  });
+  let ry = y + 10;
+  rowObjs.forEach(r => {
+    r.h = Math.ceil(r.el.getBoundingClientRect().height); r.y = ry; ry += r.h + 13;
+    r.el.style.left = '0px'; r.el.style.top = r.y + 'px';
+  });
+  bigRowO.h = Math.ceil(bigRow.getBoundingClientRect().height); bigRowO.y = ry + 8;
+  bigRow.style.left = '0px'; bigRow.style.top = bigRowO.y + 'px'; bigRow.style.width = LIST.w + 'px';
+  const card = MSGS.find(m => m.kind === 'card');
+  COVER_WORLD = { x: LIST.x + card.x + 1, y: LIST.y + card.y + 1, w: 658, h: 286 };
+}
+
+/* ══════════ 4 · 画面 ══════════ */
+const FRAME = { x: 0, y: 0, w: 1920, h: 1080 };
+
+function drawSky(cam, t) {
+  const c = sctx; c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, 1920, 1080);
+  const lv = 0.10 + 0.24 * Math.max(0, 1 - Math.abs(t - 6.68) / 0.5);
+  const lf = OM.lightField(clamp(lv, 0, 0.44));
+  const g = c.createRadialGradient(lf.cx, lf.cy, 0, lf.cx, lf.cy, lf.rx);
+  g.addColorStop(0, 'rgba(10,132,255,.14)'); g.addColorStop(0.42, 'rgba(10,132,255,.055)');
+  g.addColorStop(1, 'rgba(10,132,255,0)');
+  c.fillStyle = g; c.fillRect(0, 0, 1920, 1080);
+  const L = OM.lattice(cam, { depth: 1.35, spacing: 132, px: 1.5 });
+  c.setTransform(L.matrix[0], L.matrix[1], L.matrix[2], L.matrix[3], L.matrix[4], L.matrix[5]);
+  c.fillStyle = 'rgba(245,245,247,.07)';
+  for (let x = L.x0; x <= L.x1; x += L.spacing)
+    for (let y = L.y0; y <= L.y1; y += L.spacing) { c.beginPath(); c.arc(x, y, L.r, 0, 6.2832); c.fill(); }
+  c.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function drawCover(t) {
+  const c = cctx; c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, 1920, 1080);
+  const open = clamp(seg(t, COVER_A[0], COVER_A[1]) - seg(t, COVER_B[0], COVER_B[1]), 0, 1);
+  if (open <= 0.001) return;
+  c.fillStyle = '#0E0E10'; c.fillRect(0, 0, 1920, 1080);
+  c.strokeStyle = 'rgba(255,255,255,.032)'; c.lineWidth = 2;
+  for (let y = 0; y < 1080; y += 26) { c.beginPath(); c.moveTo(0, y); c.lineTo(1920, y); c.stroke(); }
+  const p = clamp(seg(t, 14.5, 19.2), 0, 1);
+  c.fillStyle = 'rgba(255,255,255,.10)'; c.fillRect(150, 962, 1620, 4);
+  c.fillStyle = '#0A84FF'; c.fillRect(150, 962, 1620 * p, 4);
+  c.font = LOOK.font('mono', 26); c.fillStyle = '#8A8A90'; c.textAlign = 'left';
+  c.fillText('00:' + String(Math.round(p * 14)).padStart(2, '0') + ' / 00:14', 150, 940);
+  c.textAlign = 'center'; c.fillStyle = '#6E6E73'; c.font = LOOK.font('text', 24);
+  c.fillText('视频画面（示例占位）', 960, 120);
+}
+
+function seek(t) {
+  const cam = camAt(t);
+  E.world.style.transform = 'matrix(' + OM.view(cam).join(',') + ')';
+  drawSky(cam, t);
+  drawCover(t);
+
+  /* ── 封面：从卡片里长到满屏，再收回去（carry：这个容器变成下一场） ── */
+  const open = clamp(seg(t, COVER_A[0], COVER_A[1]) - seg(t, COVER_B[0], COVER_B[1]), 0, 1);
+  const cb = t >= COVER_B[0]
+    ? OM.morphRect(t, COVER_B[0], COVER_B[1], FRAME, COVER_WORLD, { curve: ease.expoInOut })
+    : OM.morphRect(t, COVER_A[0], COVER_A[1], COVER_WORLD, FRAME, { curve: ease.expoInOut });
+  E.cover.style.left = cb.x.toFixed(1) + 'px'; E.cover.style.top = cb.y.toFixed(1) + 'px';
+  E.cover.style.width = cb.w.toFixed(1) + 'px'; E.cover.style.height = cb.h.toFixed(1) + 'px';
+  E.cover.style.borderRadius = lerp(21, 0, open).toFixed(1) + 'px';
+  E.cover.style.opacity = open <= 0.001 ? '0' : '1';
+
+  /* ── 满屏之后压在上面的说明 ── */
+  { const k = OM.popIn(t, INSIDE[0], { rise: 26, s0: .96, omega: 16 });
+    const out = 1 - clamp(seg(t, INSIDE[1] - 0.3, INSIDE[1]), 0, 1);
+    const vis = t >= INSIDE[0] - 0.05 && t < INSIDE[1];
+    place(E.inside, 0, 700 + k.dy, k.s, vis ? k.op * out : 0);
+    E.inside.style.width = '1920px'; }
+
+  /* ── 开场 ── */
+  { const out = ssstep(OP_OUT[0], OP_OUT[1], t);
+    E.opener.style.opacity = 1 - out;
+    E.opener.style.transform = 'translateY(' + (-out * 46).toFixed(1) + 'px)';
+    opSpans.forEach((s, i) => { const w = OM.wordRise(t, T_OP[i], { dist: 34, zeta: .58, omega: 20 });
+      s.style.opacity = w.op * (1 - out);
+      s.style.transform = 'translateY(' + w.y.toFixed(1) + 'px) scale(' + w.s.toFixed(4) + ')'; }); }
+
+  /* ── 窗口从那个小圆点长出来；结尾又把整个窗口收回头像那一点（carry） ── */
+  { const rc = OM.morphRect(t, CHAT_IN, CHAT_IN + CHAT_SPAN, DOT, CHAT, { spring: { zeta: 0.74, omega: 15 } });
+    const kc = clamp(spring(t - CHAT_IN, .74, 15), 0, 1);
+    const rr = t < CHAT_IN ? DOT : rc;
+    E.chat.style.left = rr.x.toFixed(1) + 'px'; E.chat.style.top = rr.y.toFixed(1) + 'px';
+    E.chat.style.width = rr.w.toFixed(1) + 'px'; E.chat.style.height = rr.h.toFixed(1) + 'px';
+    E.chat.style.borderRadius = lerp(999, 22, kc).toFixed(1) + 'px';
+    /* 内容跟着窗口一起缩放 —— 这才是"从一个小圆点长出来"，而不是裁了个角 */
+    E.inner.style.transformOrigin = '0 0';
+    E.inner.style.transform = 'scale(' + (rr.w / CHAT.w).toFixed(5) + ')';
+    if (t >= FOLD0) {
+      const k = clamp(spring(t - FOLD0, 0.72, 12), 0, 1);
+      E.chat.style.transform = 'scale(' + lerp(1, 0.02, k).toFixed(5) + ') rotate(' + (k * 0.22).toFixed(4) + 'rad)';
+      E.chat.style.opacity = String(1 - clamp(seg(t, FOLD0 + 0.52, FOLD1), 0, 1));
+    } else {
+      E.chat.style.transform = 'none';
+      E.chat.style.opacity = t < CHAT_IN ? '0' : '1';
+    } }
+
+  /* ── 消息 ── */
+  { let scroll = 0;
+    MSGS.forEach(m => {
+      if (t < m.at - 0.02) { m.el.style.opacity = '0'; return; }
+      const from = (m.who === 'user') ? SENDP : AVATAR;
+      const k = Math.min(1.06, Math.max(0, spring(t - m.at, 0.66, 17)));
+      const kk = Math.min(1, k);
+      const sx = m.x + m.w / 2, sy = m.y + m.h / 2;
+      const s = lerp(0.16, 1, kk);
+      let dx = lerp(from.x - sx, 0, kk), dy = lerp(from.y - sy, 0, kk);
+      let extra = '';
+      if (m.hit) { const im = OM.impact(t, m.hit, { decay: 8, omega: 24 }); extra = 'rotate(' + (im.r * 0.45).toFixed(4) + 'rad)'; }
+      let op = 1;
+      if (m.out) op *= 1 - clamp(seg(t, m.out, m.out + 0.28), 0, 1);
+      if (m.kind === 'card') op *= 1 - clamp(seg(t, COVER_A[0] + 0.10, COVER_A[1]), 0, 1) * (t < COVER_B[1] ? 1 : 0);
+      if (t >= FOLD0) op *= 1 - clamp(seg(t, FOLD0 + 0.55, FOLD1), 0, 1);   // 跟着窗口一起收
+      place(m.el, dx, dy, s, op, 0, extra);
+      if (t >= m.at && !m.out && t < FOLD0) scroll = Math.max(scroll, m.y + m.h);
+      if (m.kind === 'swap') {
+        const sp = ssstep(SWAP, SWAP + 0.24, t);
+        const A = m.el.querySelector('.sa'), B = m.el.querySelector('.sb');
+        const bh = A.getBoundingClientRect().height / cam.zoom || 52;
+        A.style.opacity = String(1 - sp);
+        B.style.opacity = String(sp);
+        A.style.transform = 'translateY(' + (-sp * bh).toFixed(1) + 'px)';
+        B.style.transform = 'translateY(' + ((1 - sp) * bh).toFixed(1) + 'px)';
+        if (t >= SWAP) {
+          const im = OM.impact(t, SWAP, { decay: 9, omega: 26 });
+          m.el.style.transform += ' scale(' + (1 + Math.abs(im.r) * 0.35).toFixed(4) + ')';
+        }
+      }
+    });
+    rowObjs.concat([bigRowO]).forEach(r => {
+      if (t < r.at - 0.02) { r.el.style.opacity = '0'; return; }
+      const k = Math.min(1.06, Math.max(0, spring(t - r.at, 0.62, 16)));
+      let op = 1;
+      if (r === bigRowO) op *= 1 - clamp(seg(t, ROW_BIG_OUT, ROW_BIG_OUT + 0.3), 0, 1);
+      if (t >= FOLD0) op *= 1 - clamp(seg(t, FOLD0 + 0.55, FOLD1), 0, 1);
+      place(r.el, 0, lerp(30, 0, Math.min(1, k)), lerp(0.94, 1, Math.min(1, k)), op);
+      if (t >= r.at && t < FOLD0) scroll = Math.max(scroll, r.y + r.h);
+    });
+    E.li.style.transform = 'translateY(' + (-Math.max(0, scroll + 22 - LIST.h)).toFixed(1) + 'px)'; }
+
+  /* ── 输入栏：手敲进去的字（按下那一刻就清空） ── */
+  { let txt = '', caret = false;
+    Object.keys(TYPING).forEach(id => {
+      const w = TYPING[id];
+      if (t >= w[0] && t < w[1]) {
+        const ty = OM.typeOn(t, w[0], w[2], { cps: Math.max(16, w[2].length / (w[1] - w[0] - 0.08)) });
+        txt = ty.str; caret = !!ty.caret;
+      }
+    });
+    E.pill.innerHTML = txt ? (esc(txt) + (caret ? '<i></i>' : '')) : '<span class="ph">说点什么…</span>';
+    const ps = CLICKS.map(c => OM.press(t, c));
+    const any = ps.reduce((a, b) => (Math.abs(b.s - 1) > Math.abs(a.s - 1) ? b : a));
+    E.send.style.transform = 'scale(' + any.s.toFixed(3) + ')';
+    E.send.style.background = any.active ? '#30D158' : 'var(--accent)'; }
+
+  /* ── 人设抽屉 + 换人设 ── */
+  { const ei = OM.popIn(t, RAIL_IN, { rise: 44, s0: .95, omega: 15 });
+    const vis = t >= RAIL_IN - 0.05 && t < FOLD0;
+    place(E.rail, ei.dy * 0.5, ei.dy, ei.s, vis ? 1 : 0);
+    const on = t >= SWAP;
+    const rib = OM.ribbon(t, [SWAP], { amp: 34, decay: 6, omega: 20, tilt: .12 });
+    $('chip0').className = 'chip' + (on ? '' : ' on');
+    $('chip1').className = 'chip' + (on ? ' on' : '');
+    $('chip0').style.transform = 'translateX(' + (on ? -rib.shift * 0.22 : 0).toFixed(1) + 'px)';
+    const p = OM.press(t, CLICKS[5]);
+    $('chip1').style.transform = 'translateX(' + (on ? rib.shift * 0.08 : 0).toFixed(1) + 'px) scale(' + p.s.toFixed(3) + ')'; }
+
+  /* ── 踩雷那一下的红光 ── */
+  { const f = Math.max(0, 1 - Math.abs(t - 6.68) / 0.42);
+    E.flash.style.opacity = (f * f * 0.9).toFixed(3); }
+
+  /* ── 折叠 → 那只鲸鱼 ── */
+  { const mv = OM.hop(t, WHALE0, WHALE1, { x: AVATAR.x, y: AVATAR.y }, { x: 960, y: 356 }, { height: -40, curve: ease.smoother });
+    const w = OM.popIn(t, WHALE0, { rise: 26, s0: .55, omega: 14 });
+    const out = 1 - clamp(seg(t, 30.5, 31.1), 0, 1);
+    const sc = lerp(0.42, 1.5, clamp(seg(t, WHALE0, WHALE1), 0, 1));
+    place(E.whale, mv.x - 48 * sc, mv.y - 48 * sc, sc, t >= WHALE0 - 0.05 ? w.op * out : 0);
+    const sl = OM.seal(t, SEAL0, SEAL1, { r: 215, turns: 0.7 });
+    E.seal.style.left = (960 - sl.r) + 'px'; E.seal.style.top = (500 - sl.r) + 'px';
+    E.seal.style.width = (sl.r * 2) + 'px'; E.seal.style.height = (sl.r * 2) + 'px';
+    E.seal.style.transform = 'rotate(' + (sl.rot * 57.3).toFixed(1) + 'deg)';
+    E.seal.style.opacity = String(0.5 * (t >= SEAL0 ? (1 - clamp(seg(t, SEAL1 - 0.3, SEAL1), 0, 1)) : 0)); }
+
+  /* ── 结尾 ── */
+  { const l = OM.maskRise(t, END_LAB, 0, { dist: 1 });
+    place(E.endlab, 0, 468 + l.y * 24, 1, l.visible ? 1 : 0);
+    const ty = OM.typeOn(t, URL0, 'github.com/RelyLinYu/Xiaojingyu-QQbot', { cps: URL_CPS });
+    E.url.innerHTML = esc(ty.str) + (ty.done || t < URL0 ? '' : '<span style="opacity:.6">▌</span>');
+    E.url.style.opacity = t >= URL0 ? '1' : '0';
+    E.url.style.transform = 'translateY(0px)';
+    statEls.forEach((s, i) => { const k = OM.popIn(t, STATS[i], { rise: 26, s0: .88, omega: 18 });
+      place(s, 0, k.dy, k.s, t >= STATS[i] - 0.02 ? k.op : 0); });
+    const tg = OM.popIn(t, TAGLINE, { rise: 18, s0: .97, omega: 16 });
+    place(E.tagline, 0, tg.dy, tg.s, t >= TAGLINE - 0.02 ? tg.op : 0);
+    E.tagline.innerHTML = '<b>蓝色大肥鱼</b> · 不是一个问答接口，是群里那个有脾气的家伙'; }
+
+  /* ── 手 ── */
+  { const cu = OM.cursor(t, HAND, CLICKS);
+    const vis = t >= 1.45 && t < 20.65;
+    E.cursor.style.opacity = vis ? '1' : '0';
+    E.cursor.style.transform = 'translate(' + (cu.x - 4).toFixed(1) + 'px,' + (cu.y - 3).toFixed(1) + 'px) scale(' + cu.s.toFixed(3) + ')'; }
+
+  $('hud').textContent = 't=' + t.toFixed(3);
+  return Promise.resolve();
+}
+
+window.__seek = async t => { await seek(t); return true; };
+window.__ready = LOOK.ready.then(() => {
+  measure();
+  E.chat.style.transformOrigin = (AVATAR.x - CHAT.x) + 'px ' + (AVATAR.y - CHAT.y) + 'px';  // 折叠时收向头像那一点
+  E.inside.style.top = '0px';
+  E.endlab.style.top = '0px';
+  E.url.style.top = '518px';
+  return seek(0);
+});
+const q = new URLSearchParams(location.search);
+if (q.has('t')) __ready.then(() => seek(parseFloat(q.get('t'))));
+if (q.has('hud')) $('hud').style.display = 'block';
+if (q.has('play')) __ready.then(() => { const t0 = performance.now();
+  (function loop() { seek(((performance.now() - t0) / 1000) % DUR); requestAnimationFrame(loop); })(); });
+})();
+</script>
+</body>
+</html>
