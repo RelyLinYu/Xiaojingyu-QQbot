@@ -4320,7 +4320,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       '还残留合并相关代码');
     check('★★ 群内码是**只读展示**（不再占输入框；输入框改成填群号）',
       /class="gcode">群内码/.test(lw)
-      && /placeholder="群号（自己填，方便你认）"/.test(lw)
+      && /'QQ 号（自己填，方便你认）'/.test(lw) && /'群号（自己填，方便你认）'/.test(lw) && /const noPh = isPriv/.test(lw)
       && !/data-f="id"/.test(lw));
     check('★ 群号存进 `no` 字段（不再覆盖群内码），群内码由 scope 推导',
       /groupNo: al\.no \|\| ''/.test(pg) && /const mReal = \/\^group:/.test(pg));
