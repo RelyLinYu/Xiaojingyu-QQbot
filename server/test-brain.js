@@ -5369,7 +5369,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
             return st.includes('submitCooldownMin:') && st.includes('imgCooldownSec:')
               && sb.includes("values().submitCooldownMin") && il.includes("values().imgCooldownSec")
               && pg4.includes("'submitCooldownMin'") && pg4.includes("'imgCooldownSec'")
-              && pg4.includes('function memeAdd()') && pg4.includes('id="memeAddBtn"');
+              && !pg4.includes('memeAdd') && !pg4.includes('memeTrigger');
           })());
           check('★★ 链接解析开关：settings 有项 / index 读它 / 面板有开关', (() => {
             const pg3 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');

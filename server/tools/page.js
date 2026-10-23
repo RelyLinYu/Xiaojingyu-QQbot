@@ -1042,14 +1042,7 @@ const PAGE = (opts) => `<!doctype html>
   <section data-page="memes">
     <h2>群内梗库</h2>
     <p class="hint">它会自己从群聊里收集梗（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度）；也可以在这里手动加。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
-    <div class="exbar" style="margin:0 0 12px;display:flex;gap:8px;flex-wrap:wrap">
-      <input id="memeTrigger" type="text" placeholder="触发词（多个用 | 分隔）" aria-label="触发词" style="flex:1 1 180px">
-      <input id="memeReply" type="text" placeholder="接法（多个用 | 分隔）" aria-label="接法" style="flex:1 1 180px">
-      <input id="memeWhen" type="text" placeholder="只在什么语境（可选）" aria-label="适用语境" style="flex:1 1 180px">
-      <label class="chk"><input id="memeFixed" type="checkbox"><span>固定暗号</span></label>
-      <label class="chk"><input id="memeEcho" type="checkbox"><span>镜像替换</span></label>
-      <button class="primary" type="button" onclick="memeAdd()" id="memeAddBtn">添加</button>
-    </div>
+    <p class="hint">它会自己从群聊里收集梗（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度），这里只负责 <b>改错、停用、删除</b>。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
     <div class="card"><div id="memeList"><p class="hint">载入中…</p></div></div>
   </section>
 </main>
@@ -2270,38 +2263,6 @@ function memeRender(items) {
 function memeLoad() {
   memeApi('/api/memes').then(function (j) { memeRender(j && j.items); }).catch(function () {});
 }
-// 🆕 2026-10-23 用户要求恢复手动添加（自动采集照旧在跑）
-var MEME_BUSY = false;
-function memeAdd() {
-  var t = document.getElementById('memeTrigger');
-  var r = document.getElementById('memeReply');
-  var w = document.getElementById('memeWhen');
-  var fx = document.getElementById('memeFixed');
-  var ec = document.getElementById('memeEcho');
-  var trigger = t && t.value.trim();
-  var reply = r && r.value.trim();
-  if (!trigger || !reply) { toast('触发词和接法都要填'); return; }
-  if (MEME_BUSY) return;
-  MEME_BUSY = true;
-  var btn = document.getElementById('memeAddBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '添加中…'; }
-  memeApi('/api/memes/save', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ trigger: trigger, reply: reply, when: w ? w.value.trim() : '', fixed: !!(fx && fx.checked), echo: !!(ec && ec.checked) }),
-  }).then(function (j) {
-    if (j && j.ok) {
-      if (t) t.value = ''; if (r) r.value = ''; if (w) w.value = '';
-      if (fx) fx.checked = false; if (ec) ec.checked = false;
-      toast(j.updated ? '✅ 已更新同触发词的梗' : '✅ 已添加');
-      memeLoad();
-    } else toast('❌ ' + ((j && j.why) || '保存失败'));
-  }).catch(function (e) { toast('❌ ' + e.message); })
-    .finally(function () {
-      MEME_BUSY = false;
-      if (btn) { btn.disabled = false; btn.textContent = '添加'; }
-    });
-}
-
 // 🆕 2026-10-23 面板只保留「改」：点编辑弹自绘输入框，改含义（自动条目）或接法（手动条目）
 document.addEventListener('click', function (ev) {
   var ed = ev.target && ev.target.closest ? ev.target.closest('[data-memeedit]') : null;
