@@ -502,8 +502,7 @@ async function handleEvent(type, d) {
   //      · 而这条支路跑在 passHardRules **之前**，那里才是检查 author.bot 的地方
   //      · 一旦收到自己的消息（或另一个机器人发的同款卡片），就会**自己解析自己 → 自己回自己**
   //     所以这里**必须**自己先挡一道。
-  // 🆕 2026-10-23 面板「链接自动解析」开关：关掉后群里贴链接不再自动回卡片
-  //    ⚠️ #js 是显式指令，不受这个开关影响（用户自己要解析才发）。
+  // 🆕 2026-10-23 面板「链接自动解析」开关：关掉后群里贴链接不再自动回卡片。
   const lpOn = (() => {
     try { return Number(require('./settings').num('linkParseEnabled', 1)) !== 0; } catch { return true; }
   })();
