@@ -502,7 +502,12 @@ async function handleEvent(type, d) {
   //      · 而这条支路跑在 passHardRules **之前**，那里才是检查 author.bot 的地方
   //      · 一旦收到自己的消息（或另一个机器人发的同款卡片），就会**自己解析自己 → 自己回自己**
   //     所以这里**必须**自己先挡一道。
-  const links = d.author?.bot ? [] : linkparse.findLinks(d, cfg.policy.linkParse?.maxLinksPerMessage || 2);
+  // 🆕 2026-10-23 面板「链接自动解析」开关：关掉后群里贴链接不再自动回卡片
+  //    ⚠️ #js 是显式指令，不受这个开关影响（用户自己要解析才发）。
+  const lpOn = (() => {
+    try { return Number(require('./settings').num('linkParseEnabled', 1)) !== 0; } catch { return true; }
+  })();
+  const links = (!lpOn || d.author?.bot) ? [] : linkparse.findLinks(d, cfg.policy.linkParse?.maxLinksPerMessage || 2);
 
   // 🆕 4.5b B站「小程序卡片」—— 平台**不给 URL**，只能拿标题去 B站反查
   //
@@ -512,7 +517,7 @@ async function handleEvent(type, d) {
   //
   // ⚠️ 这里**只做纯判断、不发请求** —— 反查要打 B站搜索接口（1~3 次），
   //    得先过闸门（冷却 / 静默时段 / 连发上限）再打，否则在冷却期里就是白打。
-  const card = (!links.length && !d.author?.bot) ? linkparse.bilibiliCard(d) : null;
+  const card = (lpOn && !links.length && !d.author?.bot) ? linkparse.bilibiliCard(d) : null;
   const cardTitle = card ? card.title : '';
 
   if (links.length || cardTitle) {
