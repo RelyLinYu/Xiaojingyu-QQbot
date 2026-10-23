@@ -1593,15 +1593,17 @@ function renderGroups(list, power){
     const sum = '<summary>' +
         '<span class="gtitle">' + esc(g.name || '未命名') + '</span>' +
         '<span class="tag">' + (isPriv ? '私聊' : '群') + '</span>' +
-        '<span class="cnt">' + g.msgs.length + ' 条（每群最多 60）</span>' +
+        '<span class="cnt">' + g.msgs.length + (isPriv ? ' 条（私聊最多 60）' : ' 条（每群最多 60）') + '</span>' +
         pwBtn +
       '</summary>';
     // ⚠️ 编辑框放在 summary **外面** —— 否则点输入框会连带收起卡片
     // ① 群内码：**只读**（用户说"那串乱码对我没啥用，非要写就固定在群昵称旁边或下面独占一行"）
     // ② 输入框：默认空缺，**专门用来填你要看的群号**
+    // 🆕 2026-10-23 私聊卡不该提示"群号"（用户截图：私聊卡里写着"群号（自己填…"）
+    const noPh = isPriv ? 'QQ 号（自己填，方便你认）' : '群号（自己填，方便你认）';
     const edit = '<div class="gedit">' +
         '<input type="text" placeholder="' + (isPriv ? '备注名（可手改）' : '群名（可手改）') + '" value="' + esc(nameVal) + '" data-g="' + gi + '" data-f="name">' +
-        '<input type="text" placeholder="群号（自己填，方便你认）" value="' + esc(g.groupNo || '') + '" data-g="' + gi + '" data-f="no">' +
+        '<input type="text" placeholder="' + noPh + '" value="' + esc(g.groupNo || '') + '" data-g="' + gi + '" data-f="no">' +
         '<button class="sm" onclick="saveGroup(' + gi + ')" type="button">保存</button>' +
       '</div>' +
       (isPriv ? '' : '<div class="gcode">群内码 ' + esc(g.realId || '（认不出）') + '</div>');
