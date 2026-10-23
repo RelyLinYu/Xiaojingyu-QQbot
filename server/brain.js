@@ -778,9 +778,17 @@ function passHardRules(scope, msg, eventType, isPrivate, opts = {}) {
   //      而用户要的是"**所有人**都有机会被搭话"，不是只有主人被搭话。
   //   ② 抽样率 0 → 0.08（用户要求"提高所有人被插嘴的概率"）。
   // ⚠️ 条件里必须显式排除 `at`：被 @ 是明确点名，不该被抽签挡掉（否则 @ 了却沉默）。
+  // 🆕 2026-10-23 面板「插嘴概率」：和配图概率一样做成 0~1 的 runtime 参数（1 = 每次都接）。
+  //    ⚠️ 只有**用户真的在面板存过**才覆盖 config；没存过就走 config 的 sampleNonKeyword
+  //       （否则 settings 的默认值会把 config / 自测里的临时改动全部吃掉 —— 踩过一次）。
+  let chance = p.sampleNonKeyword;
+  try {
+    const v = require('./settings').values().interjectChance;
+    if (Number.isFinite(v)) chance = Math.min(1, Math.max(0, v));
+  } catch { /* 读不到用 config */ }
   const sampleFree = owner && p.ownerBypassSampling;
-  if (!at && !hitKeyword && !sampleFree && Math.random() > p.sampleNonKeyword) {
-    return { ok: false, why: '未命中关键词且未抽样中（省钱）' };
+  if (!at && !hitKeyword && !sampleFree && Math.random() > chance) {
+    return { ok: false, why: `未命中关键词且未抽样中（省钱；插嘴概率 ${Math.round(chance * 100)}%）` };
   }
 
   return { ok: true, hitKeyword, isAt: at, isOwner: owner };
