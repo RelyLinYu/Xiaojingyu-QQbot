@@ -70,7 +70,12 @@ function isOwner(d) {
 // bypass=true（主人）⇒ 直接放行，不写冷却表也不拦（和 imglib 的 ownerBypass 一致）
 function cooldownState(scope, now = Date.now(), bypass = false) {
   if (bypass) return null;
-  const cd = Number(SC().cooldownMs);
+  // 🆕 2026-10-23 面板「投稿冷却（分钟）」：存过就覆盖 config（0=不限）
+  let cd = Number(SC().cooldownMs);
+  try {
+    const v = require('./settings').values().submitCooldownMin;
+    if (Number.isFinite(v)) cd = Math.max(0, v) * 60000;
+  } catch { /* 读不到用 config */ }
   if (!(cd > 0)) return null;
   const last = lastAt.get(scope) || 0;
   const left = cd - (now - last);

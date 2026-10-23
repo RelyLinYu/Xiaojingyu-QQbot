@@ -934,7 +934,7 @@ const PAGE = (opts) => `<!doctype html>
   </section>
 
   <details data-page="settings">
-    <summary>参数设置（点开修改）</summary>
+    <summary>参数设置</summary>
     <div id="settings" style="margin-top:12px"></div>
     <div class="frow" style="margin-top:12px">
       <button onclick="restartBot()" type="button">重启机器人</button>
@@ -1041,7 +1041,16 @@ const PAGE = (opts) => `<!doctype html>
   <!-- 🆕 2026-10-23 用户：「把梗库面板删掉，让bot自己加」⇒ 新增交给自动采集，这里只留 改 / 停用 / 删 -->
   <section data-page="memes">
     <h2>群内梗库</h2>
-    <p class="hint">它会自己从群聊里收集梗（每攒 20 条消息、间隔 ≥5 分钟学一次），这里只负责 <b>改错、停用、删除</b>。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
+    <p class="hint">它会自己从群聊里收集梗（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度）；也可以在这里手动加。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
+    <div class="exbar" style="margin:0 0 12px;display:flex;gap:8px;flex-wrap:wrap">
+      <input id="memeTrigger" type="text" placeholder="触发词（多个用 | 分隔）" aria-label="触发词" style="flex:1 1 180px">
+      <input id="memeReply" type="text" placeholder="接法（多个用 | 分隔）" aria-label="接法" style="flex:1 1 180px">
+      <input id="memeWhen" type="text" placeholder="只在什么语境（可选）" aria-label="适用语境" style="flex:1 1 180px">
+      <label class="chk"><input id="memeFixed" type="checkbox"><span>固定暗号</span></label>
+      <label class="chk"><input id="memeEcho" type="checkbox"><span>镜像替换</span></label>
+      <button class="primary" type="button" onclick="memeAdd()" id="memeAddBtn">添加</button>
+    </div>
+    <p class="hint">例：「康神开播了」→「真的假的」+勾「固定暗号」；「token来」→「来→回」+勾「镜像替换」；「隐晦」→「是不是在说淫秽」+语境「暧昧/擦边」。普通梗的接法可用 | 写多个。</p>
     <div class="card"><div id="memeList"><p class="hint">载入中…</p></div></div>
   </section>
 </main>
@@ -1316,6 +1325,8 @@ function renderSettings(s){
     interjectEnabled: '关掉后没 @ 就完全不主动说话（群指令和私聊不受影响）',
     memeAuto: '让它自己从群聊里收集梗（每 15 条/5 分钟学一次，重启不丢进度）；关掉后只用已有的',
     linkParseEnabled: '关掉后群里贴链接不再自动回卡片',
+    submitCooldownMin: '同一个群两次投稿之间至少隔多久（0 = 不限）',
+    imgCooldownSec: '同一个群两次要图之间至少隔多久（0 = 不限；主人不受限）',
     personaText: '所有人设都在这一块；清空保存 = 回到代码里的默认人设',
   };
   const ICONS = {
@@ -1327,7 +1338,7 @@ function renderSettings(s){
   const GROUPS = [
     { t: '模型与生成', cls: 'sec-model', keys: ['aiModel', 'aiEffort', 'aiApiKey'] },
     { t: '额度与花费', cls: 'sec-money', keys: ['budgetDaily', 'budgetTotal', 'dailyCalls', 'visionDaily'] },
-    { t: '对话与回复', cls: 'sec-dialog', keys: ['imglibChance', 'interjectChance', 'submitEnabled', 'interjectEnabled', 'memeAuto', 'linkParseEnabled'] },
+    { t: '对话与回复', cls: 'sec-dialog', keys: ['imglibChance', 'interjectChance', 'submitEnabled', 'interjectEnabled', 'memeAuto', 'linkParseEnabled', 'submitCooldownMin', 'imgCooldownSec'] },
     { t: '人设', cls: 'sec-persona', keys: ['personaText'] },
   ];
   const isBool = (it) => Array.isArray(it.options) && it.options.length === 2
@@ -2260,6 +2271,38 @@ function memeRender(items) {
 function memeLoad() {
   memeApi('/api/memes').then(function (j) { memeRender(j && j.items); }).catch(function () {});
 }
+// 🆕 2026-10-23 用户要求恢复手动添加（自动采集照旧在跑）
+var MEME_BUSY = false;
+function memeAdd() {
+  var t = document.getElementById('memeTrigger');
+  var r = document.getElementById('memeReply');
+  var w = document.getElementById('memeWhen');
+  var fx = document.getElementById('memeFixed');
+  var ec = document.getElementById('memeEcho');
+  var trigger = t && t.value.trim();
+  var reply = r && r.value.trim();
+  if (!trigger || !reply) { toast('触发词和接法都要填'); return; }
+  if (MEME_BUSY) return;
+  MEME_BUSY = true;
+  var btn = document.getElementById('memeAddBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '添加中…'; }
+  memeApi('/api/memes/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trigger: trigger, reply: reply, when: w ? w.value.trim() : '', fixed: !!(fx && fx.checked), echo: !!(ec && ec.checked) }),
+  }).then(function (j) {
+    if (j && j.ok) {
+      if (t) t.value = ''; if (r) r.value = ''; if (w) w.value = '';
+      if (fx) fx.checked = false; if (ec) ec.checked = false;
+      toast(j.updated ? '✅ 已更新同触发词的梗' : '✅ 已添加');
+      memeLoad();
+    } else toast('❌ ' + ((j && j.why) || '保存失败'));
+  }).catch(function (e) { toast('❌ ' + e.message); })
+    .finally(function () {
+      MEME_BUSY = false;
+      if (btn) { btn.disabled = false; btn.textContent = '添加'; }
+    });
+}
+
 // 🆕 2026-10-23 面板只保留「改」：点编辑弹自绘输入框，改含义（自动条目）或接法（手动条目）
 document.addEventListener('click', function (ev) {
   var ed = ev.target && ev.target.closest ? ev.target.closest('[data-memeedit]') : null;

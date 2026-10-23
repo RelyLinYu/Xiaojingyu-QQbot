@@ -5362,6 +5362,15 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         {
           const st = require('fs').readFileSync(path2.join(__dirname, 'settings.js'), 'utf8');
           const br = require('fs').readFileSync(path2.join(__dirname, 'brain.js'), 'utf8');
+          check('★★ 投稿/要图冷却可调 + 梗库手动添加恢复', (() => {
+            const pg4 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
+            const sb = require('fs').readFileSync(require('path').join(__dirname, 'submit.js'), 'utf8');
+            const il = require('fs').readFileSync(require('path').join(__dirname, 'imglib.js'), 'utf8');
+            return st.includes('submitCooldownMin:') && st.includes('imgCooldownSec:')
+              && sb.includes("values().submitCooldownMin") && il.includes("values().imgCooldownSec")
+              && pg4.includes("'submitCooldownMin'") && pg4.includes("'imgCooldownSec'")
+              && pg4.includes('function memeAdd()') && pg4.includes('id="memeAddBtn"');
+          })());
           check('★★ 链接解析开关：settings 有项 / index 读它 / 面板有开关', (() => {
             const pg3 = require('fs').readFileSync(require('path').join(__dirname, 'tools', 'page.js'), 'utf8');
             const is3 = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');

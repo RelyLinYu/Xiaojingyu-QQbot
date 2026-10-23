@@ -423,7 +423,12 @@ function sendGate({ scope, groupOpenid, groupId, isOwner, group_openid, group_id
   // 🆕 2026-10-13 用户要求：主人不受冷却限制
   const ownerFree = c.ownerBypass !== false && !!isOwner;
   if (!ownerFree) {
-    const cd = Number(c.cooldownMs) || 0;
+    // 🆕 2026-10-23 面板「群友要图冷却（秒）」：存过就覆盖 config（0=不限）
+    let cd = Number(c.cooldownMs) || 0;
+    try {
+      const v = require('./settings').values().imgCooldownSec;
+      if (Number.isFinite(v)) cd = Math.max(0, v) * 1000;
+    } catch { /* 读不到用 config */ }
     const last = lastSentAt.get(scope) || 0;
     if (cd > 0 && last) {
       const left = cd - (Date.now() - last);

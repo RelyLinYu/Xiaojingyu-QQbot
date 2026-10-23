@@ -111,6 +111,13 @@ const SPEC = {
       { value: 0, label: '关（贴链接当普通聊天，不再自动回卡片）' },
     ],
   },
+  // 🆕 2026-10-23 用户：「加一个投稿冷却时间自定义」/「加一个群友要图的自定义冷却」
+  submitCooldownMin: {
+    type: 'runtime', key: 'submitCooldownMin', label: '投稿冷却（分钟，0=不限）', def: 5, min: 0, max: 1440, int: true,
+  },
+  imgCooldownSec: {
+    type: 'runtime', key: 'imgCooldownSec', label: '群友要图冷却（秒，0=不限）', def: 180, min: 0, max: 86400, int: true,
+  },
   // 🆕 2026-10-23 用户要的「插嘴概率」：和配图概率同款滑块（0~1，1 = 每次都接）
   interjectChance: {
     type: 'runtime', key: 'interjectChance', label: '主动接话的概率（0~1，1=每次都接）', def: 0.08, min: 0, max: 1,
