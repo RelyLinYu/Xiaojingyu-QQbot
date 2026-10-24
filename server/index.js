@@ -479,7 +479,8 @@ async function handleEvent(type, d) {
   try {
     if (require('./settings').num('memeAuto', 1) !== 0) {
       const ml = require('./meme-learn');
-      ml.observe(scope, askText, d.author?.member_openid || d.author?.id || who);
+      // 🆕 2026-10-24 机器人/别的 bot 的消息不进采集（不然会把自己的猜测当成"群友用过"）
+      if (!d.author?.bot) ml.observe(scope, askText, d.author?.member_openid || d.author?.id || who);
       if (isGroup && ml.shouldScan(scope)) {
         ml.scan(scope, brain.callAI).then((added) => {
           if (added && added.length) {

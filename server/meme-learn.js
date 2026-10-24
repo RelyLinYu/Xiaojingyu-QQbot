@@ -166,7 +166,9 @@ function contextsFor(scope, phrase, n = 2) {
 }
 
 const SYS = '你是群聊黑话识别器。给你最近的群聊记录，找出其中**像群内梗/黑话/缩写/谐音**的短语（2~8 字，必须是聊天里真实出现过的）。'
-  + '优先提取**完整短语**（如「康神开播了」），不要把一句话拆成两个词；含义太普通/看了就懂的（如「开播了」「今天吃啥」）不要列。'
+  + '**只输出你有把握的**：不确定就一条都别输出；不要靠字面拆缩写去猜。'
+  + '**禁止**写「疑似」「可能」「也许」「大概」「猜」「或者是」这类含糊措辞——含义必须是确定的。'
+  + '优先提取**完整短语**（如「康神开播了」），不要把一句话拆成两个词；含义太普通/看了就懂的不要列。'
   + '普通词、人名、地名、商品名、无意义碎片、已有梗都不要列。最多 3 条，宁缺毋滥。'
   + '输出 JSON 数组，元素 {"p":"短语","m":"一句话含义，不超过18字"}；没有就输出 []。不要输出多余文字。';
 
@@ -215,14 +217,19 @@ async function scan(scope, callAI) {
   }
 
   const added = [];
+  const HEDGE = /疑似|可能|也许|大概|不确定|猜测|猜的|或者是|也许|说不准/;
   for (const r of arr) {
     if (!r || !r.p || !r.m) continue;
     const phrase = String(r.p).trim().slice(0, 12);
     if (phrase.length < 2) continue;
+    // 🆕 2026-10-24 用户报：kskbl 被模型"疑似"猜成"快说快不了"，还被收录
+    //    ⇒ 含糊措辞直接不收（宁可漏），并要求至少 2 个不同的人用过。
+    if (HEDGE.test(String(r.m))) { console.log('  ├ [meme-learn] 跳过含糊释义：' + phrase); continue; }
     // 去伪：这句话必须在窗口里**真实出现 ≥2 次**（一条消息里重复也算一次）
     const hits = buf.filter((m) => String(m.text).includes(phrase));
     if (hits.length < 2) continue;
     const speakers = new Set(hits.map((m) => m.who).filter(Boolean)).size;
+    if (speakers < 2) { console.log('  ├ [meme-learn] 跳过单人自嗨：' + phrase + '（' + speakers + ' 人）'); continue; }
     const res = memes.addAuto({
       phrase,
       meaning: String(r.m).slice(0, 40),

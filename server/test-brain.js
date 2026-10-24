@@ -5441,6 +5441,15 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
           return lw2.includes('private:([0-9A-Za-z_-]{8,64})')
             && lw2.includes('lookupByTime(c.time)') && lw2.includes('BOT_OWNER_OPENID');
         })());
+        // 🆕 2026-10-24 用户报：kskbl 被模型「疑似」猜成「快说快不了」还被收录
+        //    ⇒ 含糊措辞不收 + 至少 2 个不同的人用过 + bot 自己的消息不进采集。
+        check('★★ 梗自动采集：含糊释义不收 / 单人自嗨不收 / bot 消息不喂采集', (() => {
+          const mlsrc = require('fs').readFileSync(require('path').join(__dirname, 'meme-learn.js'), 'utf8');
+          const idxsrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+          return mlsrc.includes('const HEDGE') && mlsrc.includes('疑似') && /speakers < 2/.test(mlsrc)
+            && idxsrc.includes('!d.author?.bot) ml.observe');
+        })());
+
         check('★ 梗库提示走 user 文本；镜像替换走代码直回；自动采集接线就位', (() => {
           const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
           return /require\('\.\/memes'\)\.hint\(/.test(is) && /\[linkNote, memeNote\]\.filter/.test(is)
