@@ -5298,17 +5298,14 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
           /自动纠正为最接近的/.test(isrc)
           && /改用候选里的/.test(isrc) && /_pickImgForScope\(scope, 1, ''\)/.test(isrc), '');
 
-        // 🔴 2026-10-13 用户提的：群友发的大多是它的**二创图**，它却只看出"蓝发女仆"、反应不到是自己
-        //    ⇒ 加一段 `policy.vision.selfHint`（可判定的视觉特征 + "点明这是你自己"），
-        //      由 vision.js（识图）和 imglib.js（入库描述）**共用同一份**，不许各写一套。
+        // 🆕 2026-10-24 用户：「改不注释身份，只表述图片行为，或者图片内人物身份」
+        //    ⇒ selfHint 从"认出这是自己"改成"不判断身份、只描述画面"；旧标签只做清洗。
+        //    识图与图库描述仍共用同一份 selfHint，不许各写一套。
         {
           const vs = cfgMod.policy.vision || {};
-          check('★★ 有"认出这是自己的二创"的自述段（含可判定特征：蓝发 / 女仆 / 鲸鱼元素）',
-            typeof vs.selfHint === 'string' && /蓝色头发/.test(vs.selfHint)
-            && /女仆|水手服/.test(vs.selfHint) && /鲸鱼/.test(vs.selfHint), String(vs.selfHint || '').slice(0, 60));
-          check('★★ 自述段用**指定身份**（大肥鱼/鲸鱼娘）而不是抽象的"你自己"，且明显收紧、宁可漏认',
-            /蓝色大肥鱼/.test(vs.selfHint || '') && /鲸鱼娘/.test(vs.selfHint || '')
-            && /宁可漏认/.test(vs.selfHint || '') && /一律不许/.test(vs.selfHint || ''), '');
+          check('★★ 识图提示词不判断身份、不贴标签（只描述画面内的人物/行为）',
+            typeof vs.selfHint === 'string' && /不要判断/.test(vs.selfHint)
+            && /身份/.test(vs.selfHint) && !/这是蓝色大肥鱼/.test(vs.selfHint), String(vs.selfHint || '').slice(0, 60));
           check('★★ 新标签「（这是蓝色大肥鱼）」也能被代码识别与剥离',
             brain.stripSelfTagFromReply('是我。（这是蓝色大肥鱼）') === '是我。'
             && brain.stripSelfTagFromReply('是我。（这是鲸鱼娘）') === '是我。'
