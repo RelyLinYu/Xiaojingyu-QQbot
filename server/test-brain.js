@@ -5446,7 +5446,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         check('★★ 梗自动采集：含糊释义不收 / 单人自嗨不收 / bot 消息不喂采集', (() => {
           const mlsrc = require('fs').readFileSync(require('path').join(__dirname, 'meme-learn.js'), 'utf8');
           const idxsrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
-          return mlsrc.includes('const HEDGE') && mlsrc.includes('疑似') && /speakers < 2/.test(mlsrc)
+          return mlsrc.includes('const HEDGE') && mlsrc.includes('疑似') && /speakers < 3/.test(mlsrc)
             && idxsrc.includes('!d.author?.bot) ml.observe');
         })());
 
