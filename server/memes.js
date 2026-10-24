@@ -180,7 +180,8 @@ function hint(text) {
       return '· 群里常有人说「' + trig + '」，意思是：' + it.meaning + '（知道就好，顺着用，别解释梗）' + cond;
     }
     if (it.fixed) {
-      return '· 有人说「' + trig + '」时，必须原样接「' + it.reply + '」——这是群里的固定暗号，不许改写、不许换成自己的段子' + cond;
+      return '· 有人说「' + trig + '」时，必须原样接「' + it.reply + '」——这是群里的固定暗号，不许改写、不许换成自己的段子'
+        + (it.meaning ? '（含义：' + it.meaning + '）' : '') + cond;
     }
     const variants = String(it.reply || '').split(/[|｜]/).map((x) => x.trim()).filter(Boolean);
     const list = variants.map((v) => '「' + v + '」').join(' / ');
