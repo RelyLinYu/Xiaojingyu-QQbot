@@ -229,8 +229,9 @@ async function scan(scope, callAI) {
     const hits = buf.filter((m) => String(m.text).includes(phrase));
     if (hits.length < 2) continue;
     const speakers = new Set(hits.map((m) => m.who).filter(Boolean)).size;
-    // 🆕 2026-10-24 再收紧：**三个人**说过才算（两个人可能只是互相复读，不代表懂意思）
-    if (speakers < 3) { console.log('  ├ [meme-learn] 跳过人数不足：' + phrase + '（' + speakers + ' 人）'); continue; }
+    // 🆕 2026-10-25 用户拍板：**两个人**用过就算（原来要 3 人，严到一天 0 条）
+    //    仍然要求 ≥2 次出现（上面 hits）且释义不能含糊（HEDGE），防单人刷屏与瞎猜。
+    if (speakers < 2) { console.log('  ├ [meme-learn] 跳过单人：' + phrase + '（' + speakers + ' 人）'); continue; }
     const res = memes.addAuto({
       phrase,
       meaning: String(r.m).slice(0, 40),
