@@ -5452,9 +5452,7 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
 
         check('★ 梗库提示走 user 文本；镜像替换走代码直回；自动采集接线就位', (() => {
           const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
-          return /require\('\.\/memes'\)\.hint\(/.test(is) && /\[linkNote, memeNote\]\.filter/.test(is)
-            && /require\('\.\/memes'\)\.echoReply\(/.test(is) && /梗库镜像/.test(is)
-            && /meme-learn/.test(is) && /memeAuto/.test(is);
+          return is.includes("./memes').hint(") && is.includes('noVisualNote]') && is.includes("./memes').echoReply(") && is.includes('梗库镜像') && is.includes('meme-learn') && is.includes('memeAuto');
         })());
         check('★★ 自动采集：短语频次 + 多人说过才算候选（不看单条消息）', (() => {
           const ml = require('./meme-learn');

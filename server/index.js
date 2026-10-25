@@ -779,7 +779,17 @@ async function handleEvent(type, d) {
       return m;
     } catch { return ''; }
   })();
-  const extraNote = [linkNote, memeNote].filter(Boolean).join('\n');
+  // 🆕 2026-10-25 用户报：群里只发了个表情（@它 + 表情，没有文字/图片），
+  //    它却回「又是这张无语脸」—— 把**上下文里别人发的图**当成对方发的了。
+  //    ⇒ 本条既没有自己的文字、也没有图片/引用时，明确告诉它：别拿上下文里的图当"这张图"。
+  const ownClean = String(brain.ownText(d) || '')
+    .replace(/<faceType=[^>]*>/g, '')
+    .replace(/<emoji[^>]*>/g, '')
+    .trim();
+  const noVisualNote = (!ownClean && !vision.findImage(d))
+    ? '（对方这条只发了表情/没有文字，也没有发图片、没有引用图片；不要用「这张图/这张脸」指代上下文里的图片，也别假装他发了图。）'
+    : '';
+  const extraNote = [linkNote, memeNote, noVisualNote].filter(Boolean).join(String.fromCharCode(10));
 
   // 7.1 🆕 2026-10-18 知识闸（A+B 里的 B）：只在"像在问事实"时多问判断模型一句"你真的知道吗"。
   //     判为 unknown ⇒ ①生成时追加"只能说不确定"的硬约束；②回复过一遍 sanitizeReply 硬闸。
