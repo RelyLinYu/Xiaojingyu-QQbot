@@ -71,7 +71,7 @@ const recentReplies = new Map();   // scope -> [{ text, ts }]
 function recordReply(scope, text) {
   if (!cfg.antiRepeat?.enabled || !text) return;
   const arr = recentReplies.get(scope) || [];
-  arr.push({ text: String(text).slice(0, 120), ts: Date.now() });
+  arr.push({ text: safeText(text, 120), ts: Date.now() });
   const keep = Math.max(1, cfg.antiRepeat?.historySize || 5);
   while (arr.length > keep) arr.shift();
   recentReplies.set(scope, arr);
@@ -132,7 +132,7 @@ function recentContext(gid) {
   const perMsg = cfg.policy.contextMsgMaxChars || 0;
   let out = perMsg > 0
     ? fresh.map((m) => (String(m.content || '').length > perMsg
-      ? { ...m, content: String(m.content).slice(0, perMsg) + '…' }
+      ? { ...m, content: safeText(m.content, perMsg) + '…' }
       : m))
     : fresh;
 
@@ -1174,6 +1174,24 @@ function looksFactual(t) {
   return /(是谁|是什么|什么是|为什么|为啥|哪年|哪一年|哪个|哪一个|什么时候|多少|区别|有什么不同|介绍|来历|出处|你知道|知道吗|懂吗|什么梗|啥梗|真的假的|对不对|解码|二进制|base64|转码|编码|utf-?8|ascii|十六进制)/.test(String(t || ''));
 }
 
+// 🔴 2026-10-27 修（真机事故：广场群 @ 它不回）：
+//    请求体里出现了**半个 emoji**（孤立代理项 U+D800~U+DFFF）⇒ 模型侧 JSON 解析直接 400
+//    （报 `messages[47].content: unexpected end of hex escape`），一个字的回复都没有。
+//    半对的原因是 `String.prototype.slice` 按 UTF-16 单元切，正好把一对代理项切开。
+//    ⇒ 这里按**码点**遍历：成对代理项（真正的 emoji）整颗保留，孤立的那半个丢掉。
+function safeText(s, max) {
+  const t = String(s == null ? '' : s);
+  let out = '';
+  let n = 0;
+  for (const ch of t) {
+    const c = ch.codePointAt(0);
+    if (c >= 0xD800 && c <= 0xDFFF) continue;   // 孤立代理项：丢了
+    if (max > 0 && n >= max) break;
+    out += ch;
+    n++;
+  }
+  return out;
+}
 async function callAIOnce(system, user, model, maxTokens, forceJson, examples, imageDataUrl, thinkText, tag) {
   // 🆕 2026-10-24 面板「语气示范」开关：关掉就在**发出请求前**把 examples 置空。
   //    ⚠️ 只在这一处拦（所有调用都走它），别在 L2 再写一遍判断。
@@ -1274,6 +1292,13 @@ async function callAIOnce(system, user, model, maxTokens, forceJson, examples, i
   const timer = setTimeout(() => ac.abort(), cfg.ai.timeoutMs);
 
   try {
+    // 🔴 发出去之前统一清一遍孤立代理项（见 safeText 的注释）—— 所有调用都走这里
+    for (const m of body.messages) {
+      if (typeof m.content === 'string') m.content = safeText(m.content);
+      else if (Array.isArray(m.content)) {
+        for (const p of m.content) if (p && p.type === "text") p.text = safeText(p.text);
+      }
+    }
     const res = await fetch(`${cfg.ai.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -1761,6 +1786,8 @@ function stripImgMark(text) {
 }
 
 module.exports = {
+  // 🆕 2026-10-27：孤立代理项清洗（自测要用；线上由 callAIOnce 内部统一调用）
+  _safeText: safeText,
   pushContext,
   recentContext,
   recordReply,

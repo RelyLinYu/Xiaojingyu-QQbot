@@ -5483,6 +5483,14 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       for (const it of imglib.list()) imglib.remove(it.id);
       imglib._reset();
 
+        console.log('=== 2026-10-27 半个 emoji 不再把请求体搞坏（真机：广场群 @ 它不回）===');
+        {
+          const half = '🥰'.slice(0, 1);        // 只剩高位代理项 = 那次事故的元凶
+          check('清掉孤立代理项', brain._safeText('a' + half + 'b') === 'ab');
+          check('成对 emoji 整颗保留', brain._safeText('a🥰b') === 'a🥰b');
+          check('截断按码点（不会切出半个）', brain._safeText('👍👍👍', 2) === '👍👍');
+        }
+
           console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
           process.exit(fail === 0 ? 0 : 1);
         });        // 关掉第 ⑦ 块里的 Promise.all(made).then(...)
