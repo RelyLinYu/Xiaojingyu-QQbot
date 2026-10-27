@@ -112,15 +112,19 @@ function remove(id) {
 // 🆕 2026-10-23 自动采集入库（用户：「让bot自己加」）
 //   · 只存「短语 + 一句话含义」，**不存接法** ⇒ 注入时只当"群里常这么说"的背景，不当台词；
 //   · 已经存在（手动或自动）就不覆盖手动条目，只给自动条目刷新次数。
-function addAuto({ phrase, meaning, count, speakers }) {
+function addAuto({ phrase, meaning, count, speakers, unknown }) {
   const p = String(phrase || '').trim();
   const m = String(meaning || '').trim();
-  if (!p || !m) return { ok: false, why: '缺短语或释义' };
+  // 🆕 2026-10-27 用户：「梗库不更新，还不如最初的采集机制」⇒ 改回**频次为准**：
+  //    模型给不出确定含义时也允许入库（unknown=true），含义留空，提示里写"具体含义不详"。
+  //    代码保证的是"这个词真的被多个人反复说过"，含义只是加分项。
+  if (!p) return { ok: false, why: '缺短语' };
+  if (!m && !unknown) return { ok: false, why: '缺短语或释义' };
   const items = load();
   const dup = items.find((x) => (x.triggers || []).some((t) => String(t) === p));
   if (dup) {
     if (dup.origin === 'auto') {
-      dup.meaning = m;
+      if (m) dup.meaning = m;                     // 有释义才覆盖，没释义别把原来的擦掉
       dup.count = Math.max(Number(dup.count) || 0, Number(count) || 0);
       dup.ts = Date.now();
       save(items);
@@ -170,13 +174,16 @@ function hint(text) {
   for (const it of ordered) {
     const trig = (it.triggers || []).find((x) => x && low.includes(String(x).toLowerCase()));
     if (!trig) continue;
-    hits.push({ it, trig, auto: it.origin === 'auto' && !!it.meaning && !String(it.reply || '').trim() });
+    hits.push({ it, trig, auto: it.origin === 'auto' && !String(it.reply || '').trim() });
     if (hits.length >= 3) break;      // 一轮最多 3 条，别把提示塞成小作文
   }
   if (!hits.length) return '';
   const lines = hits.map(({ it, trig, auto }) => {
     const cond = it.when ? `（只在：${it.when}）` : '';
     if (auto) {
+      if (!it.meaning) {
+        return '· 群里常有人说「' + trig + '」（具体含义不详，别解释、别乱猜）——顺着用就行' + cond;
+      }
       return '· 群里常有人说「' + trig + '」，意思是：' + it.meaning + '（知道就好，顺着用，别解释梗）' + cond;
     }
     if (it.fixed) {

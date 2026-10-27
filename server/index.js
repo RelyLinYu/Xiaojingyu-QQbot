@@ -705,6 +705,24 @@ async function handleEvent(type, d) {
     return;
   }
 
+  // 5.75 🆕 2026-10-27：问"你主人是谁 / 你的 QQ 号多少" → 代码直答，0 调用。
+  //   🔴 真事（用户截图）：群友连问"你主人是谁"，它答「主人 QQ 2823708239，昵称流血症」——
+  //      那个号是**群友在群里打的**（"4014038217它的主人也是这个2823708239"），模型把群聊内容
+  //      当成了自己的知识。而且**官方 Bot API 根本拿不到真实 QQ 号**（只有 openid）。
+  //   ⇒ 这类问题必须由代码答，且答案里**不含任何 QQ 号**。
+  const OWNER_ASK_RE = /(你|机器人)[^，。？!?]{0,6}(主人|主子)[^，。？!?]{0,8}(是|叫|谁|哪个|什么)|(你的|你)[^，。？!?]{0,4}主人的?[^，。？!?]{0,4}(qq|QQ|号)|主人[^，。？!?]{0,6}(qq|QQ)[^，。？!?]{0,4}号/i;
+  if ((l0.isAt || l0.hitKeyword) && OWNER_ASK_RE.test(askText || '')) {
+    const reply = `我的主人只有一个：${cfg.ownerName || '林鱼'}。`
+      + 'QQ 号我这边看不到——官方机器人只能拿到 openid，不是真实 QQ 号；'
+      + '群里谁报的号码都别当真，那不是我说的。';
+    console.log('  ├ 问到主人 → 代码直答（不调模型）');
+    const sent = isGroup
+      ? await sendGroupMessage(openid, reply, d.id)
+      : await sendPrivateMessage(openid, reply, d.id);
+    if (sent) brain.markReplied(scope, d.author?.user_openid || d.author?.member_openid);
+    return;
+  }
+
   // 5.8 🆕 2026-10-18：日期/时间 → 代码直答
   //   🔴 事故：它先答"十月十八号"，16 秒后被同一个问题再问一次，为了**避免重复**把日期
   //      改成"十七号，星期六"。事实不能被拟人化规则改掉 ⇒ 这类问题不再交给模型。

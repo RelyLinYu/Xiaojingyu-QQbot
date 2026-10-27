@@ -5460,9 +5460,30 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         check('★★ 梗自动采集：含糊释义不收 / 单人自嗨不收 / bot 消息不喂采集', (() => {
           const mlsrc = require('fs').readFileSync(require('path').join(__dirname, 'meme-learn.js'), 'utf8');
           const idxsrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
-          return mlsrc.includes('const HEDGE') && mlsrc.includes('疑似') && /speakers < 2/.test(mlsrc)
+          // 2026-10-27：人数门槛移到 pickCandidates（MIN_SPEAKERS），scan 只按频次取候选
+          return mlsrc.includes('const HEDGE') && mlsrc.includes('疑似')
+            && mlsrc.includes('v.speakers.size < MIN_SPEAKERS')
             && idxsrc.includes('!d.author?.bot) ml.observe');
         })());
+
+    // 2026-10-27 用户：「梗库不更新，还不如最初的采集机制」⇒ 频次为准，模型只补含义
+    {
+      const mlsrc = require('fs').readFileSync(require('path').join(__dirname, 'meme-learn.js'), 'utf8');
+      const isrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+      check('★★ 梗库改回频次采集：候选来自 pickCandidates，模型只补含义',
+        mlsrc.includes('pickCandidates(scope, memes.list()') && mlsrc.includes('unknown: !mean')
+        && mlsrc.includes('按频次入库'));
+      check('★★ 无释义也允许入库（unknown 标记）+ 提示写“含义不详”', (() => {
+        const mm = require('./memes');
+        const r = mm.addAuto({ phrase: '测试短语A' + Date.now(), meaning: '', count: 3, speakers: 2, unknown: true });
+        const it = r.item || {};
+        const h = it.triggers ? mm.hint(it.triggers[0]) : '';
+        if (r.item) mm.remove(r.item.id);
+        return r.ok === true && h.includes('含义不详');
+      })());
+      check('★★ 主人/QQ号问题代码直答（不调模型、答里不含 QQ 号）',
+        isrc.includes('OWNER_ASK_RE') && isrc.includes('官方机器人只能拿到 openid'));
+    }
 
         check('★ 梗库提示走 user 文本；镜像替换走代码直回；自动采集接线就位', (() => {
           const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');

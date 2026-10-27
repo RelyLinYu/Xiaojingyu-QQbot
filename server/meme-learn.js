@@ -177,69 +177,52 @@ async function scan(scope, callAI) {
   lastScan.set(scope, now);
   if (typeof callAI !== 'function') return [];
 
-  // 🔴 2026-10-23 改法（用户：一个没加）：
-  //    频次挖出来的 2~6 字片段大多是普通词（"大肥鱼""有感觉吗"），模型全判"不是梗"。
-  //    ⇒ 改成把**最近 25 条聊天**直接交给模型，让它像人一样挑梗；代码只负责
-  //      "这句话确实出现过 ≥2 次" 的去伪，再入库。
-  const buf = (win.get(scope) || []).slice(-25);
-  if (buf.length < 5) { scannedUpTo.set(scope, now); saveState(); return []; }
+  // 🔴 2026-10-27 用户：「梗库不更新，还不如最初的采集机制」。
+  //    上一版是"把最近 25 条聊天丢给模型挑梗"，模型返空的比例极高（近 24h 154 次扫描、0 条入库）。
+  //    ⇒ 回到**频次采集为准**：代码先按"出现次数 + 说话人数"挑候选（pickCandidates），
+  //      只让模型补**含义**；模型给不出确定含义也照样入库（unknown:true，含义留空，
+  //      提示里写"具体含义不详"）。代码保证的是"这个词真的被多个人反复说过"，含义只是加分项。
+  const cands = pickCandidates(scope, memes.list() || []).slice(0, 3);
+  if (!cands.length) { scannedUpTo.set(scope, now); saveState(); return []; }
+  console.log('  ├ [meme-learn] 候选 ' + cands.length + ' 条：'
+    + cands.map((c) => c.phrase + '(' + c.count + '次/' + c.speakers + '人)').join('、'));
 
-  const known = (memes.list() || []).map((x) => (x.triggers || [])[0]).filter(Boolean).slice(0, 30);
-  const chat = buf.map((m) => (m.who ? m.who.slice(0, 4) + ': ' : '') + String(m.text).slice(0, 100)).join('\n');
-  const user = '【已有梗】' + (known.join('、') || '（无）')
-    + '\n【最近聊天】\n' + chat
-    + '\n\n请输出 JSON 数组，最多 3 条。';
-
-  console.log(`  ├ [meme-learn] 开始找梗（窗口 ${buf.length} 条）`);
+  const ask = '请给下面这些群聊短语各写一句**确定的**含义（不超过 18 字）。'
+    + '如果你不能确定它的意思，就把含义写成空字符串 —— 不要猜、不要写"疑似""可能""大概"。'
+    + '只输出 JSON 数组，元素 {"p":"短语","m":"含义或空串"}，不要多余文字。';
+  const askUser = '【短语】' + cands.map((c) => c.phrase).join('、');
 
   const parse = (out) => {
     const txt = String((out && out.text) || '');
     const m = txt.match(/\[[\s\S]*\]/);
-    if (!m) return [];
-    try { return JSON.parse(m[0]); } catch { return []; }
+    if (!m) return null;
+    try { return JSON.parse(m[0]); } catch { return null; }
   };
 
-  let arr = null;
+  let meanings = null;
   try {
-    // ⚠️ 2026-10-23：不要再用 forceJson=true 兜底 —— brain 那边强制 JSON 期待的是**对象**，
-    //    而我们返回的是数组 "[]"，它会抛「没返回 JSON」，把"模型说没有梗"误报成失败。
-    //    ⇒ 只调一次；解析失败（不是空数组）才算失败，下轮再试。
-    const out = await callAI(SYS, user, 'deepseek-flash', 500, false);
-    arr = parse(out);
-    if (arr === null) {
-      console.warn('  ├ [meme-learn] 模型没给 JSON（下次再试）：' + String((out && out.text) || '').slice(0, 60));
-      return [];
-    }
-    scannedUpTo.set(scope, now);
+    const out = await callAI(ask, askUser, 'deepseek-flash', 400, false);
+    meanings = parse(out);
   } catch (e) {
-    console.warn(`  ├ [meme-learn] 模型返回异常（下次再试）：${e.message}`);
-    return [];
+    console.warn('  ├ [meme-learn] 释义调用异常（按无释义入库）：' + e.message);
   }
+  if (!Array.isArray(meanings)) {
+    console.warn('  ├ [meme-learn] 没拿到释义 JSON，本次按频次入库（含义留空）');
+    meanings = [];
+  }
+  const mm = new Map();
+  for (const r of meanings) if (r && r.p) mm.set(String(r.p).trim(), String(r.m || '').trim());
 
   const added = [];
-  const HEDGE = /疑似|可能|也许|大概|不确定|猜测|猜的|或者是|也许|说不准/;
-  for (const r of arr) {
-    if (!r || !r.p || !r.m) continue;
-    const phrase = String(r.p).trim().slice(0, 12);
-    if (phrase.length < 2) continue;
-    // 🆕 2026-10-24 用户报：kskbl 被模型"疑似"猜成"快说快不了"，还被收录
-    //    ⇒ 含糊措辞直接不收（宁可漏），并要求至少 2 个不同的人用过。
-    if (HEDGE.test(String(r.m))) { console.log('  ├ [meme-learn] 跳过含糊释义：' + phrase); continue; }
-    // 去伪：这句话必须在窗口里**真实出现 ≥2 次**（一条消息里重复也算一次）
-    const hits = buf.filter((m) => String(m.text).includes(phrase));
-    if (hits.length < 2) continue;
-    const speakers = new Set(hits.map((m) => m.who).filter(Boolean)).size;
-    // 🆕 2026-10-25 用户拍板：**两个人**用过就算（原来要 3 人，严到一天 0 条）
-    //    仍然要求 ≥2 次出现（上面 hits）且释义不能含糊（HEDGE），防单人刷屏与瞎猜。
-    if (speakers < 2) { console.log('  ├ [meme-learn] 跳过单人：' + phrase + '（' + speakers + ' 人）'); continue; }
-    const res = memes.addAuto({
-      phrase,
-      meaning: String(r.m).slice(0, 40),
-      count: hits.length,
-      speakers: Math.max(1, speakers),
-    });
+  const HEDGE = /疑似|可能|也许|大概|不确定|猜测|猜的|或者是|说不准|不知道|不详|不了解/;
+  for (const c of cands) {
+    let mean = mm.get(c.phrase) || '';
+    if (mean && HEDGE.test(mean)) { console.log('  ├ [meme-learn] 释义含糊，按未知处理：' + c.phrase); mean = ''; }
+    const res = memes.addAuto({ phrase: c.phrase, meaning: mean, count: c.count, speakers: c.speakers, unknown: !mean });
     if (res.ok) added.push(res.item);
   }
+  console.log('  ├ [meme-learn] 频次入库 ' + added.length + ' 条（候选 ' + cands.length + '，带释义 ' + added.filter((x) => x.meaning).length + '）');
+  scannedUpTo.set(scope, now);
   saveState();
   return added;
 }
