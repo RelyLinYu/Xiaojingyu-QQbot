@@ -4079,6 +4079,20 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     check('★ 面板写明只接受 DeepSeek 的 key', /只接受[\s\S]{0,20}DeepSeek/.test(lw));
 
     // 🆕 2026-10-18 用户截图：「是我，那张摇得还挺像。（这是你自己）」—— 自我标签漏进群聊回复
+    // 2026-10-27 装傻闸（用户：「阿巴阿巴那个逻辑有问题」）
+    {
+      check('★★ 知识闸 unknown 时不许拿装傻话术当挡箭牌（换成实话）',
+        brain.sanitizeReply('基米精神？没听过这词，我只是一条鱼。(歪头)', { unknown: true }) !== '基米精神？没听过这词，我只是一条鱼。(歪头)'
+        && !/阿巴阿巴|听不懂喵喵喵|我只是一条鱼/.test(brain.sanitizeReply('我只是一条鱼', { unknown: true })));
+      check('★ 非 unknown 的正常回复不会被装傻闸误伤',
+        brain.sanitizeReply('今天天气挺好的', {}) === '今天天气挺好的');
+      check('★★ 装傻闸接线：禁用提示 + 命中重生成一次都在', (() => {
+        const bsrc = require('fs').readFileSync(require('path').join(__dirname, 'brain.js'), 'utf8');
+        return bsrc.includes('const SHAZHU_RE') && bsrc.includes('shazhuNote')
+          && bsrc.includes('usedShazhu && SHAZHU_RE.test') && bsrc.includes('装傻话术，重生成一次');
+      })());
+    }
+
     check('★★ 群聊回复里的「（这是你自己）」会被摘掉（只该在识图描述里）',
       brain.stripSelfTagFromReply('是我，那张摇得还挺像。（这是你自己）') === '是我，那张摇得还挺像。'
       && brain.stripSelfTagFromReply('（这是你自己）') === ''

@@ -83,6 +83,13 @@ function recentReplyTexts(scope) {
   return arr.map((x) => x.text);
 }
 
+// 2026-10-27 装傻闸（用户："阿巴阿巴那个逻辑有问题"）
+//   现象（广场群 24h）：一人用"引用+叫爸爸"连着逗它，它连回四条阿巴阿巴、还自己数"第二回/第三回"
+//   —— 人设里的装傻话术被上下文自我强化；另有一例：知识闸判 unknown，它拿"我只是一条鱼"当挡箭牌。
+//   两道处理：① 最近自己用过 ⇒ 这一轮提示里禁用，命中就重生成一次；
+//             ② unknown 时回复仍是装傻 ⇒ 直接用 unknownTexts 换成"我不知道"的实话（0 调用、确定性）。
+const SHAZHU_RE = /阿巴阿巴|听不懂喵喵喵|我只是一条鱼/;
+
 // 定期清理，防内存涨
 setInterval(() => {
   const now = Date.now();
@@ -1010,6 +1017,12 @@ async function generateReply(scope, msg, linkNote, opts = {}) {
   //    · 提示语里也把边界写死：事实必须与上面一致。
   const isFactualQ = looksFactual(extractText(msg));
   const last = isFactualQ ? [] : recentReplyTexts(scope);
+  const NL2 = String.fromCharCode(10) + String.fromCharCode(10);
+  const usedShazhu = recentReplyTexts(scope).some((t) => SHAZHU_RE.test(t));
+  const shazhuNote = usedShazhu
+    ? NL2 + '⚠️ 你最近已经用过「阿巴阿巴 / 听不懂喵喵喵 / 我只是一条鱼」这类装傻话术。这一轮**不许再用**：'
+      + '正经内容就直接给答案；真不知道就说"我不知道"，别拿装傻当挡箭牌。'
+    : '';
   const avoidHint = last.length
     ? `\n\n⚠️ 你最近已经说过这些。**只换说法、梗和语气**，换个方式表达；`
       + `但事实（日期、数字、名称、结论、有没有做过某事）必须和上面完全一致，`
@@ -1041,11 +1054,18 @@ async function generateReply(scope, msg, linkNote, opts = {}) {
   const imgHint = buildImgHint(scope, msg, extractText(msg), ctx);
   const user = `【当前时间】${timeStr}\n`
     + `（有人问时间/日期/星期，直接照这个答。别编造，也别说"我又不是时钟"——你知道现在几点。）\n\n`
-    + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + linkPart + imgHint + tail;
-  const r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples,
+    + `群里最近的对话：\n${ctx}\n\n` + who + avoidHint + shazhuNote + linkPart + imgHint + tail;
+  let r = await callAI(sys, user, cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples,
     null, extractText(msg), 'L2生成');
   // 预算用光时，把"没钱了"的理由原样带回去，由 index.js 发到群里
   if (r.budgetStop) return r;
+  // 2026-10-27 装傻闸②：刚用过还说阿巴阿巴 ⇒ 带着禁令重生成一次（只在命中时多花一次调用）
+  if (usedShazhu && SHAZHU_RE.test(r.text || '')) {
+    console.log('  ├ [装傻闸] 本轮又用装傻话术，重生成一次');
+    const r2 = await callAI(sys, user + NL2 + '🔴 重申：这一轮**不许**出现「阿巴阿巴」「听不懂喵喵喵」「我只是一条鱼」。',
+      cfg.ai.replyModel, cfg.ai.replyMaxTokens, false, cfg.persona.examples, null, extractText(msg), 'L2生成');
+    if (!r2.budgetStop && r2.text) r = r2;
+  }
 
   // 记下这次说的话，供下次"别重复"用
   // 🆕 2026-10-18：**带事实的回复不进池子** —— 否则下次它被要求"换个说法"，
@@ -1499,6 +1519,12 @@ function sanitizeReply(text, { unknown = false, allowedText = '' } = {}) {
   if (LEAK_RE.test(out)) {
     console.warn('[reply-audit] 回复命中路径/凭据特征，整条替换');
     return '这条我不方便发。';
+  }
+  // 2026-10-27 知识闸判 unknown 时，不许拿装傻话术当挡箭牌 ⇒ 换成真话
+  if (unknown && SHAZHU_RE.test(out)) {
+    const pool2 = (kg.unknownTexts && kg.unknownTexts.length) ? kg.unknownTexts : ['这个我真不知道，别听我瞎编。'];
+    console.warn('[装傻闸] unknown 时用装傻话术，已替换为实话');
+    return pool2[Math.floor(Math.random() * pool2.length)];
   }
   if (unknown && HARD_FACT_RE.test(out)) {
     const pool = (kg.unknownTexts && kg.unknownTexts.length) ? kg.unknownTexts : ['这个我真不知道，别听我瞎编。'];
