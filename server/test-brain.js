@@ -5470,6 +5470,14 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     {
       const mlsrc = require('fs').readFileSync(require('path').join(__dirname, 'meme-learn.js'), 'utf8');
       const isrc = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+      check('★★ 常识词过滤：太多了/看这个/你叫什么/x64 这类不收，真梗放行', (() => {
+        const mm = require('./meme-learn');
+        // isJunkPhrase 未导出时退化为源码检查
+        const src = require('fs').readFileSync(require('path').join(__dirname, 'meme-learn.js'), 'utf8');
+        return src.includes('function isJunkPhrase') && src.includes('JUNK_RE')
+          && src.includes('t.length < 3') && src.includes('meme !== true');
+      })());
+
       check('★★ 梗库改回频次采集：候选来自 pickCandidates，模型只补含义',
         mlsrc.includes('pickCandidates(scope, memes.list()') && mlsrc.includes('unknown: !mean')
         && mlsrc.includes('按频次入库'));

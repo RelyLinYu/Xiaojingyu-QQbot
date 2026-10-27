@@ -131,6 +131,23 @@ function shouldScan(scope, now = Date.now()) {
 }
 
 // 纯函数：从统计里挑候选（方便自测）
+// 🆕 2026-10-27 用户截图：「太多了」「看这个」「你叫什么」「x64」这种常识也收进梗库了。
+//    根因：上一版把"是不是梗"的判断交给了频率——只要 2 次 + 2 人就收，常识词必然大批涌入。
+//    ⇒ 加一层**纯代码的常用词/形状过滤**（0 调用），再把模型当"一票否决"用（见 scan）。
+const JUNK_RE = /你|我|他|她|它|这|那|哪|谁|什么|怎么|为什么|是不是|可以|觉得|自己|就是|还是|一直|太多|没有|知道|现在|已经|所以|但是|因为|如果|然后|东西|时候|表情|视频|图片|消息|机器人|系统|框架|大佬|耳朵|块钱|在线/;
+const JUNK_TAIL_RE = /[的了吗吧呢啊呀嘛]$/;
+const TECH_RE = /^(x64|x86|win32|win64|napcat|snowlu|nonebot|api|http|https|json|qq|vd+)$/i;
+
+function isJunkPhrase(p) {
+  const t = String(p || '').trim();
+  if (t.length < 3) return true;                 // 2 字几乎全是常用词，直接不要
+  if (JUNK_RE.test(t)) return true;              // 含代词/疑问/功能词
+  if (t.length <= 4 && JUNK_TAIL_RE.test(t)) return true;   // 短句以"的了吗吧"结尾
+  if (TECH_RE.test(t)) return true;              // 纯技术词/型号
+  if (/^[a-z0-9_-]+$/i.test(t)) return true;    // 纯字母数字
+  return false;
+}
+
 function pickCandidates(scope, known) {
   const m = stats.get(scope);
   if (!m) return [];
@@ -182,14 +199,15 @@ async function scan(scope, callAI) {
   //    ⇒ 回到**频次采集为准**：代码先按"出现次数 + 说话人数"挑候选（pickCandidates），
   //      只让模型补**含义**；模型给不出确定含义也照样入库（unknown:true，含义留空，
   //      提示里写"具体含义不详"）。代码保证的是"这个词真的被多个人反复说过"，含义只是加分项。
-  const cands = pickCandidates(scope, memes.list() || []).slice(0, 3);
+  const cands = pickCandidates(scope, memes.list() || []).filter((c) => !isJunkPhrase(c.phrase)).slice(0, 3);
   if (!cands.length) { scannedUpTo.set(scope, now); saveState(); return []; }
   console.log('  ├ [meme-learn] 候选 ' + cands.length + ' 条：'
     + cands.map((c) => c.phrase + '(' + c.count + '次/' + c.speakers + '人)').join('、'));
 
-  const ask = '请给下面这些群聊短语各写一句**确定的**含义（不超过 18 字）。'
-    + '如果你不能确定它的意思，就把含义写成空字符串 —— 不要猜、不要写"疑似""可能""大概"。'
-    + '只输出 JSON 数组，元素 {"p":"短语","m":"含义或空串"}，不要多余文字。';
+  const ask = '下面这些短语是从群聊里频次统计出来的。请逐个判断：它是不是**这个群特有的梗/黑话/缩写/谐音**？'
+    + '普通的日常用语（"看这个""你叫什么""大佬""机器人"）一律算 NOT。'
+    + '对每个短语输出 {"p":"短语","meme":true/false,"m":"一句话含义（不超过 18 字；不确定就空串）"}。'
+    + '只输出 JSON 数组，不要多余文字。';
   const askUser = '【短语】' + cands.map((c) => c.phrase).join('、');
 
   const parse = (out) => {
@@ -211,12 +229,17 @@ async function scan(scope, callAI) {
     meanings = [];
   }
   const mm = new Map();
-  for (const r of meanings) if (r && r.p) mm.set(String(r.p).trim(), String(r.m || '').trim());
+  for (const r of meanings) {
+    if (!r || !r.p) continue;
+    mm.set(String(r.p).trim(), { meme: r.meme === true, m: String(r.m || '').trim() });
+  }
 
   const added = [];
   const HEDGE = /疑似|可能|也许|大概|不确定|猜测|猜的|或者是|说不准|不知道|不详|不了解/;
   for (const c of cands) {
-    let mean = mm.get(c.phrase) || '';
+    const info = mm.get(c.phrase);
+    if (!info || info.meme !== true) { console.log('  ├ [meme-learn] 模型判定不是梗，跳过：' + c.phrase); continue; }
+    let mean = info.m || '';
     if (mean && HEDGE.test(mean)) { console.log('  ├ [meme-learn] 释义含糊，按未知处理：' + c.phrase); mean = ''; }
     const res = memes.addAuto({ phrase: c.phrase, meaning: mean, count: c.count, speakers: c.speakers, unknown: !mean });
     if (res.ok) added.push(res.item);
