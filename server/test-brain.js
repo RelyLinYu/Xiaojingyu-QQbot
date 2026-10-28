@@ -3970,12 +3970,12 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       isrc2.includes("require('./linkparse')") && isrc2.includes('contextNote(scope)')
       && isrc2.includes('noteVideoSkip(scope') && isrc2.includes("linkparse.noteCard(scope, lastCardInfo"));
     check('  └ 视频跳过时也带 scope（否则记到了空 key 上，等于没记）',
-      isrc2.includes('sendVideo(d, vtarget.info, openid, scope, { cardSent: sentAny })'));
+      isrc2.includes('sendVideo(d, vtarget.info, openid, scope, { cardSent: sentCard })'));
     // 🆕 2026-10-21：B站卡片输入不再发数据卡片 ⇒ 长视频提示不能说"点卡片里的链接"
     check('★★ 没发卡片时长视频提示改用视频自带链接', (() => {
       return isrc2.includes('opts && opts.cardSent === false')
         && isrc2.includes('直接看：')
-        && isrc2.includes('cardSent: sentAny');
+        && isrc2.includes('cardSent: sentCard');
     })());
 
     // ⑥ 边界：缺字段不炸
@@ -4169,8 +4169,8 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     })());
     check('★★ B站小程序卡片不再发数据卡片，直接进视频流程', (() => {
       const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
-      return /p\.fromCard && p\.platform === 'bilibili' && cardVideoOn/.test(src)
-        && src.includes('B站小程序卡片 → 不发数据卡片，直接进视频流程');
+      // 2026-10-28：放宽为「任何小程序卡片、视频开关开着」都直接进视频；日志文案也改了
+      return src.includes('p.fromCard && cardVideoOn') && src.includes('小程序卡片 → 不发数据卡片，直接进视频流程');
     })());
     // 🆕 2026-10-21 真机：卡片输入仍然发了数据卡片 —— 根因是 parse() 把 fromCard 丢了
     check('★★ parse() 必须把 fromCard 带到上层（否则卡片输入永远跳过不了）', (() => {
@@ -5477,6 +5477,14 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         return src.includes('function isJunkPhrase') && src.includes('JUNK_RE')
           && src.includes('t.length < 3') && src.includes('meme !== true');
       })());
+
+    // 2026-10-28 用户三条要求：B站卡片直接视频；B站/抖音/快手文本链接先回文字摘要再视频
+    check('★★ 文本链接先回【平台】标题+作者+时长摘要，再发视频；小程序卡片直接视频', (() => {
+      const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+      return is.includes('function linkSummaryText') && is.includes('SUMMARY_PLATFORMS.has(p.platform)')
+        && is.includes('cardSent: sentCard') && is.includes("bilibili: 'B站'")
+        && is.includes("douyin: '抖音'") && is.includes("kuaishou: '快手'");
+    })());
 
       check('★★ 梗库改回频次采集：候选来自 pickCandidates，模型只补含义',
         mlsrc.includes('pickCandidates(scope, memes.list()') && mlsrc.includes('unknown: !mean')

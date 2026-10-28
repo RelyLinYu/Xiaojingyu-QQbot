@@ -1150,10 +1150,27 @@ async function handleLink(d, links, scope, isGroup, openid) {
   //     ⚠️ 前提是视频开关开着；关了视频就还得发卡片（否则这条消息什么都不回）。
   const cardVideoOn = cfg.policy.linkParse?.video?.enabled;
   let sentAny = false;
+  let sentCard = false;
   let lastCardInfo = null;
   for (const p of parsed) {
-    if (p.fromCard && p.platform === 'bilibili' && cardVideoOn) {
-      console.log('  ├ B站小程序卡片 → 不发数据卡片，直接进视频流程');
+    if (p.fromCard && cardVideoOn) {
+      console.log('  ├ 小程序卡片 → 不发数据卡片，直接进视频流程');
+      continue;
+    }
+    // 2026-10-28 用户：文本链接先回一行【平台】标题+作者+时长，再发视频（不再发数据卡片）
+    if (cardVideoOn && SUMMARY_PLATFORMS.has(p.platform)) {
+      const sum = linkSummaryText(p.info);
+      if (sum) {
+        const sentS = await sendGroupMessage(openid, sum, d.id);
+        if (sentS) {
+          sentAny = true;
+          lastCardInfo = p.info || null;
+          linkparse.markCarded(scope, p._keys || []);
+          linkparse.noteCard(scope, p.info, 'summary');
+        }
+        console.log('  ├ 【' + p.platform + '】文字摘要' + (sentS ? '已发送' : '发送失败') + '：'
+          + sum.split(String.fromCharCode(10)).join(' / '));
+      }
       continue;
     }
     console.log(`  ├ 卡片已生成（${p.platform}，${p.card.length} 字）`);
@@ -1162,6 +1179,7 @@ async function handleLink(d, links, scope, isGroup, openid) {
       : await sendPrivateMarkdown(openid, p.card, d.id);
     if (sent) {
       sentAny = true;
+      sentCard = true;
       lastCardInfo = p.info || null;
       // ✅ 只有真发出去了才记 —— 发失败的话下次还该能发
       linkparse.markCarded(scope, p._keys || []);
@@ -1213,8 +1231,9 @@ async function handleLink(d, links, scope, isGroup, openid) {
         linkparse.noteVideoSkip(scope, '这是抖音图文作品，本来就没有视频');
         console.log('  ├ 🎬 抖音图文：本来就没有视频 → 已记一笔');
       } else if (!hasDirect) {
-        linkparse.noteVideoSkip(scope, '抖音这次没拿到直链（可能被限流），卡片里只有元信息');
-        console.log('  ├ 🎬 抖音没拿到直链（可能限流）→ 已记一笔，被问到时如实回答');
+        linkparse.noteVideoSkip(scope, '抖音这次没拿到直链（可能被限流），只给了元信息');
+        console.log('  ├ 🎬 抖音没拿到直链（可能限流）→ 已记一笔，群里也回一句');
+        await sendGroupMessage(openid, '🎬 这条抖音没解析出视频（可能被限流了），先看上面那条信息，过会儿再试。', d.id);
       }
     }
     return;
@@ -1222,7 +1241,7 @@ async function handleLink(d, links, scope, isGroup, openid) {
   if (parsed.length > 1) {
     console.log(`  ├ ⚠️ 这条消息有 ${parsed.length} 个链接，视频只发第一个（${vtarget.platform}）—— 被动回复配额只有 5 条`);
   }
-  await sendVideo(d, vtarget.info, openid, scope, { cardSent: sentAny });
+  await sendVideo(d, vtarget.info, openid, scope, { cardSent: sentCard });
 }
 
 // 🆕 P2：把 B站视频下载下来 → 分片上传到 QQ → 用 msg_type=7 发出去
@@ -1253,6 +1272,24 @@ const { renderPendingText } = require('./videotext');
 //
 // ⚠️ 调用时机很关键：必须**过了大小检查、确定要发**之后才调。
 //    否则会出现"提示了却什么都没来" —— 那比不提示更让人困惑。
+// 2026-10-28 用户三条要求：① B站小程序卡片→直接发视频（不发数据卡片）；
+//   ② B站长短链接→先回一行纯文本【B站】标题 / UP主 / 时长，再发视频；③ 抖音、快手同 ②。
+//   超限或取不到 → 回一句报错（noticeVideoSkip / noticeLinkFail / 下面的抖音分支）。
+const SUMMARY_PLATFORMS = new Set(['bilibili', 'douyin', 'kuaishou']);
+const SUMMARY_TAGS = { bilibili: 'B站', douyin: '抖音', kuaishou: '快手' };
+function linkSummaryText(info) {
+  if (!info) return '';
+  const NLC = String.fromCharCode(10);
+  const tag = SUMMARY_TAGS[info.platform] || info.platform;
+  const who = info.up || info.author || '';
+  const whoLabel = info.platform === 'bilibili' ? 'UP主' : '作者';
+  const dur = info.duration || (info.durationSec ? Math.round(info.durationSec) + '秒' : '');
+  const lines = ['【' + tag + '】' + String(info.title || '').trim()];
+  if (who) lines.push(whoLabel + '：' + who);
+  if (dur) lines.push('时长：' + dur);
+  return lines.join(NLC);
+}
+
 async function sendVideoPending(d, groupopenid, info, src, v) {
   // 快手不给 size / quality，所以这两项都做成"有才显示"
   const sizeMB = src.size ? (src.size / 1048576).toFixed(1) : '';
