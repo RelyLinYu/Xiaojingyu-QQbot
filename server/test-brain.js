@@ -5479,6 +5479,13 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
       })());
 
     // 2026-10-28 用户三条要求：B站卡片直接视频；B站/抖音/快手文本链接先回文字摘要再视频
+    // 2026-10-28 用户：「正在处理、需要时间的提示也取消」
+    check('★★ 取消了“正在处理/需要时间”两类提示（抖音已读回执 + 视频占位提示）', (() => {
+      const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+      return is.includes("dc?.ackEnabled === false")
+        && is.includes('// await sendVideoPending(d, groupOpenid, info, src, v);');
+    })());
+
     check('★★ 文本链接先回【平台】标题+作者+时长摘要，再发视频；小程序卡片直接视频', (() => {
       const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
       return is.includes('function linkSummaryText') && is.includes('SUMMARY_PLATFORMS.has(p.platform)')

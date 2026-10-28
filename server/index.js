@@ -1079,7 +1079,10 @@ async function handleLink(d, links, scope, isGroup, openid) {
   {
     const dc = cfg.policy.linkParse?.douyinDirect;
     if (isGroup && links.length) {
-      const needAck = dc?.ackAllPlatforms ? true : links.some((l) => l.platform === 'douyin');
+      // 2026-10-28 用户：「那个正在处理、需要时间的提示也取消」⇒ 配置里把 ackEnabled 设 false 就不发
+      const needAck = dc?.ackEnabled === false
+        ? false
+        : (dc?.ackAllPlatforms ? true : links.some((l) => l.platform === 'douyin'));
       if (needAck) {
         const pool = (Array.isArray(dc?.ackTexts) && dc.ackTexts.length)
           ? dc.ackTexts : [dc?.ackTemplate || '🔗 链接收到了，正在解析，稍等一下…'];
@@ -1393,9 +1396,9 @@ async function sendVideo(d, info, groupOpenid, scope, opts) {
       return;
     }
 
-    // ①.5 🆕 到这里**基本确定能发**了 → 先给一句提示，免得后面 30 秒像卡死
-    //      （注意：这一步会占掉被动回复配额里的 1 次，加上卡片和视频共 3 次 / 上限 5 次）
-    await sendVideoPending(d, groupOpenid, info, src, v);
+    // ①.5 🔴 2026-10-28 用户：「那个正在处理、需要时间的提示也取消」⇒ 不再发占位提示
+    //      （sendVideoPending 保留着，想恢复把下面这行取消注释即可）
+    // await sendVideoPending(d, groupOpenid, info, src, v);
 
     // ② 下载（⚠️ 必须带 Referer，否则 B站 403）
     const buf = await qqmedia.downloadToBuffer(src.url, {
