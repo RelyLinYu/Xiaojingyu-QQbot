@@ -124,6 +124,16 @@ const PAGE = (opts) => `<!doctype html>
     --divider:       rgba(0,0,0,.06);
     --skeleton:      rgba(0,0,0,.07);
     --scroll-thumb:  rgba(0,0,0,.22);
+    /* —— 左侧导航轨道（🆕 2026-10-29：原来是**写死的深色**，浅色主题下就是一块黑条 ——
+          用户截图问「侧边栏为什么不做同样的优化」⇒ 收成令牌，两套主题各一份，跟顶栏同一套玻璃语言）—— */
+    --rail-bg:       rgba(255,255,255,.82);
+    --rail-icon:     #6E6E73;
+    --rail-icon-hi:  #1D1D1F;
+    --rail-hover:    rgba(0,0,0,.055);
+    --rail-on-bg:    #1D1D1F;
+    --rail-on-fg:    #FFFFFF;
+    --rail-ctl-bg:   rgba(0,0,0,.055);
+    --rail-ctl-fg:   #6E6E73;
     /* —— 形状与节奏（两套主题共用）—— */
     --r-in:  10px;      /* 输入框 / 按钮 */
     --r-card:18px;      /* 卡片 */
@@ -133,48 +143,62 @@ const PAGE = (opts) => `<!doctype html>
     --ease: cubic-bezier(.2,.7,.2,1);
   }
   [data-theme="dark"] {
-    --bg:            #000000;
-    --bg-subtle:     #1C1C1E;
-    --bg-elevated:   #2C2C2E;
-    --bg-hover:      rgba(255,255,255,.06);
-    --bg-sunken:     #1C1C1E;
-    --bg-overlay:    rgba(28,28,30,.78);
+    /* 🆕 2026-10-29 深色改为「仿 Codex · 悬浮玻璃」调性（用户从三版预览里选的 B 方案）：
+       · 底 = 近黑 #070709（仍满足"深灰不深蓝"：b-r 只有 2）；
+       · 面 = **半透明白**（rgba）⇒ 面板是磨砂玻璃而不是实色块；
+       · 描边压到 8~20% 白，靠"亮度差 + 内高光"分层，不用彩色边框。
+       ⚠️ 这块必须**紧贴在上面的 :root 后面**（assert-deliverable 用一条正则从
+          ":root {…}" 直接跳到 "[data-theme="dark"] {" 取两套令牌，中间插注释会让它取错区间）。 */
+    --bg:            #070709;
+    --bg-subtle:     #121215;
+    --bg-elevated:   rgba(255,255,255,.045);
+    --bg-hover:      rgba(255,255,255,.075);
+    --bg-sunken:     #0B0B0E;
+    --bg-overlay:    rgba(10,10,13,.72);
     --bg-inverse:    #F5F5F7;
-    --border:        #38383A;
-    --border-strong: #545458;
-    --text:          #F5F5F7;
-    --text-secondary:#A1A1A6;
-    --text-tertiary: #8E8E93;
-    --text-inverse:  #1D1D1F;
+    --border:        rgba(255,255,255,.09);
+    --border-strong: rgba(255,255,255,.20);
+    --text:          #EFEFF2;
+    --text-secondary:#A3A3AB;
+    --text-tertiary: #7E7E88;
+    --text-inverse:  #101013;
     --accent:        #0A84FF;
     --accent-hover:  #409CFF;
-    --accent-ring:   rgba(10,132,255,.35);
-    --danger:        #FF453A;
-    --danger-bg:     rgba(255,69,58,.16);
-    --danger-ring:   rgba(255,69,58,.30);
-    --success:       #30D158;
-    --success-bg:    rgba(48,209,88,.16);
-    --warning:       #FF9F0A;
-    --warning-bg:    rgba(255,159,10,.16);
-    --shadow-card:   0 1px 3px rgba(0,0,0,.5), 0 8px 24px rgba(0,0,0,.6);
-    --shadow-pop:    0 12px 32px rgba(0,0,0,.7);
+    --accent-ring:   rgba(10,132,255,.30);
+    --danger:        #FF6B5E;
+    --danger-bg:     rgba(255,107,94,.14);
+    --danger-ring:   rgba(255,107,94,.28);
+    --success:       #3ED598;
+    --success-bg:    rgba(62,213,152,.14);
+    --warning:       #E0A64B;
+    --warning-bg:    rgba(224,166,75,.14);
+    --shadow-card:   inset 0 1px 0 rgba(255,255,255,.055), 0 20px 44px -28px rgba(0,0,0,.95);
+    --shadow-pop:    0 26px 60px -24px rgba(0,0,0,.95);
     --shadow-sticky: 0 1px 0 var(--border);
-    --control-bg:    #2C2C2E;
+    --control-bg:    rgba(255,255,255,.05);
     --control-inner: inset 0 1px 0 rgba(255,255,255,.05);
-    --code-bg:       #1C1C1E;
-    --code-text:     #C7C7CC;
+    --code-bg:       #0B0B0E;
+    --code-text:     #C7C7CE;
     --chart-bar:     #0A84FF;
-    --chart-bar-hot: #FF9F0A;
-    --chart-bar-over:#FF453A;
-    --bar-warn-bg:   #3A2A12;
-    --bar-warn-text: #FFD9A0;
-    --bar-err-bg:    #3A1512;
+    --chart-bar-hot: #E0A64B;
+    --chart-bar-over:#FF6B5E;
+    --bar-warn-bg:   #2A2011;
+    --bar-warn-text: #F2CB8C;
+    --bar-err-bg:    #2A1210;
     --bar-err-text:  #FFB4AE;
-    --bubble-user:   #2C2C2E;
-    --bubble-bot:    #12283F;
-    --divider:       rgba(255,255,255,.10);
-    --skeleton:      rgba(255,255,255,.10);
-    --scroll-thumb:  rgba(255,255,255,.20);
+    --bubble-user:   rgba(255,255,255,.05);
+    --bubble-bot:    rgba(10,132,255,.10);
+    --divider:       rgba(255,255,255,.08);
+    --skeleton:      rgba(255,255,255,.08);
+    --scroll-thumb:  rgba(255,255,255,.18);
+    --rail-bg:       rgba(255,255,255,.05);
+    --rail-icon:     #A3A3AB;
+    --rail-icon-hi:  #EFEFF2;
+    --rail-hover:    rgba(255,255,255,.075);
+    --rail-on-bg:    #EFEFF2;
+    --rail-on-fg:    #101013;
+    --rail-ctl-bg:   rgba(255,255,255,.07);
+    --rail-ctl-fg:   #C7C7CE;
   }
 
   /* ============================================================
@@ -327,7 +351,9 @@ const PAGE = (opts) => `<!doctype html>
                      linear-gradient(135deg,var(--text-tertiary) 50%,transparent 50%);
     background-position:calc(100% - 19px) 50%, calc(100% - 14px) 50%;
     background-size:5px 5px, 5px 5px; background-repeat:no-repeat; }
-  select option, select optgroup { background-color:var(--bg-elevated); color:var(--text); }
+  /* 🆕 2026-10-29：深色下 --bg-elevated 变成半透明 ⇒ 下拉弹层不能用它（弹层底透明 = 白字糊在桌面上），
+     这里显式改用实色 --bg-subtle。 */
+  select option, select optgroup { background-color:var(--bg-subtle); color:var(--text); }
   select option:checked { background-color:var(--accent); color:var(--text-inverse); }
   /* 复选框 / 单选：自定义外观（原生方框在深色下是刺眼的系统色） */
   input[type=checkbox], input[type=radio] {
@@ -622,43 +648,48 @@ const PAGE = (opts) => `<!doctype html>
 
   /* ============================================================
      ★ 2026-10-21 三栏工作台（用户从三版预览里选的 C 方案）
-     ① 左侧 56px 图标轨道（深色，与主题无关）—— 原来顶部 tabbar 搬到这里；
+     ① 左侧 56px 图标轨道 —— 原来顶部 tabbar 搬到这里；
      ② 概览页右侧 300px 常驻「实时事件」（数据来自 /api/state 的 j.log 尾部）；
      ③ 内容区收紧：卡片圆角 12、内边距 16、数字统一等宽；
         ⚠️ 只改皮与骨架，**不动任何 id / data-* / 事件挂钩**。
      ④ 窄屏（<1100px）自动隐藏右栏，轨道保留。
+     🆕 2026-10-29 修正①：轨道原来**写死深色**（#18181A），浅色主题下就是一条黑杠，
+        跟"仿 Codex 悬浮玻璃"的顶栏完全不是一套语言 ⇒ 改成**跟主题走**的令牌（--rail-*），
+        浅色=半透明白玻璃 + 深色图标，深色=半透明白玻璃 + 亮色图标（用户截图点出来的）。
      ============================================================ */
   :root { --rail-w:56px; }
   body { padding-left:var(--rail-w); }
   .rail {
     position:fixed; left:0; top:0; bottom:0; width:var(--rail-w); z-index:60;
-    background:#18181A; display:flex; flex-direction:column; align-items:center;
+    background:var(--rail-bg); display:flex; flex-direction:column; align-items:center;
     padding:12px 0 10px; gap:4px;
+    -webkit-backdrop-filter:blur(18px) saturate(150%); backdrop-filter:blur(18px) saturate(150%);
+    transition:background var(--dur) var(--ease);
   }
-  .railLogo { width:32px; height:32px; border-radius:9px; background:#2A2A2E; color:#F5F5F7;
+  .railLogo { width:32px; height:32px; border-radius:9px; background:var(--rail-ctl-bg); color:var(--rail-icon-hi);
               display:grid; place-items:center; margin-bottom:8px; }
   .railLogo svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
   .railTabs { display:flex; flex-direction:column; align-items:center; gap:2px; width:100%; }
   .railTabs a {
     width:40px; height:40px; border-radius:9px; display:grid; place-items:center;
-    color:#8A8A90; text-decoration:none; border:1px solid transparent;
+    color:var(--rail-icon); text-decoration:none; border:1px solid transparent;
     transition:background var(--dur) var(--ease), color var(--dur) var(--ease);
   }
   /* 🆕 2026-10-22 用户：「最左侧单字太难阅读，改成svg图标」⇒ 统一 20px 线性图标，颜色跟 currentColor 走 */
   .railTabs a svg { width:20px; height:20px; display:block; fill:none; stroke:currentColor;
                     stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
-  .railTabs a:hover { background:#2A2A2E; color:#F5F5F7; text-decoration:none; }
-  .railTabs a.on { background:#F5F5F7; color:#18181A; font-weight:600; }
+  .railTabs a:hover { background:var(--rail-hover); color:var(--rail-icon-hi); text-decoration:none; }
+  .railTabs a.on { background:var(--rail-on-bg); color:var(--rail-on-fg); font-weight:600; }
   .railSpacer { flex:1 1 auto; }
   .railTheme { display:flex; flex-direction:column; align-items:center; gap:8px; }
-  .railTheme .seg { display:flex; flex-direction:column; background:#2A2A2E; border-radius:9px; padding:3px; gap:2px; }
+  .railTheme .seg { display:flex; flex-direction:column; background:var(--rail-ctl-bg); border-radius:9px; padding:3px; gap:2px; }
   .railTheme .seg button {
-    width:34px; min-height:0; border:0; background:transparent; color:#8A8A90; font-size:10px;
+    width:34px; min-height:0; border:0; background:transparent; color:var(--rail-ctl-fg); font-size:10px;
     padding:6px 0; border-radius:6px; cursor:pointer;
   }
-  .railTheme .seg button[aria-pressed="true"] { background:#F5F5F7; color:#18181A; font-weight:600; }
-  .railTheme #sfxBtn { width:34px; height:30px; border:0; border-radius:8px; background:#2A2A2E; color:#C7C7CC; font-size:13px; cursor:pointer; }
-  .railTheme #sfxBtn:hover { background:#3A3A3C; }
+  .railTheme .seg button[aria-pressed="true"] { background:var(--rail-on-bg); color:var(--rail-on-fg); font-weight:600; }
+  .railTheme #sfxBtn { width:34px; height:30px; border:0; border-radius:8px; background:var(--rail-ctl-bg); color:var(--rail-ctl-fg); font-size:13px; cursor:pointer; }
+  .railTheme #sfxBtn:hover { background:var(--rail-hover); }
 
   /* 顶栏瘦身：tabbar 已搬进轨道 */
   .bar { max-width:1180px; }
@@ -701,7 +732,10 @@ const PAGE = (opts) => `<!doctype html>
   /* 🆕 2026-10-22 设置页重做：搜索框 + 分组卡片 + 开关 + 滑块 */
   /* 🆕 2026-10-24 设置页顶部：4 个分段（模型 / 额度 / 对话 / 人设），点一次只看那组，再点恢复全部 */
   .setseg { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 14px; }
-  .setseg button { padding:8px 14px; border-radius:999px; font-size:13px; background:var(--bg-overlay); border:1px solid var(--line); color:var(--fg-2); cursor:pointer; }
+  /* ⚠️ 2026-10-29 顺手修：这里原来引用了 --line / --fg-2 两个**根本不存在的令牌**
+     （令牌表里叫 --border / --text-secondary）⇒ 整条 border 声明在计算时失效，
+     这四个分段按钮一直是"没描边、颜色继承"的裸样子。改成真令牌。 */
+  .setseg button { padding:8px 14px; border-radius:999px; font-size:13px; background:var(--bg-overlay); border:1px solid var(--border); color:var(--text-secondary); cursor:pointer; }
   .setseg button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
   .setsec { margin-top:26px; }
   /* 🆕 2026-10-22 用户：「纯白色太单调了…没说纯白配色」⇒ 分组成彩色小色块（**纯色，不用渐变**） */
@@ -812,6 +846,86 @@ const PAGE = (opts) => `<!doctype html>
     .railTheme .seg { flex-direction:row; align-items:center; height:30px; padding:2px; gap:2px; }
     .railTheme .seg button { width:30px; height:26px; padding:0; font-size:10px; line-height:1; }
     .railTheme #sfxBtn { width:30px; height:30px; }
+  }
+  /* ============================================================
+     ★ 2026-10-29 「仿 Codex · 悬浮玻璃工作台」
+     背景：用户 2026-10-29 说「我觉得控制台ui还是不怎么样，做个仿codex界面ui吧，可以搞点悬浮卡片和磨砂效果」，
+           我从三版样张（_ops/ui-preview/codex-variants.html）里他选中了 B · 悬浮工作台。
+     做法（**只换皮，不动任何 id / data-* / 事件挂钩 / JS**）：
+       ① 底改近黑 + 一层**中性白**环境光（不是蓝色光晕）—— 磨砂玻璃"背后得有东西"才看得出磨砂；
+       ② 左轨道与顶栏**脱离屏幕边缘**，变成两条悬浮玻璃条；
+       ③ 卡片/折叠块/预设卡统一 = 半透明白 + backdrop blur + 1px 内高光，hover 抬起 2px；
+       ④ 深色下把原来六张彩色底的统计卡压回中性玻璃（彩色只在浅色留），标题去掉装饰竖条。
+     ⚠️ 浅色主题保持"实色白卡"（磨砂只做深色）—— 浅色下磨砂会糊成一片，而且他之前要的"彩色分区"在浅色。
+     ============================================================ */
+  :root { --pad-rail:76px; }
+
+  /* ① 环境光：**故意不画**。
+     ⚠️ 2026-10-29：第一版我用两团 radial-gradient 做"背后有光"的层次，被 assert-deliverable 拦下
+     （「渐变共 4 处，只允许下拉箭头那 2 处形状渐变」）—— 用户的规矩是**全站禁渐变**（禁的是 AI 那种
+     蓝紫光晕），这条不该为"好看"破例。⇒ 改成纯靠半透明 + backdrop blur + 1px 内高光做玻璃感：
+     磨砂在**顶栏压住滚动内容**、卡片相互叠压时反而是真的（有东西可模糊），不需要假光。 */
+
+  /* ② 左轨道：脱离边缘的悬浮玻璃条（桌面）/ 悬浮横条（窄屏） */
+  @media (min-width:1100px) {
+    body { padding-left:var(--pad-rail); }
+    .rail { top:10px; bottom:10px; left:10px; width:var(--rail-w); height:auto; border-radius:16px;
+            background:var(--rail-bg); border:1px solid var(--border);
+            -webkit-backdrop-filter:blur(18px) saturate(140%); backdrop-filter:blur(18px) saturate(140%);
+            box-shadow:inset 0 1px 0 rgba(255,255,255,.07), 0 22px 46px -26px rgba(0,0,0,.95); }
+  }
+  @media (max-width:1099px) {
+    .rail { margin:8px 8px 0; border-radius:14px; background:var(--rail-bg); border:1px solid var(--border);
+            -webkit-backdrop-filter:blur(18px) saturate(140%); backdrop-filter:blur(18px) saturate(140%);
+            box-shadow:0 16px 34px -24px rgba(0,0,0,.95); }
+  }
+
+  /* ③ 顶栏：也变成一条悬浮玻璃条（原来是贴边 + 只留底边线） */
+  header.appbar { top:10px; margin:10px auto 0; max-width:1180px; width:calc(100% - 32px);
+    border:1px solid var(--border); border-radius:16px; background:var(--bg-overlay);
+    -webkit-backdrop-filter:blur(22px) saturate(160%); backdrop-filter:blur(22px) saturate(160%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.07), 0 20px 44px -30px rgba(0,0,0,.95); }
+  header.appbar .bar { max-width:none; padding:10px 16px; }
+
+  /* ④ 面板：磨砂玻璃 + hover 抬起（浅色下 blur 不动、保持实色白卡） */
+  .card, details, .card2, .pcard2, .ilcard, .gcard {
+    background:var(--bg-elevated); border:1px solid var(--border);
+    border-radius:var(--r-card); box-shadow:var(--shadow-card);
+    transition:transform .2s var(--ease), box-shadow var(--dur) var(--ease),
+               border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+  }
+  [data-theme="dark"] .card, [data-theme="dark"] details, [data-theme="dark"] .card2,
+  [data-theme="dark"] .pcard2, [data-theme="dark"] .ilcard, [data-theme="dark"] .gcard {
+    -webkit-backdrop-filter:blur(22px) saturate(150%); backdrop-filter:blur(22px) saturate(150%);
+  }
+  @media (hover:hover) {
+    .card:hover, .card2:hover, .pcard2:hover, .ilcard:hover {
+      transform:translateY(-2px); border-color:var(--border-strong); box-shadow:var(--shadow-pop); }
+  }
+
+  /* ⑤ 深色下把彩色底的卡片压回中性玻璃（浅色仍保留彩色分区）
+     🔴 2026-10-29 修（截图抓到的）：第一版只写「[data-theme="dark"] #budget .card」，
+     结果**打不过**原来那 6 条「… .card:nth-child(1/N)」（它们的特异性更高）
+     ⇒ 深色下统计卡仍然是"深蓝/深紫/深绿/深金"六块彩色，跟仿 Codex 的中性玻璃完全不是一套。
+     ⇒ 用「:nth-child(n)」把特异性抬到同档，靠"本段在文件末尾"取胜，不用 !important。
+     ⚠️ 注释里**绝不能出现裸反引号** —— 本文件是模板字符串，会直接截断（今天又被咬了一次）。 */
+  [data-theme="dark"] #budget .card:nth-child(n),
+  [data-theme="dark"] .ilcard:nth-child(n),
+  [data-theme="dark"] .setsec .card2:nth-child(n),
+  [data-theme="dark"] main > section[class*="tint-"] .card { background:var(--bg-elevated); border-color:var(--border); }
+
+  /* ⑥ 标题 / 数字 / 按钮的"工具感"收口 */
+  h2 { font-size:13px; font-weight:600; letter-spacing:-.005em; color:var(--text); }
+  h2::before { display:none; }
+  .grid > .card > b { font-size:30px; letter-spacing:-.03em; }
+  button { border-radius:10px; }
+  .seg button.on { border-radius:8px; }
+  main { padding-top:18px; }
+  main > section { margin-bottom:26px; }
+
+  @media (max-width:760px) {
+    [data-theme="dark"] .card, [data-theme="dark"] details,
+    [data-theme="dark"] .card2, [data-theme="dark"] .ilcard { -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); }
   }
 </style></head>
 <body>

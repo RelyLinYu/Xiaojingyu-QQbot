@@ -97,6 +97,22 @@ const AUDIT_JS = `(function () {
   function cs(el, p) { return el ? getComputedStyle(el).getPropertyValue(p).trim() : '(元素不存在)'; }
   function q(sel) { return document.querySelector(sel); }
 
+  // 🔴 2026-10-29 新增：算元素的**有效底色**（沿祖先链把半透明背景层叠到 body 上）。
+  //   为什么必须这么算：玻璃皮肤下很多底色是 rgba(255,255,255,.05) —— 直接拿它当"底色"
+  //   去算对比度 = 把 5% 白当成纯白，于是"白色文字 vs 白色底"得出 1.15:1 的**假红**
+  //   （本次就报了这条）。判真实可读性必须先把半透明层叠到实际底色上。
+  function effBg(el) {
+    var stack = [], node = el;
+    while (node && node.nodeType === 1) {
+      var c = parseRGB(cs(node, 'background-color'));
+      if (c && c.a > 0) { stack.push(c); if (c.a >= 0.999) break; }
+      node = node.parentElement;
+    }
+    var out = { r: 0, g: 0, b: 0, a: 1 };      // 兜底：最底下一层按黑算（深色主题的地板）
+    for (var i = stack.length - 1; i >= 0; i--) out = over(stack[i], out);
+    return out;
+  }
+
   var bad = [], pass = [];
   function chk(name, cond, detail) { (cond ? pass : bad).push(name + (detail ? ' :: ' + detail : '')); }
 
@@ -149,7 +165,7 @@ const AUDIT_JS = `(function () {
   if (sel) {
     var app = cs(sel, '-webkit-appearance') || cs(sel, 'appearance');
     chk('下拉去掉了原生外观', app === 'none', app);
-    var selBg = parseRGB(cs(sel, 'background-color'));
+    var selBg = effBg(sel);      // 🆕 半透明底要先层叠（否则 rgba 白底会被当成纯白 = 假红）
     var selTx = parseRGB(cs(sel, 'color'));
     chk('下拉文字对比度 >=4.5:1', contrast(over(selTx, selBg), selBg) >= 4.5,
       contrast(over(selTx, selBg), selBg).toFixed(2) + ':1');
@@ -197,7 +213,7 @@ const AUDIT_JS = `(function () {
     // (9b) 柱子(=图形元素)对底面的对比度 >=3:1 —— 靠"柱子压在浅灰轨上"是过不了这条的
     var barBg = parseRGB(cs(bars[0], 'background-color'));
     var chartCard = bars[0].closest('.card') || document.body;
-    var surface = parseRGB(cs(chartCard, 'background-color'));
+    var surface = effBg(chartCard);   // 🆕 卡片是半透明玻璃 ⇒ 先层叠出真实底色
     chk('柱子对卡片底对比 >=3:1', contrast(barBg, surface) >= 3,
       contrast(barBg, surface).toFixed(2) + ':1');
 
@@ -277,7 +293,7 @@ const AUDIT_JS = `(function () {
   var hint = q('.hint');
   if (hint) {
     var hc = parseRGB(cs(hint, 'color'));
-    var hbg = parseRGB(cs(hint.closest('.card') || document.body, 'background-color'));
+    var hbg = effBg(hint.closest('.card') || document.body);   // 🆕 玻璃卡片要先层叠
     chk('说明文字对比度 >=4.5:1', contrast(over(hc, hbg), hbg) >= 4.5,
       contrast(over(hc, hbg), hbg).toFixed(2) + ':1');
   }

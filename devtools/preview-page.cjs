@@ -18,7 +18,12 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const { PAGE } = require(path.join(ROOT, 'server', 'tools', 'page.js'));
-const OUT = path.join(__dirname, '_preview');
+// ⚠️ 2026-10-29：输出目录与"烤进页面的主题"都可用环境变量覆盖 ——
+//    受限环境里工作区可能不可写（只有临时目录可写），那时写到临时目录再由静态服务打开；
+//    PREVIEW_THEME=dark 则等价于"用户上次选了深色"，打开就是深色，不用手点。
+const OUT = process.env.PREVIEW_OUT || path.join(__dirname, '_preview');
+const BAKED_THEME = process.env.PREVIEW_THEME === 'light' || process.env.PREVIEW_THEME === 'dark'
+  ? process.env.PREVIEW_THEME : '';
 
 // ---------- 假数据（只为把界面填满，看排版；数值本身无意义）----------
 const MOCK_DAYS = [];
@@ -186,7 +191,12 @@ const PAGES = [
 
 fs.mkdirSync(OUT, { recursive: true });
 for (const p of PAGES) {
-  const html = stubFetch(PAGE({ pwd: 'PREVIEW', page: p.key }));
+  let html = stubFetch(PAGE({ pwd: 'PREVIEW', page: p.key }));
+  if (BAKED_THEME) {
+    // 插在防闪烁内联脚本之前：等价于"用户上次选了深色/浅色"，首屏直接对
+    html = html.replace('<style>',
+      '<script>try{localStorage.setItem("theme","' + BAKED_THEME + '")}catch(e){}</script><style>');
+  }
   fs.writeFileSync(path.join(OUT, 'preview-' + p.key + '.html'), html, 'utf8');
   console.log('  ✅ preview-' + p.key + '.html  (' + html.length + ' 字符)');
 }

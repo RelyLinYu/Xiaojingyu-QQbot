@@ -4664,9 +4664,11 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
     // 🔴 2026-10-08 更新（UI 重做）：颜色不再是写死的深蓝 #0d1729，而是走语义令牌
     //    （浅色 #FFFFFF / 深色 #2C2C2E）⇒ 判据改认"option 用 var(--bg-elevated) 上色"。
     //    ⚠️ 这条的本意是"必须给 option 显式上色"，不必绑定具体色值 —— 绑定色值反而会
-    //       在换主题时假失败（今天就是）。
+    //       在换主题时假失败（今天就是）。🆕 2026-10-29：深色的 --bg-elevated 变成半透明
+    //       （玻璃皮肤），弹层底透明 = 白字糊在桌面上 ⇒ 模板改用实色 --bg-subtle，
+    //       两条色值都属于"显式上色"，这里都接受。
     check('★★ 下拉选项也上了色（否则弹层里"文字背景同色"看不见）',
-      /select option/.test(pg) && /select option[^{]*\{[^}]*background-color:var\(--bg-elevated\)/.test(pg));
+      /select option/.test(pg) && /select option[^{]*\{[^}]*background-color:var\(--(bg-elevated|bg-subtle)\)/.test(pg));
 
     // 🔴 这个"模板内反引号"坑咬过我三次 ⇒ 闸门里必须有专门检查（这里锁住闸门本身）
     //    🆕 2026-10-13：路径要**两处都试** —— 本地是 `work/devtools`（server 的上一级），
