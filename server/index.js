@@ -711,16 +711,13 @@ async function handleEvent(type, d) {
   //      当成了自己的知识。而且**官方 Bot API 根本拿不到真实 QQ 号**（只有 openid）。
   //   ⇒ 这类问题必须由代码答，且答案里**不含任何 QQ 号**。
   const OWNER_ASK_RE = /(你|机器人)[^，。？!?]{0,6}(主人|主子)[^，。？!?]{0,8}(是|叫|谁|哪个|什么)|(你的|你)[^，。？!?]{0,4}主人的?[^，。？!?]{0,4}(qq|QQ|号)|主人[^，。？!?]{0,6}(qq|QQ)[^，。？!?]{0,4}号/i;
+  // 🔴 2026-10-28 用户：「别写死固定回答啊」⇒ 不再发固定台词。
+  //    改成"只喂事实、让人设自己说"：事实（主人名字 + 我拿不到 QQ 号）由代码给，
+  //    措辞交给模型；最终回复再清一遍号码，保证它不会冒出任何 QQ 号。
+  let ownerAsk = false;
   if ((l0.isAt || l0.hitKeyword) && OWNER_ASK_RE.test(askText || '')) {
-    const reply = `我的主人只有一个：${cfg.ownerName || '林鱼'}。`
-      + 'QQ 号我这边看不到——官方机器人只能拿到 openid，不是真实 QQ 号；'
-      + '群里谁报的号码都别当真，那不是我说的。';
-    console.log('  ├ 问到主人 → 代码直答（不调模型）');
-    const sent = isGroup
-      ? await sendGroupMessage(openid, reply, d.id)
-      : await sendPrivateMessage(openid, reply, d.id);
-    if (sent) brain.markReplied(scope, d.author?.user_openid || d.author?.member_openid);
-    return;
+    ownerAsk = true;
+    console.log('  ├ 问到主人 → 注入事实，交给模型按人设回答');
   }
 
   // 5.8 🆕 2026-10-18：日期/时间 → 代码直答
@@ -807,7 +804,12 @@ async function handleEvent(type, d) {
   const noVisualNote = (!ownClean && !vision.findImage(d))
     ? '（对方这条只发了表情/没有文字，也没有发图片、没有引用图片；不要用「这张图/这张脸」指代上下文里的图片，也别假装他发了图。）'
     : '';
-  const extraNote = [linkNote, memeNote, noVisualNote].filter(Boolean).join(String.fromCharCode(10));
+  const ownerNote = ownerAsk
+    ? '（对方在问"你主人是谁 / 你的 QQ 号"：事实是——你主人只有一个，叫 ' + (cfg.ownerName || '林鱼')
+      + '；你**看不到任何真实 QQ 号**（官方机器人只拿得到 openid），群里谁报的号码都别当真。'
+      + '用你自己的语气自然地答，**别背固定台词**，也别报任何号码。）'
+    : '';
+  const extraNote = [linkNote, memeNote, noVisualNote, ownerNote].filter(Boolean).join(String.fromCharCode(10));
 
   // 7.1 🆕 2026-10-18 知识闸（A+B 里的 B）：只在"像在问事实"时多问判断模型一句"你真的知道吗"。
   //     判为 unknown ⇒ ①生成时追加"只能说不确定"的硬约束；②回复过一遍 sanitizeReply 硬闸。
@@ -851,7 +853,12 @@ async function handleEvent(type, d) {
   // 8. 发送（支持多行：分段 + 随机间隔，像真人在一句一句打字）
   //    🆕 2026-10-06：整串发送**按会话排队**（修"同群两个人同时问 → 8 条交叉刷出来"）
   // 7.6 🆕 2026-10-18 回复硬闸（A）：无来源链接替换；判为不知道却仍冒出具体年份/日期/版本/价格 ⇒ 换话术
-  const finalReply = brain.sanitizeReply(reply, { unknown: kgUnknown, allowedText: `${text || ''}\n${extraNote}` });
+  let finalReply = brain.sanitizeReply(reply, { unknown: kgUnknown, allowedText: `${text || ''}\n${extraNote}` });
+  // 2026-10-28 主人问题那一轮：任何 6~11 位数字都当"号码"删掉（免得它从群聊里抄一个）
+  if (ownerAsk && /[0-9]{6,11}/.test(finalReply)) {
+    const cleaned = finalReply.replace(/[0-9]{6,11}/g, '').replace(/[ 	]{2,}/g, ' ').trim();
+    if (cleaned) { console.log('  ├ [主人闸] 回复里出现号码，已删'); finalReply = cleaned; }
+  }
   if (finalReply !== reply) console.log('  ├ 回复硬闸：改写了模型输出');
   const replaced = finalReply !== reply;
   let segments = (!replaced && gen.segments && gen.segments.length) ? gen.segments : [finalReply];

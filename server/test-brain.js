@@ -5504,13 +5504,13 @@ console.log('\n=== 10. ⭐ 运行时返回值结构（拦截网络，零成本�
         if (r.item) mm.remove(r.item.id);
         return r.ok === true && h.includes('含义不详');
       })());
-      check('★★ 主人/QQ号问题代码直答（不调模型、答里不含 QQ 号）',
-        isrc.includes('OWNER_ASK_RE') && isrc.includes('官方机器人只能拿到 openid'));
+      check('★★ 主人/QQ号问题：注入事实按人设回答（不背固定台词）+ 回复里的号码一律清除',
+        isrc.includes('OWNER_ASK_RE') && isrc.includes('ownerNote') && isrc.includes('[主人闸]') && isrc.includes('别背固定台词'));
     }
 
         check('★ 梗库提示走 user 文本；镜像替换走代码直回；自动采集接线就位', (() => {
           const is = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
-          return is.includes("./memes').hint(") && is.includes('noVisualNote]') && is.includes("./memes').echoReply(") && is.includes('梗库镜像') && is.includes('meme-learn') && is.includes('memeAuto');
+          return is.includes("./memes').hint(") && is.includes('noVisualNote') && is.includes("./memes').echoReply(") && is.includes('梗库镜像') && is.includes('meme-learn') && is.includes('memeAuto');
         })());
         check('★★ 自动采集：短语频次 + 多人说过才算候选（不看单条消息）', (() => {
           const ml = require('./meme-learn');
