@@ -540,9 +540,18 @@ function panelGroupLastSeen() {
     try { txt = fs.readFileSync(it.p, 'utf8'); } catch { continue; }
     const d = new Date(it.m);
     const day = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-    const re = /"(?:group_openid|group_id)":"([0-9A-Fa-f]{16,64})"/g;
-    let m;
-    while ((m = re.exec(txt))) { if (!map.has(m[1])) map.set(m[1], day); }
+    // 🔴 2026-10-29 修（用户：「图1这个底下那个乱码的群早就解散了，为什么还在」）：
+    //    原来是对**整个文件**做正则，系统事件也算 ⇒ 一个早就解散的群只因为一条
+    //    {"t":"GROUP_ADD_ROBOT",...}（机器人当初被拉进群的系统事件，之后群里再没说过一句话）
+    //    就被判成"7 天内活跃"，一直躺在这个"可直发"下拉里，名字还是 openid 前 6 位（= 乱码）。
+    //    ⇒ 判活只认**真的产生过群消息**的事件（类型里带 MESSAGE），系统事件一律不算。
+    const reType = /"t":"[A-Z_]*MESSAGE[A-Z_]*"/;
+    const reId = /"(?:group_openid|group_id)":"([0-9A-Fa-f]{16,64})"/;
+    for (const line of txt.split('\n')) {
+      if (!line || !reType.test(line)) continue;
+      const m = reId.exec(line);
+      if (m && !map.has(m[1])) map.set(m[1], day);
+    }
   }
   panelGroupCache.at = now;
   panelGroupCache.map = map;
