@@ -975,6 +975,60 @@ const PAGE = (opts) => `<!doctype html>
     .skline::after { animation:none; }
     .skover, .sk-host { transition:none; }
   }
+  /* ============================================================
+     ★ 2026-10-31 交互动效第 1 类（依据 docs/sl交互+Astr动效skill.md 的实测参数）
+     hover 只变色不改几何 · press 只缩 4% · focus 只画 1.5px 内环（动 outline 会挤动邻居）·
+     弹窗进慢退快 · 列表项进入 200ms 位移≤6px · 长任务 2px 进度条 · 思考中文字扫光。
+     ⚠️ 全部只动颜色/透明度/transform，不改任何布局尺寸 ⇒ 不会引起页面抖动。
+     ============================================================ */
+  :root { --d-fast:.12s; --d-hover:.15s; --d-overlay:.2s; --d-slow:.3s;
+          --e-out:ease-out; --e-spring:cubic-bezier(.16,1,.3,1); }
+
+  /* ① hover 150ms 只改颜色 / ② press 缩 4% / ③ focus 内环 1.5px */
+  button, .railTabs a, .tabbar a, summary, .uibtn, .ilcard, #msgList .msgitem {
+    transition: background-color var(--d-hover) cubic-bezier(.4,0,.2,1),
+                border-color var(--d-hover) cubic-bezier(.4,0,.2,1),
+                color var(--d-hover) cubic-bezier(.4,0,.2,1),
+                box-shadow var(--d-hover), transform var(--d-hover) var(--e-out);
+  }
+  button:active, .uibtn:active { transform: scale(.96) translateY(1px); }
+  button:focus-visible, .railTabs a:focus-visible, .tabbar a:focus-visible,
+  .uibtn:focus-visible { outline:none; box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+  /* ④ 弹窗：进 150ms spring / 退 120ms ease（退永远比进快 20~40%） */
+  .uimask { opacity:0; transition: opacity var(--d-hover) ease; }
+  .uimask.in { opacity:1; }
+  .uimask.out { opacity:0; transition-duration: var(--d-fast); }
+  .uicard { transform: translateY(8px) scale(.97); opacity:0; }
+  .uimask.in .uicard { transform:none; opacity:1;
+    transition: transform var(--d-hover) var(--e-spring), opacity var(--d-hover) var(--e-spring); }
+  .uimask.out .uicard { transform: translateY(4px) scale(.99);
+    transition: transform var(--d-fast) ease, opacity var(--d-fast) ease; }
+
+  /* ⑤ 思考中：光带扫过文字本身（1.6s linear），零额外元素 */
+  .thinking { display:inline-block; font-size:13px; color:transparent;
+    background-image:linear-gradient(110deg, rgba(239,239,242,.35) 0%, rgba(239,239,242,1) 50%, rgba(239,239,242,.35) 100%);
+    background-size:200% 100%; -webkit-background-clip:text; background-clip:text;
+    animation:thinkSweep 1.6s linear infinite; }
+  [data-theme="light"] .thinking {
+    background-image:linear-gradient(110deg, rgba(29,29,31,.35) 0%, rgba(29,29,31,1) 50%, rgba(29,29,31,.35) 100%); }
+  @keyframes thinkSweep { 0% { background-position:100% 0 } 60%,100% { background-position:0 0 } }
+
+  /* ⑥ 长任务：2px 进度条（不可预估 = 2% 宽度循环；可预估 = width 过渡） */
+  .bar2 { height:2px; background:rgba(255,255,255,.09); border-radius:2px; overflow:hidden; margin-top:10px; }
+  [data-theme="light"] .bar2 { background:rgba(0,0,0,.09); }
+  .bar2 i { display:block; height:100%; width:2%; background:var(--accent); border-radius:2px;
+            animation:bar2go 4s linear infinite; }
+  .bar2.det i { width:0; animation:none; transition:width .1s linear; }
+  @keyframes bar2go { 0% { transform:translateX(-100%) } 100% { transform:translateX(5100%) } }
+
+  /* ⑦ 内容替换 / 列表项进入：240ms 淡入，位移 ≤6px */
+  .sbreply, #msgList .msgitem:nth-child(-n+3) { animation:fadeUp .24s var(--e-spring) both; }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:none } }
+  @media (prefers-reduced-motion: reduce) {
+    .thinking, .bar2 i { animation:none; }
+    .uimask, .uicard, .sbreply, #msgList .msgitem { transition:none; animation:none; }
+  }
 </style></head>
 <body>
 <!-- ★ 2026-10-21 三栏工作台：左图标轨道（原 tabbar 搬进来；#tabs 这个 id 保留，initPages 靠它） -->
@@ -1346,12 +1400,19 @@ function uiModal(opt) {
     card.appendChild(row);
     mask.appendChild(card);
     document.body.appendChild(mask);
+    // 🆕 2026-10-31：弹窗"进 150ms spring"，用 rAF 加 .in 触发过渡（直接 append 会跳过动画）
+    if (window.requestAnimationFrame) requestAnimationFrame(function () { mask.classList.add('in'); });
+    else mask.classList.add('in');
 
     function cancelVal() { return opt.input ? null : false; }
     function okVal() { return opt.input ? (input.value || '').trim() : true; }
     function close(val) {
       document.removeEventListener('keydown', onKey, true);
-      if (mask.parentNode) mask.parentNode.removeChild(mask);
+      // 🆕 退场 120ms（比进场快），动画结束/超时才真正移除，避免"点了没反应"的错觉
+      var gone = false;
+      function detach() { if (gone) return; gone = true; if (mask.parentNode) mask.parentNode.removeChild(mask); }
+      try { mask.classList.remove('in'); mask.classList.add('out'); } catch (e) {}
+      setTimeout(detach, 130);
       resolve(val);
     }
     function onKey(ev) {
@@ -1914,7 +1975,8 @@ async function sandboxSend(){
   const out = document.getElementById('sbOut');
   const text = (inp.value || '').trim();
   if (!text) { toast('先输入要试的话'); return; }
-  out.innerHTML = '<p class="hint">生成中…（真实调用，稍等几秒）</p>';
+  // 🆕 2026-10-31：等待态改成「思考中扫光 + 2px 不确定进度条」（原来是一行"生成中…"干等着）
+  out.innerHTML = '<div class="thinking">正在想怎么说…</div><div class="bar2"><i></i></div>';
   try {
     const r = await fetch('/api/sandbox?p=' + encodeURIComponent(P), {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text}),
