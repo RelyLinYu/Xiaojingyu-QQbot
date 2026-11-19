@@ -167,24 +167,28 @@ function hint(text) {
   if (!t.trim()) return '';
   const low = t.toLowerCase();
   const hits = [];
-  // 手动条目优先命中；自动条目按出现次数排（越常用越先给）
+  // 排序：**有接法的手动条目**最优先 → 词库导入（origin:'wiki'，只有释义） → 自动采集（按出现次数）
+  // 🆕 2026-11-19 导入模式：wiki 条目一律"只当背景知识"，绝不能进"可以接"那条分支
+  //   （它没有接法，掉进去就会渲染出一句「可以接：」后面空着 —— 实测抓到的 bug）
+  const rank = (x) => (String(x.reply || '').trim() ? 0 : (x.origin === 'wiki' ? 1 : 2));
   const all = load().filter((x) => x && x.enabled !== false && !x.echo);
-  const ordered = all.filter((x) => x.origin !== 'auto')
-    .concat(all.filter((x) => x.origin === 'auto').sort((a, b) => (Number(b.count) || 0) - (Number(a.count) || 0)));
+  const ordered = all.slice().sort((a, b) => (rank(a) - rank(b))
+    || ((Number(b.count) || 0) - (Number(a.count) || 0)));
   for (const it of ordered) {
     const trig = (it.triggers || []).find((x) => x && low.includes(String(x).toLowerCase()));
     if (!trig) continue;
-    hits.push({ it, trig, auto: it.origin === 'auto' && !String(it.reply || '').trim() });
+    hits.push({ it, trig, bg: !String(it.reply || '').trim() });
     if (hits.length >= 3) break;      // 一轮最多 3 条，别把提示塞成小作文
   }
   if (!hits.length) return '';
-  const lines = hits.map(({ it, trig, auto }) => {
+  const lines = hits.map(({ it, trig, bg }) => {
     const cond = it.when ? `（只在：${it.when}）` : '';
-    if (auto) {
+    if (bg) {
       if (!it.meaning) {
         return '· 群里常有人说「' + trig + '」（具体含义不详，别解释、别乱猜）——顺着用就行' + cond;
       }
-      return '· 群里常有人说「' + trig + '」，意思是：' + it.meaning + '（知道就好，顺着用，别解释梗）' + cond;
+      const src = it.origin === 'wiki' ? '（词库释义）' : '';
+      return '· 群里常有人说「' + trig + '」' + src + '，意思是：' + it.meaning + '（知道就好，顺着用，别解释梗、别硬套）' + cond;
     }
     if (it.fixed) {
       return '· 有人说「' + trig + '」时，必须原样接「' + it.reply + '」——这是群里的固定暗号，不许改写、不许换成自己的段子'
@@ -218,4 +222,6 @@ function echoReply(text) {
   return null;
 }
 
-module.exports = { FILE, list, add, addAuto, update, toggle, remove, hint, echoReply, splitTriggers, _reset: () => saveRaw([]) };
+// ⚠️ save 也导出：tools/meme-sync.js（导入模式）要用它做"原子写 + 备份"，
+//    别再自己写一份 fs 逻辑 —— 那样备份/原子性迟早漂移成两套。
+module.exports = { FILE, list, add, addAuto, update, toggle, remove, hint, echoReply, splitTriggers, save, _reset: () => saveRaw([]) };

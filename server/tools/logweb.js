@@ -31,6 +31,8 @@ const convo = require('./convo');        // 🆕 把原始日志翻译成人看�
 const settings = require('../settings'); // 🆕 面板可改的参数（白名单 + 密钥掩码）
 const qqapi = require('../qqapi');       // 🆕 2026-10-22 控制台「以机器人身份直发/撤回」
 const memes = require('../memes');       // 🆕 2026-10-22 群内梗库（命中才注入，0 额外调用）
+// 🆕 2026-11-19 导入模式：从 cnmeme.wiki 拉词条（= 用户在 AstrBot 里用的那个梗库源）
+const memeSync = require('./meme-sync');
 const qrpage = require('../qrpage');     // 🆕 「打开 QQ 名片」落地页（公开路由 /qr）
 const qrHits = new Map();                // /qr 的每 IP 限流计数
 
@@ -1106,6 +1108,37 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/memes') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ ok: true, items: memes.list() }));
+    return;
+  }
+  // 🆕 2026-11-19 导入模式：词库来源 / 条数 / 最后一次同步时间
+  if (url.pathname === '/api/memes/meta') {
+    let source = '', lastSync = '';
+    try {
+      const meta = memeSync.metaLoad();
+      source = meta.source || '';
+      lastSync = meta.lastSync || '';
+    } catch (e) { /* 读不到就返回空 */ }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, source, lastSync, total: memes.list().length, api: memeSync.API }));
+    return;
+  }
+  // 🆕 2026-11-19 「一键更新词库」：从 cnmeme.wiki 拉新词条并入（**不覆盖本地已有条目**）
+  //   ⚠️ 接口 limit 上限 30 条/页，所以按钮默认只拉 max 条（900），全量走 CLI：
+  //      node tools/meme-sync.js --all
+  if (url.pathname === '/api/memes/sync' && req.method === 'POST') {
+    let body = {};
+    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
+    const max = Math.max(30, Math.min(Number(body.max) || 900, 3000));
+    let r;
+    try {
+      r = await memeSync.sync({ max: max });
+    } catch (e) {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: '同步失败：' + e.message }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(r));
     return;
   }
   if (url.pathname === '/api/memes/save' && req.method === 'POST') {

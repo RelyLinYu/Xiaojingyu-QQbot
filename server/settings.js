@@ -133,7 +133,7 @@ const SPEC = {
   },
   // 🆕 2026-10-23 用户：「把梗库面板删掉，让bot自己加」⇒ 自动采集开关（0 调用频次挖掘 + 低频批量释义）
   memeAuto: {
-    type: 'runtime', key: 'memeAuto', label: '梗库自动学习（它自己从群聊里收集梗）', def: 1,
+    type: 'runtime', key: 'memeAuto', label: '梗库自动学习（旧模式，已改成词库导入，默认关）', def: 0,
     options: [
       { value: 1, label: '开（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度）' },
       { value: 0, label: '关（只用已有的梗）' },

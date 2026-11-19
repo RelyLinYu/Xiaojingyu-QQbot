@@ -723,6 +723,7 @@ const PAGE = (opts) => `<!doctype html>
   .memefixed.memecho { background:#1FA97A; }
   .memefixed.memauto { background:#E39A2D; }
   .memefixed.memmanual { background:#8B6CE0; }
+  .memefixed.memwiki { background:#2D7FF9; }
   .memecount { font-size:11px; color:var(--text-tertiary); margin-left:8px; font-variant-numeric:tabular-nums; }
   /* 自绘复选框（禁原生样式） */
   .chk { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--text-secondary); cursor:pointer; user-select:none; white-space:nowrap; }
@@ -1257,9 +1258,18 @@ const PAGE = (opts) => `<!doctype html>
   <!-- 🆕 2026-10-22 用户：想教会它圈内梗，但不能都写进人设 ⇒ 命中才注入的「梗库」 -->
   <!-- 🆕 2026-10-23 用户：「把梗库面板删掉，让bot自己加」⇒ 新增交给自动采集，这里只留 改 / 停用 / 删 -->
   <section data-page="memes">
-    <h2>群内梗库</h2>
-    <p class="hint">它会自己从群聊里收集梗（每攒 15 条消息、间隔 ≥5 分钟学一次，重启不丢进度），这里只负责 <b>改错、停用、删除</b>。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
-    <div class="card"><div id="memeList"><p class="hint">载入中…</p></div></div>
+    <h2>梗库（词库导入）</h2>
+    <!-- 🆕 2026-11-19 用户：「把那个梗库换成astbot那种导入的模式吧，然后沿用我在astrbot里用的梗库仓库」
+         ⇒ 词条来自 cnmeme.wiki（和 AstrBot 的 astrbot_plugin_memewiki 同源）；
+           导入**不覆盖**本地改过的条目；面板只负责改释义 / 停用 / 删除。 -->
+    <p class="hint">词条来自 <b id="memeSrc">cnmeme.wiki 公开词库</b>，和你在 AstrBot 里用的是同一个源；点下面按钮可增量拉新词条，<b>不会覆盖</b>你改过的条目。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
+    <div class="card">
+      <div class="exbar" style="margin:0 0 12px">
+        <button class="sm primary" type="button" onclick="memeSync()">一键更新词库</button>
+        <span id="memeStat" class="hint" style="margin:0">…</span>
+      </div>
+      <div id="memeList"><p class="hint">载入中…</p></div>
+    </div>
   </section>
 </main>
 <div id="toast" role="status" aria-live="polite"></div>
@@ -1625,7 +1635,7 @@ function renderSettings(s){
     interjectChance: '没被 @、也没命中关键词时，主动接话的概率；1 = 每次都接（会变吵）',
     submitEnabled: '关掉后 #tg 当普通聊天，不再是投稿指令',
     interjectEnabled: '关掉后没 @ 就完全不主动说话（群指令和私聊不受影响）',
-    memeAuto: '让它自己从群聊里收集梗（每 15 条/5 分钟学一次，重启不丢进度）；关掉后只用已有的',
+    memeAuto: '旧模式：让它自己从群聊里收集梗（每 15 条/5 分钟学一次）。现在梗库改成从 cnmeme.wiki 导入，这个开关默认关；要恢复自动采集再打开',
     linkParseEnabled: '关掉后群里贴链接不再自动回卡片',
     submitCooldownMin: '同一个群两次投稿之间至少隔多久（0 = 不限）',
     imgCooldownSec: '同一个群两次要图之间至少隔多久（0 = 不限；主人不受限）',
@@ -2544,18 +2554,23 @@ function memeApi(path, opt) {
 function memeRender(items) {
   var box = document.getElementById('memeList');
   if (!box) return;
-  if (!items || !items.length) { box.innerHTML = '<p class="hint" style="margin:0">梗库还是空的 —— 它会在群聊里自动收集，攒够就出现了。</p>'; return; }
+  if (!items || !items.length) { box.innerHTML = '<p class="hint" style="margin:0">梗库还是空的 —— 点上面的「一键更新词库」从 cnmeme.wiki 拉一批进来。</p>'; return; }
+  // 🆕 2026-11-19：wiki = 词库导入（只有释义、没有接法），也要能改释义/停用/删除
   box.innerHTML = items.map(function (it) {
     var trig = (it.triggers || []).map(function (t) { return '<span class="memetrigger">' + esc(t) + '</span>'; }).join(' ');
     var when = it.when ? '<div class="memewhen">只在：' + esc(it.when) + '</div>' : '';
     var on = it.enabled !== false;
     var auto = it.origin === 'auto';
-    var badge = auto ? '<span class="memefixed memauto">自动</span>'
-      : (it.fixed ? '<span class="memefixed">固定</span>' : (it.echo ? '<span class="memefixed memecho">镜像</span>' : '<span class="memefixed memmanual">手动</span>'));
-    var shown = auto ? String(it.meaning || '')
-      : (it.echo ? (it.from + '→' + it.to) : String(it.reply || '').replace(/\s*[|｜]\s*/g, ' / '));
+    var wiki = it.origin === 'wiki';
+    var badge = wiki ? '<span class="memefixed memwiki">词库</span>'
+      : (auto ? '<span class="memefixed memauto">自动</span>'
+        : (it.fixed ? '<span class="memefixed">固定</span>' : (it.echo ? '<span class="memefixed memecho">镜像</span>' : '<span class="memefixed memmanual">手动</span>')));
+    var bg = auto || wiki;                      // 没有接法 = 只当背景知识
+    var shown = wiki ? String(it.meaning || '')
+      : (auto ? String(it.meaning || '')
+        : (it.echo ? (it.from + '→' + it.to) : String(it.reply || '').replace(/\s*[|｜]\s*/g, ' / ')));
     var meta = auto && it.count ? '<span class="memecount">出现 ' + esc(String(it.count)) + ' 次</span>' : '';
-    var field = auto ? 'meaning' : 'reply';
+    var field = bg ? 'meaning' : 'reply';
     return '<div class="memerow"><div class="memetxt">' + badge + trig + meta
       + (shown ? '<div class="memereply">' + esc(shown) + '</div>' : '') + when + '</div>'
       + '<div class="memeacts">'
@@ -2564,6 +2579,29 @@ function memeRender(items) {
       + '<button class="sm" type="button" data-memedel="' + esc(it.id) + '">删除</button>'
       + '</div></div>';
   }).join('');
+}
+// 🆕 2026-11-19 导入模式：词库来源 / 条数 / 最后同步时间
+function memeMeta() {
+  memeApi('/api/memes/meta').then(function (j) {
+    var s = document.getElementById('memeStat');
+    if (!s || !j) return;
+    var src = document.getElementById('memeSrc');
+    if (src && j.source) src.textContent = j.source;
+    var when = j.lastSync ? new Date(j.lastSync).toLocaleString('zh-CN') : '还没同步过';
+    s.textContent = '共 ' + (j.total || 0) + ' 条 · 最后同步 ' + when;
+  }).catch(function () {});
+}
+// 🆕 2026-11-19 「一键更新词库」：从 cnmeme.wiki 增量拉，服务端合并（不覆盖本地修改）
+function memeSync() {
+  var s = document.getElementById('memeStat');
+  if (s) s.textContent = '正在从词库拉取…（几十秒，别关页面）';
+  memeApi('/api/memes/sync', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ max: 300 }),
+  }).then(function (j) {
+    if (j && j.ok) { toast('✅ 新增 ' + j.added + ' 条（跳过重复 ' + j.skipped + '）'); memeLoad(); memeMeta(); }
+    else { toast('❌ ' + ((j && j.why) || '同步失败')); memeMeta(); }
+  }).catch(function (e) { toast('❌ ' + e.message); memeMeta(); });
 }
 function memeLoad() {
   memeApi('/api/memes').then(function (j) { memeRender(j && j.items); }).catch(function () {});
@@ -2612,7 +2650,7 @@ document.addEventListener('click', function (ev) {
     });
   }
 });
-if (document.getElementById('memeList')) memeLoad();
+if (document.getElementById('memeList')) { memeLoad(); memeMeta(); }
 
 initPages();
 
