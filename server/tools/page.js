@@ -806,7 +806,17 @@ const PAGE = (opts) => `<!doctype html>
   [data-theme="dark"] #budget .card:nth-child(5) { background:#122629; border-color:#1E3437; }
   [data-theme="dark"] #budget .card:nth-child(6) { background:#1D1D22; border-color:#2B2B31; }
   /* 🆕 2026-10-22 骨架屏（用户：「加载动画用骨架屏懂不懂？」）——纯色块呼吸，不用渐变 */
-  .sk { background:var(--skeleton); border-radius:10px; animation:skPulse 1.25s ease-in-out infinite; }
+  /* 🔴 2026-10-31：.sk 从 **pulse 呼吸**改成**扫光**。
+     依据 docs/sl交互+Astr动效skill.md：「呼吸感读作卡住了，扫光才读作正在加载」。
+     现在 .sk 只剩图库/梗库/直发三块在用（主面板改走三段式骨架，见 skBegin）。
+     ⚠️ 本文件是模板字符串：注释里**绝对不能出现反引号**（今天又踩了一次，被 require 时炸出来）。 */
+  .sk { background:var(--skeleton); border-radius:10px; position:relative; overflow:hidden; }
+  .sk::after { content:''; position:absolute; inset:0;
+    background:linear-gradient(90deg, rgba(255,255,255,0) 25%, rgba(255,255,255,.16) 37%, rgba(255,255,255,0) 63%);
+    background-size:400% 100%; animation:skShimmer 1.2s ease-in-out infinite; }
+  [data-theme="light"] .sk::after {
+    background:linear-gradient(90deg, rgba(0,0,0,0) 25%, rgba(0,0,0,.12) 37%, rgba(0,0,0,0) 63%);
+    background-size:400% 100%; }
   @keyframes skPulse { 0%,100% { opacity:.45; } 50% { opacity:1; } }
   /* 🆕 2026-10-22 用户：「颜色就概况那几张小卡片改了，其他还是纯白色」⇒ 每页每个分区循环上淡色 */
   .tint-1 { --tint:#EAF2FF; --tint-line:#D3E2FA; }
@@ -926,6 +936,44 @@ const PAGE = (opts) => `<!doctype html>
   @media (max-width:760px) {
     [data-theme="dark"] .card, [data-theme="dark"] details,
     [data-theme="dark"] .card2, [data-theme="dark"] .ilcard { -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); }
+  }
+
+  /* ============================================================
+     ★ 2026-10-31 三段式加载骨架（照 SnowLuma 的 useSkeletonSwap 抄的）
+     参数：delay 120ms（不到 120ms 什么都不显示）· minVisible 380ms（骨架一旦出现至少留这么久）
+           · crossfade 240ms（骨架→内容，禁止瞬切）· 容器预留高度（不许跳版）。
+     为什么值得做：本地/缓存命中的接口通常 <100ms，先出骨架会"闪一下"，比没有 loading 更难受；
+     而慢的时候骨架只活一帧同样难受 ⇒ 这三段必须同时成立。
+     ⚠️ 只用 CSS 与 DOM 包裹，不改任何取数逻辑：宿主的 innerHTML 照旧写，包裹层在它外面。
+     ============================================================ */
+  :root { --sk-delay:120ms; --sk-min:380ms; --sk-fade:240ms; }
+  .skbox { position:relative; }
+  /* 骨架遮罩：盖在宿主上方（宿主自身淡出），两层各自淡入淡出 = 交叉溶解 */
+  .skover { position:absolute; inset:0; z-index:2; pointer-events:none;
+    opacity:0; transition:opacity var(--sk-fade) ease; }
+  .sk-host { transition:opacity var(--sk-fade) ease; }
+  .skbox.sk-wait > .sk-host { opacity:0; }
+  /* 骨架条：窄光带 25%~63% + bg-size 400% + 1.2s ease-in-out（不是 pulse 呼吸） */
+  .skline { display:block; height:12px; border-radius:5px; position:relative; overflow:hidden;
+    background:rgba(255,255,255,.07); margin:0 0 9px; }
+  [data-theme="light"] .skline { background:rgba(0,0,0,.07); }
+  .skline::after { content:''; position:absolute; inset:0;
+    background:linear-gradient(90deg, rgba(255,255,255,.06) 25%, rgba(255,255,255,.17) 37%, rgba(255,255,255,.06) 63%);
+    background-size:400% 100%; animation:skShimmer 1.2s ease-in-out infinite; }
+  [data-theme="light"] .skline::after {
+    background:linear-gradient(90deg, rgba(0,0,0,.05) 25%, rgba(0,0,0,.13) 37%, rgba(0,0,0,.05) 63%);
+    background-size:400% 100%; }
+  @keyframes skShimmer { from { background-position:100% 0 } to { background-position:0 0 } }
+  .skline.skhead { height:26px; width:48%; border-radius:7px; margin-bottom:14px; }
+  /* 额度区骨架：和真内容一样是"一行卡片"（高度/间距照抄），加载前后不跳版 */
+  .skrow { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }
+  .skline.skcard { height:95px; width:auto; margin:0; border-radius:12px; }
+  @media (max-width:900px) { .skrow { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+  @media (max-width:620px) { .skrow { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  /* 尊重系统"减少动效" */
+  @media (prefers-reduced-motion: reduce) {
+    .skline::after { animation:none; }
+    .skover, .sk-host { transition:none; }
   }
 </style></head>
 <body>
@@ -1336,6 +1384,82 @@ function showErr(msg){
 }
 function mark(id, txt){ const el = document.getElementById(id); if (el) el.textContent = txt; }
 
+// ===== 🆕 2026-10-31 三段式加载骨架（SnowLuma useSkeletonSwap 的三条时序）=====
+// ⚠️ 这段在 PAGE 模板里：**不许出现反引号**；正则/换行的反斜杠要写两遍。
+//   delay 120ms 之前什么都不显示 → 超过才出骨架 → 骨架至少活 380ms → 内容 240ms 淡入。
+//   实现方式：在宿主外层套一个 .skbox，骨架是**绝对定位的兄弟层**，宿主自己淡出/淡入。
+//   好处：宿主里的 innerHTML 照旧被各 render 函数整块覆盖，不用改任何取数/渲染逻辑。
+var SK_DELAY = 120, SK_MIN = 380, SK_FADE = 240;
+var skMap = {};
+function skNow() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+function skHtml(n, kind) {
+  var w = [100, 93, 97, 88, 95, 91];
+  // kind === 'cards'：额度区是**一行卡片**，骨架也得是一行卡片（用几根文字条会把高度估高 30px，
+  //   加载完页面往上抽一下——这正是 CLS，所以形状要照着真内容画）
+  if (kind === 'cards') {
+    var cards = '';
+    for (var c = 0; c < n; c++) cards += '<i class="skline skcard"></i>';
+    return '<div class="skrow">' + cards + '</div>';
+  }
+  var out = '<i class="skline skhead"></i>';
+  for (var i = 0; i < n; i++) out += '<i class="skline" style="width:' + (i === n - 1 ? 62 : w[i % 6]) + '%"></i>';
+  return out;
+}
+function skBegin(id, minH, lines, kind) {
+  var el = document.getElementById(id);
+  if (!el || skMap[id]) return;
+  // ⚠️ test-brain 里有 DOM 桩：getElementById 可能返回"半个元素"（没有 getAttribute/classList），
+  //    自测跑到这里会 TypeError ⇒ 所有 DOM 能力都先判存在再用，缺就当没骨架，绝不能崩主流程。
+  var doneFlag = (typeof el.getAttribute === 'function') ? el.getAttribute('data-sk-done') : null;
+  if (doneFlag === '1') return;                          // 已经有内容：不再闪骨架
+  var parent = el.parentNode;
+  if (!parent || typeof document.createElement !== 'function' || !parent.appendChild) return;
+  if (!parent.classList || !parent.classList.contains('skbox')) {
+    var box = document.createElement('div');
+    box.className = 'skbox';
+    parent.insertBefore(box, el);
+    box.appendChild(el);
+    parent = box;
+  }  parent.classList.add('sk-wait');
+  if (el.classList) el.classList.add('sk-host');
+  var over = document.createElement('div');
+  over.className = 'skover';
+  over.innerHTML = skHtml(lines || 5, kind);
+  parent.appendChild(over);
+  var st = { el: el, box: parent, over: over, shownAt: 0, minH: minH || 120, timer: null };
+  st.timer = setTimeout(function () {
+    st.timer = null;
+    st.shownAt = skNow();
+    el.style.minHeight = st.minH + 'px';     // 预留高度：加载前后不跳版
+    over.style.opacity = '1';
+  }, SK_DELAY);
+  skMap[id] = st;
+}
+function skEnd(id, write) {
+  var st = skMap[id];
+  if (!st) { try { if (write) write(); } catch (e) {} return Promise.resolve(); }
+  delete skMap[id];
+  if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+  var wait = st.shownAt ? Math.max(0, SK_MIN - (skNow() - st.shownAt)) : 0;   // 骨架最短存活
+  return new Promise(function (res) {
+    setTimeout(function () {
+      try { if (write) write(); } catch (e) { console.error('[sk] 渲染失败', e); }
+      if (st.box.classList) st.box.classList.remove('sk-wait');
+      st.over.style.opacity = '0';
+      setTimeout(function () {
+        if (st.over.parentNode) st.over.parentNode.removeChild(st.over);
+        st.el.style.minHeight = '';
+        if (write && typeof st.el.setAttribute === 'function') st.el.setAttribute('data-sk-done', '1');
+        res();
+      }, SK_FADE);
+    }, wait);
+  });
+}
+function skAbort() {   // 取数失败：把骨架收掉，别让页面永远停在骨架上
+  var ids = Object.keys(skMap);
+  for (var i = 0; i < ids.length; i++) skEnd(ids[i], null);
+}
+
 async function load(){
   // ⚠️ 这里**故意不调用 mark/showErr** —— 直接操作 DOM。
   //    原因：万一辅助函数有问题，会导致"load 第一行就抛错、连请求都发不出去"（真实踩过）。
@@ -1346,6 +1470,12 @@ async function load(){
   setErr('');
   if (_upd) _upd.textContent = '加载中…';
   if (_build) _build.textContent = 'v…';
+  // 🆕 骨架计时从**请求发出前**开始算（120ms 的判据是"这条路有多慢"，不是"渲染有多慢"）
+  // 预留高度按**实测真内容**给的（截图量的）：额度卡一行 ≈95px、趋势图绘图区 ≈155px，
+  // 差太多就是"骨架 150 高、内容 95 高"⇒ 加载完页面往上抽一下（CLS），所以必须贴着真值给。
+  skBegin('budget', 95, 5, 'cards');
+  skBegin('settings', 420, 8);
+  skBegin('convos', 300, 5);
   try {
     const r = await fetch('/api/state?p=' + encodeURIComponent(P));
     if (!r.ok) throw new Error('服务器返回 ' + r.status + (r.status === 401 ? '（密码不对或 cookie 过期）' : ''));
@@ -1366,18 +1496,23 @@ async function load(){
     document.getElementById('pwstate').className = 'pwstate' + (pw.on ? '' : ' warn');
 
     // 每一步单独兜底 —— 某一块出错不该让整页变成空白（之前就是这样，还只弹了个会消失的提示）
-    try { renderBudget(j.budget, j.vision, j.disk); } catch (e) { setErr('额度渲染失败：' + e.message); }
+    // 🆕 2026-10-31：渲染改成"等骨架满 380ms 再写内容"，写进去的同时宿主淡入、骨架淡出（交叉溶解）
+    try { await skEnd('budget', function () { renderBudget(j.budget, j.vision, j.disk); }); }
+    catch (e) { setErr('额度渲染失败：' + e.message); }
     // 🆕 2026-10-07：额度一变，趋势图的黄/红阈值与那段说明里的数字也跟着变
     //    （用户原话「这 1600 不会跟着改」—— 写死的上限比没有上限更误导人）
     try { applyLimits(j.budget); loadUsage(lastUsageDays); } catch (e) { /* 不影响其它区块 */ }
-    try { renderSettings(j.settings); } catch (e) { setErr('设置渲染失败：' + e.message); }
+    try { await skEnd('settings', function () { renderSettings(j.settings); }); }
+    catch (e) { setErr('设置渲染失败：' + e.message); }
     try { refreshExampleHint(); } catch (e) { /* 示范还没加载完也不影响别的 */ }
-    try { renderGroups(j.convos, j.power); } catch (e) { setErr('对话渲染失败：' + e.message); }
+    try { await skEnd('convos', function () { renderGroups(j.convos, j.power); }); }
+    catch (e) { setErr('对话渲染失败：' + e.message); }
     try { document.getElementById('log').textContent = j.log || '(空)'; } catch (e) {}
     if (_build) _build.textContent = 'v' + (j.build || '?');
     const n = (j.convos || []).length;
     if (_upd) _upd.textContent = '更新 ' + new Date().toLocaleTimeString('zh-CN') + (n ? '' : '（0 条对话）');
   } catch (err) {
+    skAbort();                                  // ⚠️ 取数失败必须收掉骨架，否则页面永远停在骨架上
     setErr('取数据失败：' + err.message);
     if (_upd) _upd.textContent = '失败';
     toast('取数据失败：' + err.message);
@@ -1796,26 +1931,16 @@ async function sandboxSend(){
   }
 }
 
-// 🆕 2026-10-22 骨架屏：真实数据回来之前，先把**版面骨架**摆出来（而不是几个空框）
+// 🆕 2026-10-22 骨架屏（初期版）
+// 🔴 2026-10-31 改：**主面板三块（额度 / 趋势 / 设置）从这里撤掉**，改由三段式骨架接管（见 skBegin）。
+//   原因（照 docs/sl交互+Astr动效skill.md 的反模式）：原来 renderSkeletons() 是**页面一打开就填**，
+//   而且用的是 .sk 的 pulse 呼吸 —— ① 接口 100ms 内就回来时会"闪一下"，比不显示更难受；
+//   ② 呼吸感读作"卡住了"，扫光才读作"正在加载"。
+//   ⇒ 主面板改走：120ms 前什么都不显示 / 过了才出扫光骨架 / 至少活 380ms / 内容 240ms 淡入。
+//   ⚠️ 图库 / 梗库 / 直发这三块**保留**（它们是用户点开那一页才 load，且数据量大、本来就慢），
+//      但样式统一从 pulse 换成扫光（.sk 的 animation 已改）。
 function renderSkeletons() {
   var i, h;
-  var b = document.getElementById('budget');
-  if (b) {
-    h = '';
-    for (i = 0; i < 6; i++) {
-      h += '<div class="card"><div class="sk" style="height:24px;width:55%;margin-bottom:10px"></div>'
-        + '<div class="sk" style="height:11px;width:75%"></div></div>';
-    }
-    b.innerHTML = h;
-  }
-  var c = document.getElementById('useChart');
-  if (c) c.innerHTML = '<div class="sk" style="height:210px"></div>';
-  var st = document.getElementById('settings');
-  if (st) {
-    h = '';
-    for (i = 0; i < 4; i++) h += '<div class="sk" style="height:52px;margin:10px 0"></div>';
-    st.innerHTML = h;
-  }
   var g = document.getElementById('ilGrid');
   if (g) {
     h = '';
@@ -2114,16 +2239,18 @@ function renderUsage(days) {
 
 async function loadUsage(n) {
   lastUsageDays = Number(n) || lastUsageDays || 14;      // 记住用户选的区间（额度刷新时原样重画）
+  skBegin('useChart', 157, 5);                           // 🆕 柱状图也走三段式骨架
   try {
     var r = await fetch('/api/usage?days=' + lastUsageDays + '&p=' + encodeURIComponent(P));
     var j = await r.json();
-    renderUsage(j.days || []);
+    await skEnd('useChart', function () { renderUsage(j.days || []); });
     var sum = 0;
     (j.days || []).forEach(function (d) { sum += d.calls; });
     var note = document.getElementById('useNote');
     // 🆕 2026-10-23 用户：「这个花的钱删掉」⇒ 只留调用次数（金额看下面的额度卡/官方账单）
     if (note) note.textContent = '这 ' + (j.days || []).length + ' 天：' + sum + ' 次调用';
   } catch (e) {
+    skAbort();
     var el = document.getElementById('useChart');
     if (el) el.innerHTML = '<p class="hint">读取失败：' + esc(e.message) + '</p>';
   }

@@ -62,6 +62,36 @@ for (const rel of files.sort()) {
 }
 
 console.log('════════════════════════════════════════════════════════');
+// ============================================================
+// 🆕 2026-10-31 「模板内不许出现反引号」专项（已经被咬过三次）
+//   为什么 node --check 抓不到：page.js 是 const PAGE = (opts) => 反引号…反引号 的模板字符串，
+//   注释里多写一个反引号会**提前截断模板** —— 文件照样能解析（语法没错），但 require 出来的
+//   PAGE 已经不是函数 / 渲染内容错乱，线上表现是白屏或区块错位这种最难查的形态。
+//   ⇒ 必须**数**：PAGE 模板开头到结尾之间，反引号个数必须为 0。
+// ============================================================
+(function checkTemplateBackticks() {
+  const target = path.join(ROOT, 'server', 'tools', 'page.js');
+  if (!fs.existsSync(target)) return;
+  const s = fs.readFileSync(target, 'utf8');
+  const start = s.indexOf('=> `');
+  const end = s.lastIndexOf('`;');
+  if (start < 0 || end < 0 || end <= start) {
+    console.log('  ⚠️ 没找到 PAGE 模板边界（模板结构变了？这条检查要同步改）');
+    return;
+  }
+  const body = s.slice(start + 4, end);
+  const marks = body.match(/`/g) || [];
+  if (marks.length) {
+    const at = start + 4 + body.indexOf('`');
+    const line = s.slice(0, at).split('\n').length;
+    console.log('  ❌ server/tools/page.js 模板内部出现 ' + marks.length + ' 个反引号（第 ' + line + ' 行附近）—— 会把模板截断');
+    console.log('     改法：注释里别用反引号，换成「」或直接写名字');
+    process.exit(1);
+  }
+  console.log('  ✅ page.js 模板内部没有裸反引号');
+})();
+
+console.log('════════════════════════════════════════════════════════');
 if (bad) {
   console.log(` ❌ 有 ${bad} 个文件语法错误 —— **不要部署**，先修好`);
   process.exit(1);

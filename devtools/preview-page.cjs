@@ -175,6 +175,17 @@ function stubFetch(html) {
     } catch (e) {}
     return Promise.resolve({ ok:true, status:200, json:function(){ return Promise.resolve({ ok:true }); } });
   };
+  // 🆕 2026-10-31：可选**人为延迟**（PREVIEW_LATENCY=800），用来验"三段式骨架"——
+  //   不延迟的话本地桩数据 0ms 返回，骨架按设计根本不该出现，等于验不了。
+  var LAT = Number(${JSON.stringify(Number(process.env.PREVIEW_LATENCY || 0))}) || 0;
+  if (LAT > 0) {
+    var _rawFetch = window.fetch;
+    window.fetch = function (u, o) {
+      return new Promise(function (res) {
+        setTimeout(function () { res(_rawFetch(u, o)); }, LAT);
+      });
+    };
+  }
 })();
 </script>
 `;
