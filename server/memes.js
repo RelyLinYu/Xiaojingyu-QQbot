@@ -22,12 +22,59 @@ const path = require('path');
 const APP_DIR = process.env.APP_DIR || __dirname;
 const FILE = path.join(APP_DIR, 'data', 'memes.json');
 
+// 🆕 2026-11-19 导入 6791 条词库后实测：**每条消息**都读一遍 5.5MB JSON ≈ 55~65ms
+//   （读文件 36ms + JSON.parse 19ms），消息一多就把事件循环堵住。
+//   ⇒ 加一层**带失效条件的缓存**：mtime+size 变了才重读（按项目纪律：缓存必须有失效条件，
+//     "靠重启才更新"就是静默雷）。导入走 memes.save()，那里会主动把缓存清掉。
+let _cache = { mtimeMs: 0, size: 0, items: null, index: null };
+
+// 按触发词的**首字**建索引：`low.includes(trigger)` 成立的必要条件就是首字在消息里，
+// 所以只扫"消息里出现过的首字"那一撮条目即可 —— 6791 条时把 6~7ms/条 压到 <1ms。
+function buildIndex(items) {
+  const idx = new Map();
+  for (const it of items) {
+    if (!it || it.enabled === false) continue;
+    for (const t of (it.triggers || [])) {
+      const k = String(t || '').toLowerCase().charAt(0);
+      if (!k) continue;
+      if (!idx.has(k)) idx.set(k, []);
+      idx.get(k).push(it);
+    }
+  }
+  return idx;
+}
+
 function load() {
   try {
+    const st = fs.statSync(FILE);
+    if (_cache.items && _cache.mtimeMs === st.mtimeMs && _cache.size === st.size) return _cache.items;
     const j = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-    if (Array.isArray(j.items)) return j.items;
-    return [];
-  } catch { return []; }
+    const items = Array.isArray(j.items) ? j.items : [];
+    _cache = { mtimeMs: st.mtimeMs, size: st.size, items, index: buildIndex(items) };
+    return items;
+  } catch {
+    // 读失败：用上一次成功的缓存；一次都没成功过就当空库（绝不回写）
+    return _cache.items || [];
+  }
+}
+
+// 取"可能命中"的条目（按首字索引去重）
+function candidates(text) {
+  const low = String(text || '').toLowerCase();
+  const idx = _cache.index;
+  if (!idx) return load().filter((x) => x && x.enabled !== false);
+  const seen = new Set();
+  const out = [];
+  for (const ch of low) {
+    const arr = idx.get(ch);
+    if (!arr) continue;
+    for (const it of arr) {
+      if (seen.has(it)) continue;
+      seen.add(it);
+      out.push(it);
+    }
+  }
+  return out;
 }
 
 function saveRaw(items) {
@@ -43,6 +90,7 @@ function backup() {
 function save(items) {
   backup();
   saveRaw(items);
+  _cache = { mtimeMs: 0, size: 0, items: null };   // 写完立刻失效，别让别的进程/本进程读到旧缓存
   return { ok: true };
 }
 
@@ -171,7 +219,7 @@ function hint(text) {
   // 🆕 2026-11-19 导入模式：wiki 条目一律"只当背景知识"，绝不能进"可以接"那条分支
   //   （它没有接法，掉进去就会渲染出一句「可以接：」后面空着 —— 实测抓到的 bug）
   const rank = (x) => (String(x.reply || '').trim() ? 0 : (x.origin === 'wiki' ? 1 : 2));
-  const all = load().filter((x) => x && x.enabled !== false && !x.echo);
+  const all = candidates(t).filter((x) => x && x.enabled !== false && !x.echo);
   const ordered = all.slice().sort((a, b) => (rank(a) - rank(b))
     || ((Number(b.count) || 0) - (Number(a.count) || 0)));
   for (const it of ordered) {
