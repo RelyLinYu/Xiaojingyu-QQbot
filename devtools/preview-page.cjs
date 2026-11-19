@@ -163,6 +163,16 @@ function stubFetch(html) {
       // 🆕 2026-10-11：POST /api/settings 也桩住（否则 file:// 下真 fetch 失败，看不到"已保存"提示）
       // 🆕 2026-11-19 梗库 meta 桩数据：不桩的话会落到 real fetch，file:// 下直接 Failed to fetch，
       //   状态行永远停在「…」——之前就这么把自己骗过去了。
+      if (url === '/api/memes/list') {
+        var sample = [
+          { triggers:['尼罗河二圣','河马'], meaning:'网友对河马和尼罗鳄的调侃称呼。', origin:'wiki', enabled:true },
+          { triggers:['恶意图'], meaning:'指用梗图刷屏的整活。', origin:'wiki', enabled:true },
+          { triggers:['久留美的小曲'], meaning:'B站整活视频里的配乐梗。', origin:'wiki', enabled:true }
+        ];
+        var lst = { ok:true, total:6791, all:6791, offset:0, items:sample };
+        return Promise.resolve({ ok:true, status:200, json:function(){ return Promise.resolve(lst); },
+                                 text:function(){ return Promise.resolve(JSON.stringify(lst)); } });
+      }
       if (url === '/api/memes/meta') {
         var metaMock = { ok:true, source:'file:astrbot-memewiki.json', lastImport:'2026-11-19T08:32:46.801Z', total:6791 };
         return Promise.resolve({ ok:true, status:200, json:function(){ return Promise.resolve(metaMock); },

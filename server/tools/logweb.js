@@ -1119,6 +1119,24 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ ok: true, source, lastImport, total: memes.list().length }));
     return;
   }
+  // 🆕 2026-11-19 用户：「我以为下面会有显示列出来每一条」⇒ 补一个**只读**列表（能看，不能改）。
+  //   q= 关键词（在触发词/释义里做子串匹配），offset/limit 分页；只读，没有任何写接口。
+  if (url.pathname === '/api/memes/list') {
+    const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 50, 1), 200);
+    const offset = Math.max(Number(url.searchParams.get('offset')) || 0, 0);
+    const all = memes.list();
+    const hit = q ? all.filter(function (it) {
+      const hay = (it.triggers || []).join(' ').toLowerCase() + ' ' + String(it.meaning || '').toLowerCase();
+      return hay.indexOf(q) >= 0;
+    }) : all;
+    const items = hit.slice(offset, offset + limit).map(function (it) {
+      return { triggers: it.triggers || [], meaning: String(it.meaning || ''), origin: it.origin || '', enabled: it.enabled !== false };
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ ok: true, total: hit.length, all: all.length, offset: offset, items: items }));
+    return;
+  }
   if (url.pathname === '/api/memes/import' && req.method === 'POST') {
     const name = String(url.searchParams.get('name') || 'meme-import.json').slice(0, 80);
     const raw = await new Promise((resolve) => {

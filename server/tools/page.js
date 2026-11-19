@@ -1270,6 +1270,15 @@ const PAGE = (opts) => `<!doctype html>
       <input id="memeFile" type="file" accept=".json,application/json" hidden>
       <p class="hint" id="memeStat" style="margin-top:12px">…</p>
     </div>
+    <!-- 🆕 2026-11-19 只读浏览：能看每一条，但没有任何新增/编辑/停用/删除按钮 -->
+    <div class="card" style="margin-top:16px">
+      <div class="exbar" style="margin:0 0 12px">
+        <input type="search" id="memeQ" placeholder="搜触发词或释义（只读）" style="flex:1;min-width:200px">
+        <span id="memeCount" class="hint" style="margin:0"></span>
+      </div>
+      <div id="memeRows"><p class="hint" style="margin:0">载入中…</p></div>
+      <div class="exbar" style="margin-top:12px"><button class="sm" type="button" onclick="memeMore()" id="memeMoreBtn">加载更多</button></div>
+    </div>
   </section>
 </main>
 <div id="toast" role="status" aria-live="polite"></div>
@@ -2571,6 +2580,49 @@ function memeMeta() {
 // 🆕 2026-11-19 用户：「我的意思是改成astrbot那种完全靠导入的，禁止增删改查之类的，就是用文件导入的方式」
 //   ⇒ 面板里**没有增/删/改/浏览**，只有一个动作：导入一个文件（整库替换，导入前自动备份）。
 //     所以原来的 memeRender / memeLoad / 编辑 / 停用 / 删除 全部移除。
+// 🆕 2026-11-19 只读列表：能看见每一条词条，但没有任何写操作（用户要的是"能看"，不是"能改"）
+var MEME_PAGE = { q: "", offset: 0, size: 50, total: 0, busy: false };
+function memeRows(items) {
+  var box = document.getElementById("memeRows");
+  if (!box) return;
+  if (!items.length) { box.innerHTML = '<p class="hint" style="margin:0">没有匹配的词条</p>'; return; }
+  box.innerHTML = items.map(function (it) {
+    var trig = (it.triggers || []).map(function (t) { return '<span class="memetrigger">' + esc(t) + "</span>"; }).join(" ");
+    var off = it.enabled === false ? ' <span class="tag no">已停用</span>' : "";
+    var m = it.meaning ? '<div class="memereply">' + esc(it.meaning) + "</div>" : "";
+    return '<div class="memerow"><div class="memetxt">' + trig + off + m + "</div></div>";
+  }).join("");
+}
+function memeLoad(reset) {
+  if (MEME_PAGE.busy) return;
+  MEME_PAGE.busy = true;
+  if (reset) { MEME_PAGE.offset = 0; }
+  var box = document.getElementById("memeRows");
+  if (reset && box) box.innerHTML = '<p class="hint" style="margin:0">载入中…</p>';
+  fetch("/api/memes/list?q=" + encodeURIComponent(MEME_PAGE.q) + "&offset=" + MEME_PAGE.offset + "&limit=" + MEME_PAGE.size + "&p=" + encodeURIComponent(P))
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      MEME_PAGE.busy = false;
+      if (!j || !j.ok) return;
+      MEME_PAGE.total = j.total;
+      MEME_PAGE.offset += (j.items || []).length;
+      if (reset) memeRows(j.items || []);
+      else {
+        var b = document.getElementById("memeRows");
+        if (b) b.insertAdjacentHTML("beforeend", (j.items || []).map(function (it) {
+          var trig = (it.triggers || []).map(function (t) { return '<span class="memetrigger">' + esc(t) + "</span>"; }).join(" ");
+          var m = it.meaning ? '<div class="memereply">' + esc(it.meaning) + "</div>" : "";
+          return '<div class="memerow"><div class="memetxt">' + trig + m + "</div></div>";
+        }).join(""));
+      }
+      var c = document.getElementById("memeCount");
+      if (c) c.textContent = "共 " + j.total + " 条" + (MEME_PAGE.q ? "（关键词：" + MEME_PAGE.q + "）" : "") + " · 已显示 " + MEME_PAGE.offset;
+      var btn = document.getElementById("memeMoreBtn");
+      if (btn) btn.style.display = MEME_PAGE.offset >= j.total ? "none" : "";
+    })
+    .catch(function () { MEME_PAGE.busy = false; });
+}
+function memeMore() { memeLoad(false); }
 function memePick() {
   var f = document.getElementById('memeFile');
   if (f) f.click();
@@ -2618,6 +2670,16 @@ document.addEventListener('keydown', function (ev) {
   });
 })();
 if (document.getElementById('memeStat')) memeMeta();
+if (document.getElementById('memeRows')) memeLoad(true);
+(function bindMemeSearch() {
+  var q = document.getElementById('memeQ');
+  if (!q) return;
+  var timer = null;
+  q.addEventListener('input', function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () { MEME_PAGE.q = (q.value || '').trim(); memeLoad(true); }, 260);
+  });
+})();
 
 initPages();
 
