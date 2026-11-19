@@ -1099,81 +1099,52 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ===== 🆕 2026-10-22 群内梗库 =====
-  //   GET  /api/memes           → 列表
-  //   POST /api/memes/save      {trigger reply when} → 新增/更新（同触发词自动覆盖）
-  //   POST /api/memes/toggle    {id, enabled}
-  //   POST /api/memes/delete    {id}
-  //  ⚠️ 只存"提示"，不存固定台词；注入走 user 文本，不动 system 前缀。
-  if (url.pathname === '/api/memes') {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ ok: true, items: memes.list() }));
-    return;
-  }
-  // 🆕 2026-11-19 导入模式：词库来源 / 条数 / 最后一次同步时间
+  // ===== 🆕 2026-11-19 梗库：**纯文件导入**（用户要求，禁止增删改查）=====
+  //   用户原话：「我的意思是改成astrbot那种完全靠导入的，禁止增删改查之类的，就是用文件导入的方式」
+  //   ⇒ 只留两个接口：
+  //      GET  /api/memes/meta    → 面板显示「多少条 / 上次什么时候导的」
+  //      POST /api/memes/import  → **裸文件体**（就是 .json 文件本身），?name= 文件名
+  //   导入语义 = **整库替换**（文件即事实来源）；替换前先把旧库备份成 data/meme-backup-*.json。
+  //   认两种格式：① cnmeme 原始导出 {items:[{title,aliases,summary,tags,keywords}]}
+  //               ② 本项目自己的 {items:[{triggers,reply,meaning}]}（或裸数组）
+  //   为什么不用 readBody：它有 64KB 上限，一个词库文件几 MB ⇒ 走流式收集（同图库上传）。
   if (url.pathname === '/api/memes/meta') {
-    let source = '', lastSync = '';
+    let source = '', lastImport = '';
     try {
       const meta = memeSync.metaLoad();
       source = meta.source || '';
-      lastSync = meta.lastSync || '';
+      lastImport = meta.lastImport || meta.lastSync || '';
     } catch (e) { /* 读不到就返回空 */ }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ ok: true, source, lastSync, total: memes.list().length, api: memeSync.API }));
+    res.end(JSON.stringify({ ok: true, source, lastImport, total: memes.list().length }));
     return;
   }
-  // 🆕 2026-11-19 「一键更新词库」：从 cnmeme.wiki 拉新词条并入（**不覆盖本地已有条目**）
-  //   ⚠️ 接口 limit 上限 30 条/页，所以按钮默认只拉 max 条（900），全量走 CLI：
-  //      node tools/meme-sync.js --all
-  if (url.pathname === '/api/memes/sync' && req.method === 'POST') {
-    let body = {};
-    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
-    const max = Math.max(30, Math.min(Number(body.max) || 900, 3000));
-    let r;
-    try {
-      r = await memeSync.sync({ max: max });
-    } catch (e) {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ ok: false, why: '同步失败：' + e.message }));
+  if (url.pathname === '/api/memes/import' && req.method === 'POST') {
+    const name = String(url.searchParams.get('name') || 'meme-import.json').slice(0, 80);
+    const raw = await new Promise((resolve) => {
+      const chunks = [];
+      let n = 0, dead = false;
+      req.on('data', (c) => {
+        n += c.length;
+        if (n > 32 * 1024 * 1024) { dead = true; req.destroy(); return; }
+        chunks.push(c);
+      });
+      req.on('end', () => resolve(dead ? null : Buffer.concat(chunks)));
+      req.on('error', () => resolve(null));
+    });
+    if (!raw) {
+      res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: '文件太大（超过 32MB）' }));
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(r));
-    return;
-  }
-  if (url.pathname === '/api/memes/save' && req.method === 'POST') {
-    let body = {};
-    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
-    const r = memes.add({ trigger: body.trigger, reply: body.reply, when: body.when, fixed: !!body.fixed });
+    let parsed = null;
+    try { parsed = JSON.parse(raw.toString('utf8')); } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, why: '不是合法 JSON：' + e.message.slice(0, 80) }));
+      return;
+    }
+    const r = memeSync.importFromJson(parsed, { name: name });
     res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(r));
-    return;
-  }
-  if (url.pathname === '/api/memes/edit' && req.method === 'POST') {
-    let body = {};
-    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
-    const patch = {};
-    if (body.meaning !== undefined) patch.meaning = body.meaning;
-    if (body.reply !== undefined) patch.reply = body.reply;
-    if (body.when !== undefined) patch.when = body.when;
-    const r = memes.update(String(body.id || ''), patch);
-    res.writeHead(r.ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(r));
-    return;
-  }
-  if (url.pathname === '/api/memes/toggle' && req.method === 'POST') {
-    let body = {};
-    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
-    const r = memes.toggle(String(body.id || ''), !!body.enabled);
-    res.writeHead(r.ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(r));
-    return;
-  }
-  if (url.pathname === '/api/memes/delete' && req.method === 'POST') {
-    let body = {};
-    try { body = JSON.parse((await readBody(req)) || '{}'); } catch { body = {}; }
-    const r = memes.remove(String(body.id || ''));
-    res.writeHead(r.ok ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(r));
     return;
   }

@@ -1258,17 +1258,17 @@ const PAGE = (opts) => `<!doctype html>
   <!-- 🆕 2026-10-22 用户：想教会它圈内梗，但不能都写进人设 ⇒ 命中才注入的「梗库」 -->
   <!-- 🆕 2026-10-23 用户：「把梗库面板删掉，让bot自己加」⇒ 新增交给自动采集，这里只留 改 / 停用 / 删 -->
   <section data-page="memes">
-    <h2>梗库（词库导入）</h2>
-    <!-- 🆕 2026-11-19 用户：「把那个梗库换成astbot那种导入的模式吧，然后沿用我在astrbot里用的梗库仓库」
-         ⇒ 词条来自 cnmeme.wiki（和 AstrBot 的 astrbot_plugin_memewiki 同源）；
-           导入**不覆盖**本地改过的条目；面板只负责改释义 / 停用 / 删除。 -->
-    <p class="hint">词条来自 <b id="memeSrc">cnmeme.wiki 公开词库</b>，和你在 AstrBot 里用的是同一个源；点下面按钮可增量拉新词条，<b>不会覆盖</b>你改过的条目。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
+    <h2>梗库（文件导入）</h2>
+    <!-- 🆕 2026-11-19 用户：「我的意思是改成astrbot那种完全靠导入的，禁止增删改查之类的，就是用文件导入的方式」
+         ⇒ 这个页面只做一件事：导入一个 JSON 文件，**整库替换**。没有增/删/改/浏览。 -->
+    <p class="hint">只有一个入口：<b>导入一个 JSON 文件</b>，导入即<b>整库替换</b>（旧库会自动备份到 <code>data/meme-backup-*.json</code>）。认两种文件：cnmeme 原始导出，或本项目自己的 <code>{"items":[…]}</code> 格式。梗只在消息里真的出现时才注入一句提示，平时不占任何 token。</p>
     <div class="card">
-      <div class="exbar" style="margin:0 0 12px">
-        <button class="sm primary" type="button" onclick="memeSync()">一键更新词库</button>
-        <span id="memeStat" class="hint" style="margin:0">…</span>
+      <div id="memeDrop" class="ildrop" role="button" tabindex="0" aria-label="选择词库 JSON 文件导入">
+        <b>点这里选词库文件</b>
+        <span>也可以直接把 .json 拖进来；导入后旧库自动备份，可随时改文件重新导入</span>
       </div>
-      <div id="memeList"><p class="hint">载入中…</p></div>
+      <input id="memeFile" type="file" accept=".json,application/json" hidden>
+      <p class="hint" id="memeStat" style="margin-top:12px">…</p>
     </div>
   </section>
 </main>
@@ -2551,35 +2551,6 @@ function memeApi(path, opt) {
   var u = path + (path.indexOf('?') >= 0 ? '&' : '?') + 'p=' + encodeURIComponent(P);
   return fetch(u, opt).then(function (r) { return r.json(); });
 }
-function memeRender(items) {
-  var box = document.getElementById('memeList');
-  if (!box) return;
-  if (!items || !items.length) { box.innerHTML = '<p class="hint" style="margin:0">梗库还是空的 —— 点上面的「一键更新词库」从 cnmeme.wiki 拉一批进来。</p>'; return; }
-  // 🆕 2026-11-19：wiki = 词库导入（只有释义、没有接法），也要能改释义/停用/删除
-  box.innerHTML = items.map(function (it) {
-    var trig = (it.triggers || []).map(function (t) { return '<span class="memetrigger">' + esc(t) + '</span>'; }).join(' ');
-    var when = it.when ? '<div class="memewhen">只在：' + esc(it.when) + '</div>' : '';
-    var on = it.enabled !== false;
-    var auto = it.origin === 'auto';
-    var wiki = it.origin === 'wiki';
-    var badge = wiki ? '<span class="memefixed memwiki">词库</span>'
-      : (auto ? '<span class="memefixed memauto">自动</span>'
-        : (it.fixed ? '<span class="memefixed">固定</span>' : (it.echo ? '<span class="memefixed memecho">镜像</span>' : '<span class="memefixed memmanual">手动</span>')));
-    var bg = auto || wiki;                      // 没有接法 = 只当背景知识
-    var shown = wiki ? String(it.meaning || '')
-      : (auto ? String(it.meaning || '')
-        : (it.echo ? (it.from + '→' + it.to) : String(it.reply || '').replace(/\s*[|｜]\s*/g, ' / ')));
-    var meta = auto && it.count ? '<span class="memecount">出现 ' + esc(String(it.count)) + ' 次</span>' : '';
-    var field = bg ? 'meaning' : 'reply';
-    return '<div class="memerow"><div class="memetxt">' + badge + trig + meta
-      + (shown ? '<div class="memereply">' + esc(shown) + '</div>' : '') + when + '</div>'
-      + '<div class="memeacts">'
-      + '<button class="sm" type="button" data-memeedit="' + esc(it.id) + '" data-field="' + field + '" data-cur="' + esc(shown) + '">编辑</button>'
-      + '<button class="sm" type="button" data-memetoggle="' + esc(it.id) + '" data-on="' + (on ? '1' : '0') + '">' + (on ? '停用' : '启用') + '</button>'
-      + '<button class="sm" type="button" data-memedel="' + esc(it.id) + '">删除</button>'
-      + '</div></div>';
-  }).join('');
-}
 // 🆕 2026-11-19 导入模式：词库来源 / 条数 / 最后同步时间
 function memeMeta() {
   memeApi('/api/memes/meta').then(function (j) {
@@ -2591,66 +2562,56 @@ function memeMeta() {
     s.textContent = '共 ' + (j.total || 0) + ' 条 · 最后同步 ' + when;
   }).catch(function () {});
 }
-// 🆕 2026-11-19 「一键更新词库」：从 cnmeme.wiki 增量拉，服务端合并（不覆盖本地修改）
-function memeSync() {
-  var s = document.getElementById('memeStat');
-  if (s) s.textContent = '正在从词库拉取…（几十秒，别关页面）';
-  memeApi('/api/memes/sync', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ max: 300 }),
-  }).then(function (j) {
-    if (j && j.ok) { toast('✅ 新增 ' + j.added + ' 条（跳过重复 ' + j.skipped + '）'); memeLoad(); memeMeta(); }
-    else { toast('❌ ' + ((j && j.why) || '同步失败')); memeMeta(); }
+// 🆕 2026-11-19 用户：「我的意思是改成astrbot那种完全靠导入的，禁止增删改查之类的，就是用文件导入的方式」
+//   ⇒ 面板里**没有增/删/改/浏览**，只有一个动作：导入一个文件（整库替换，导入前自动备份）。
+//     所以原来的 memeRender / memeLoad / 编辑 / 停用 / 删除 全部移除。
+function memePick() {
+  var f = document.getElementById('memeFile');
+  if (f) f.click();
+}
+function memeImport(file) {
+  if (!file) return;
+  var st = document.getElementById('memeStat');
+  if (st) st.textContent = '正在导入 ' + file.name + ' …';
+  fetch('/api/memes/import?name=' + encodeURIComponent(file.name) + '&p=' + encodeURIComponent(P), {
+    method: 'POST', body: file,
+  }).then(function (r) { return r.json(); }).then(function (j) {
+    if (j && j.ok) {
+      toast('✅ 已导入 ' + j.count + ' 条（旧库已备份）');
+      if (st) st.textContent = '已导入 ' + j.count + ' 条 · 来源 ' + (j.source || file.name);
+      memeMeta();
+    } else {
+      toast('❌ ' + ((j && j.why) || '导入失败'));
+      memeMeta();
+    }
   }).catch(function (e) { toast('❌ ' + e.message); memeMeta(); });
 }
-function memeLoad() {
-  memeApi('/api/memes').then(function (j) { memeRender(j && j.items); }).catch(function () {});
-}
-// 🆕 2026-10-23 面板只保留「改」：点编辑弹自绘输入框，改含义（自动条目）或接法（手动条目）
+// 拖拽导入（和图库页同款投放区交互）
 document.addEventListener('click', function (ev) {
-  var ed = ev.target && ev.target.closest ? ev.target.closest('[data-memeedit]') : null;
-  if (!ed) return;
-  ev.preventDefault();
-  var id = ed.getAttribute('data-memeedit');
-  var field = ed.getAttribute('data-field') || 'reply';
-  var cur = ed.getAttribute('data-cur') || '';
-  uiPrompt(field === 'meaning' ? '改一下这句的含义' : '改一下它该怎么接（多个用 | 分隔）', cur).then(function (v) {
-    if (v == null) return;
-    var patch = {}; patch[field] = v;
-    patch.id = id;
-    memeApi('/api/memes/edit', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    }).then(function (j) {
-      if (j && j.ok) { toast('✅ 已改'); memeLoad(); } else toast('❌ ' + ((j && j.why) || '失败'));
-    }).catch(function (e) { toast('❌ ' + e.message); });
+  var d = ev.target && ev.target.closest ? ev.target.closest('#memeDrop') : null;
+  if (d) { ev.preventDefault(); memePick(); }
+});
+document.addEventListener('keydown', function (ev) {
+  if ((ev.key === 'Enter' || ev.key === ' ') && document.activeElement &&
+      document.activeElement.id === 'memeDrop') { ev.preventDefault(); memePick(); }
+});
+(function bindMemeDrop() {
+  var drop = document.getElementById('memeDrop');
+  var inp = document.getElementById('memeFile');
+  if (inp) inp.addEventListener('change', function () { if (inp.files && inp.files[0]) memeImport(inp.files[0]); inp.value = ''; });
+  if (!drop) return;
+  ['dragenter', 'dragover'].forEach(function (t) {
+    drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add('dragging'); });
   });
-});
-document.addEventListener('click', function (ev) {
-  var tg = ev.target && ev.target.closest ? ev.target.closest('[data-memetoggle]') : null;
-  if (tg) {
-    ev.preventDefault();
-    var on = tg.getAttribute('data-on') === '1';
-    memeApi('/api/memes/toggle', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: tg.getAttribute('data-memetoggle'), enabled: !on }),
-    }).then(function (j) { if (j && j.ok) memeLoad(); else toast('❌ ' + ((j && j.why) || '失败')); });
-    return;
-  }
-  var dl = ev.target && ev.target.closest ? ev.target.closest('[data-memedel]') : null;
-  if (dl) {
-    ev.preventDefault();
-    var id = dl.getAttribute('data-memedel');
-    uiConfirm('删掉这条梗？').then(function (ok) {
-      if (!ok) return;
-      memeApi('/api/memes/delete', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: id }),
-      }).then(function (j) { if (j && j.ok) { toast('已删除'); memeLoad(); } else toast('❌ ' + ((j && j.why) || '失败')); });
-    });
-  }
-});
-if (document.getElementById('memeList')) { memeLoad(); memeMeta(); }
+  ['dragleave', 'drop'].forEach(function (t) {
+    drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.remove('dragging'); });
+  });
+  drop.addEventListener('drop', function (e) {
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) memeImport(f);
+  });
+})();
+if (document.getElementById('memeStat')) memeMeta();
 
 initPages();
 

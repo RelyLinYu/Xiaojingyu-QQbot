@@ -182,17 +182,101 @@ async function sync({ max = 1200, all = false, dry = false } = {}) {
   return result;
 }
 
-module.exports = { API, META_FILE, sync, pull, toEntry, metaLoad, metaSave };
+module.exports = { API, META_FILE, sync, pull, toEntry, metaLoad, metaSave, importFromJson, syncToFile };
+
+// ============================================================
+//  🆕 2026-11-19 纯文件导入：把一个 JSON（cnmeme 原始导出 或 本项目格式）整库替换进来
+//  用户要求「完全靠导入，禁止增删改查」⇒ 文件即事实来源，导入 = 替换 + 先备份。
+// ============================================================
+function pickList(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && Array.isArray(parsed.items)) return parsed.items;
+  if (parsed && Array.isArray(parsed.memes)) return parsed.memes;
+  return null;
+}
+
+function importFromJson(parsed, opt) {
+  const name = (opt && opt.name) || 'meme-import.json';
+  const list = pickList(parsed);
+  if (!list) return { ok: false, why: '文件里没有 items（要 {items:[…]} 或裸数组）' };
+  if (!list.length) return { ok: false, why: '文件是空的（0 条）' };
+  const out = [];
+  const seen = new Set();
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    let e = null;
+    if (Array.isArray(raw.triggers) && raw.triggers.length) {
+      // 本项目格式：原样保留（含 fixed/echo/接法）
+      const triggers = raw.triggers.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 6);
+      if (!triggers.length) continue;
+      e = {
+        id: String(raw.id || ('f' + triggers[0].length + out.length)),
+        triggers: triggers,
+        reply: String(raw.reply || '').slice(0, 200),
+        meaning: String(raw.meaning || '').slice(0, 200),
+        when: String(raw.when || '').slice(0, 80),
+        fixed: !!raw.fixed, echo: !!raw.echo,
+        from: raw.from || '', to: raw.to || '',
+        enabled: raw.enabled !== false,
+        origin: raw.origin || 'file',
+        count: Number(raw.count) || 0,
+        ts: Date.now(),
+      };
+    } else {
+      // cnmeme 格式：标题/别名/关键词 → 触发词，summary → 释义
+      e = toEntry(raw);
+    }
+    if (!e || !e.triggers.length) continue;
+    const k = String(e.triggers[0]).toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(e);
+    if (out.length >= 5000) break;
+  }
+  if (!out.length) return { ok: false, why: '一条都没解析出来（格式对不上？）' };
+  // 导入前先留一份完整备份（用户随时能改文件重导）
+  let backup = '';
+  try {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    backup = path.join(path.dirname(memes.FILE), 'meme-backup-' + ts + '.json');
+    if (fs.existsSync(memes.FILE)) fs.copyFileSync(memes.FILE, backup);
+  } catch (e) { backup = ''; }
+  memes.save(out);
+  const meta = metaLoad();
+  meta.source = 'file:' + name;
+  meta.count = out.length;
+  meta.lastImport = new Date().toISOString();
+  metaSave(meta);
+  return { ok: true, count: out.length, source: 'file:' + name, backup: backup ? path.basename(backup) : '' };
+}
+
+// CLI 用：把在线词库拉下来写成**一个可导入的 JSON 文件**（不直接改库）
+async function syncToFile({ out, max = 1200 } = {}) {
+  const items = await pull({ max });
+  const target = out || path.join(path.dirname(memes.FILE), 'meme-import.json');
+  fs.writeFileSync(target + '.tmp', JSON.stringify({ items }, null, 1));
+  fs.renameSync(target + '.tmp', target);
+  return { ok: true, file: target, items: items.length, partial: !!items.partial };
+}
 
 // CLI
 if (require.main === module) {
-  const argv = process.argv.slice(2);
-  const has = (k) => argv.includes(k);
-  const num = (k, d) => {
-    const i = argv.indexOf(k);
-    return i >= 0 ? Number(argv[i + 1]) || d : d;
-  };
-  sync({ all: has('--all'), dry: has('--dry'), max: num('--max', 1200) })
-    .then((r) => console.log(JSON.stringify(r, null, 2)))
-    .catch((e) => { console.error('同步失败：' + e.message); process.exit(1); });
+  // 简单但正确的参数解析：`--flag` 与 `--key value` 分开记（第一版把 --to-file 后面的 --max 当成了 out 值）
+  const args = process.argv.slice(2);
+  const flags = new Set();
+  const vals = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.indexOf('--') !== 0) continue;
+    const nx = args[i + 1];
+    if (nx !== undefined && nx.indexOf('--') !== 0) { vals[a.slice(2)] = nx; i++; }
+    else flags.add(a.slice(2));
+  }
+  const max = Number(vals.max) || 1200;
+  const run = (flags.has('to-file') || vals.out)
+    // 🆕 2026-11-19：只**生成一个可导入的 JSON 文件**（库现在只由面板的导入动作改）
+    ? syncToFile({ out: vals.out || '', max: max })
+    : sync({ all: flags.has('all'), dry: flags.has('dry'), max: max });
+  run.then((r) => console.log(JSON.stringify(r, null, 2)))
+    .catch((e) => { console.error('失败：' + e.message); process.exit(1); });
 }
