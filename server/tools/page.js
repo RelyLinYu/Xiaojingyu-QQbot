@@ -2558,8 +2558,14 @@ function memeMeta() {
     if (!s || !j) return;
     var src = document.getElementById('memeSrc');
     if (src && j.source) src.textContent = j.source;
-    var when = j.lastSync ? new Date(j.lastSync).toLocaleString('zh-CN') : '还没同步过';
-    s.textContent = '共 ' + (j.total || 0) + ' 条 · 最后同步 ' + when;
+    // 🔴 2026-11-19 修：后端字段叫 lastImport（老字段是 lastSync），这里原来只认 lastSync
+    //   ⇒ 明明导了 6791 条，页面却显示"还没同步过"（用户截图指出的就是这个）。
+    var ts = j.lastImport || j.lastSync || '';
+    var when = ts ? new Date(ts).toLocaleString('zh-CN') : '还没导入过';
+    var from = String(j.source || '').replace(/^file:/, '');
+    s.textContent = '库内 ' + (j.total || 0) + ' 条'
+      + (from ? ' · 上次导入的文件：' + from : '')
+      + ' · ' + when;
   }).catch(function () {});
 }
 // 🆕 2026-11-19 用户：「我的意思是改成astrbot那种完全靠导入的，禁止增删改查之类的，就是用文件导入的方式」

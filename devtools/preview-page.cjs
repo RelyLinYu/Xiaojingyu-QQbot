@@ -161,6 +161,13 @@ function stubFetch(html) {
           text:function(){ return Promise.resolve(JSON.stringify({ ok:true, days:days })); } });
       }
       // 🆕 2026-10-11：POST /api/settings 也桩住（否则 file:// 下真 fetch 失败，看不到"已保存"提示）
+      // 🆕 2026-11-19 梗库 meta 桩数据：不桩的话会落到 real fetch，file:// 下直接 Failed to fetch，
+      //   状态行永远停在「…」——之前就这么把自己骗过去了。
+      if (url === '/api/memes/meta') {
+        var metaMock = { ok:true, source:'file:astrbot-memewiki.json', lastImport:'2026-11-19T08:32:46.801Z', total:6791 };
+        return Promise.resolve({ ok:true, status:200, json:function(){ return Promise.resolve(metaMock); },
+                                 text:function(){ return Promise.resolve(JSON.stringify(metaMock)); } });
+      }
       if (url === '/api/settings') {
         return Promise.resolve({ ok:true, status:200,
           json:function(){ return Promise.resolve({ ok:true, applied:['budgetTotal'], needRestart:false,
